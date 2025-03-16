@@ -37,8 +37,8 @@ read commit_message
 echo "Committing changes..."
 git commit -m "$commit_message"
 
-# Push changes
-echo "Pushing changes to remote repository..."
-git push -u origin main
+# Force push changes to completely replace remote repository
+echo "Force pushing changes to remote repository (completely replacing remote content)..."
+git push -f -u origin main
 
-echo "Done! Your changes have been pushed to https://github.com/UliKonstantin/SubspaceNet_Update" 
+echo "Done! Your remote repository has been completely replaced with your local changes." 
