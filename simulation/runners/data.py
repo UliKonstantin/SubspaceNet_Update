@@ -415,11 +415,15 @@ class TrajectoryDataHandler:
                     source_number=num_sources
                 )[0]
                 
+                # Simply convert to tensor without forcing any particular type
+                # Let PyTorch handle tensor types internally
+                X_tensor = torch.tensor(X)
+                
                 # Get ground truth labels
                 Y = self.samples_model.get_labels()
                 
                 # Store data for this step
-                sample_time_series.append(X)
+                sample_time_series.append(X_tensor)
                 sample_labels.append(Y)
                 sample_sources.append(num_sources)
             
@@ -428,8 +432,8 @@ class TrajectoryDataHandler:
             labels.append(sample_labels)
             sources_num.append(sample_sources)
         
-        # Convert lists to tensors where appropriate
-        time_series = [torch.stack([torch.tensor(x) for x in traj]) for traj in time_series]
+        # Convert lists to tensors where appropriate (no need to convert again since we already created tensors)
+        time_series = [torch.stack(traj) for traj in time_series]
         
         return time_series, labels, sources_num
     
