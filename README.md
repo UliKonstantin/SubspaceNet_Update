@@ -1,203 +1,130 @@
 # SubspaceNet Configuration Framework
 
+A simplified configuration framework for working with the DCD-MUSIC direction-of-arrival (DOA) estimation library.
+
 ## Overview
 
-This repository is a wrapper around the [DCD-MUSIC](https://github.com/Sensing-Intelligent-System/DCD-MUSIC) project, providing a simplified configuration framework for running DOA (Direction of Arrival) and range estimation experiments.
+This framework provides a streamlined way to configure and run experiments with the DCD-MUSIC library. It offers:
 
-The goal of this framework is to maintain all the powerful components of the original DCD-MUSIC project but make it more accessible and easier to configure for specific needs. Rather than modifying the source code directly, this wrapper provides a layer of abstraction that allows for simple configuration via YAML files.
+- A centralized configuration system based on YAML files
+- Type-safe validation using Pydantic models
+- Command-line interface for running experiments with parameter overrides
+- Experiment management with result tracking
+- Visualization and evaluation tools
 
-## Features
-
-- **Clean Configuration System**: Centralized configuration management using a single YAML file
-- **Type Validation**: Automatic validation of configuration parameters using Pydantic models
-- **Command-Line Interface**: Simple CLI for running experiments, generating configuration files, and more
-- **Experiment Management**: Automatic tracking of experiment results and reproducibility
-- **Interoperability**: Full compatibility with the original DCD-MUSIC codebase
-
-## Getting Started
-
-### Prerequisites
-
-- Python 3.8+
-- PyTorch
-- All requirements from the original DCD-MUSIC project
-
-### Installation
+## Installation
 
 1. Clone this repository and the DCD-MUSIC submodule:
-
 ```bash
-git clone --recurse-submodules https://github.com/your-username/SubspaceNet_Update.git
-cd SubspaceNet_Update
+git clone --recursive [repository-url]
 ```
 
-2. Install the requirements:
-
+2. Install the required dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-## Working with Configurations
+## Usage
 
-The framework uses a centralized configuration system based on YAML files. All experiment parameters are defined in these configuration files.
+### Running an Experiment
 
-### Default Configuration
-
-A default configuration file exists at `config/defaults/default_config.yaml`. This file contains sensible defaults for all parameters and is used as a template for new configurations.
-
-To view the default configuration:
+To run an experiment with the default configuration:
 
 ```bash
-python main.py show-default
+python main.py run
 ```
 
-### Creating a New Configuration
-
-To create a new configuration based on the defaults:
+To use a specific configuration file:
 
 ```bash
-python main.py init -o my_config.yaml
+python main.py run --config configs/my_experiment.yaml
 ```
 
-This will generate a new configuration file at the specified path, which you can then edit to customize your experiment.
-
-### Modifying the Default Configuration
-
-You can modify the default configuration in two ways:
-
-1. **Edit the file directly**: Open `config/defaults/default_config.yaml` in your text editor
-
-2. **Use the CLI**:
+To override configuration parameters:
 
 ```bash
-# Set a specific parameter
-python main.py set-default system_model.N 64
-python main.py set-default training.epochs 100
-python main.py set-default system_model.snr 15.0
-
-# Update the entire default configuration from another file
-python main.py update-defaults my_custom_config.yaml
+python main.py run --override system_model.snr=15 training.learning_rate=0.001
 ```
 
-### Resetting the Default Configuration
-
-If you want to reset the default configuration to factory settings:
+To specify an output directory:
 
 ```bash
-python main.py default-location --reset
+python main.py run --output experiments/results/my_experiment
 ```
 
-## Running Experiments
+### Displaying Configuration
 
-### Basic Usage
-
-To run an experiment with a configuration file:
+To display the current configuration:
 
 ```bash
-python main.py run my_config.yaml
+python main.py show
 ```
 
-### Overriding Parameters
-
-You can override specific parameters directly from the command line:
+With overrides:
 
 ```bash
-python main.py run my_config.yaml -o system_model.snr=20 -o training.epochs=100
+python main.py show --override system_model.snr=15
 ```
 
-This allows for quick parameter sweeps without creating multiple configuration files.
+### Saving Configuration
 
-## Complete CLI Reference
-
-The framework provides a comprehensive command-line interface:
+To save a configuration to a new file:
 
 ```bash
-# Show all available commands
-python main.py --help
-
-# View the default configuration
-python main.py show-default
-
-# See where the default configuration is stored
-python main.py default-location
-
-# Create a new configuration file from defaults
-python main.py init -o my_config.yaml
-
-# View a configuration file
-python main.py show my_config.yaml
-
-# View just one section of a configuration file
-python main.py show my_config.yaml -s system_model
-
-# Validate a configuration file
-python main.py validate my_config.yaml
-
-# Convert a configuration file to another format
-python main.py convert my_config.yaml -f json -o my_config.json
-
-# Set a value in the default configuration
-python main.py set-default parameter.path value
-
-# Update the default configuration from a file
-python main.py update-defaults source_config.yaml
-
-# Run an experiment
-python main.py run my_config.yaml
+python main.py save --output configs/new_config.yaml
 ```
 
 ## Configuration Structure
 
-The configuration system is designed to be hierarchical and type-safe, organized into the following main sections:
+The configuration is organized into the following sections:
 
-### Main Configuration Sections
+- `system_model`: Settings for the antenna array and signal model
+- `dataset`: Data generation parameters
+- `model`: Model type and specific parameters
+- `training`: Training settings including optimizer and learning rate
+- `simulation`: Simulation parameters
+- `evaluation`: Evaluation metrics and visualization settings
 
-- **system_model**: Parameters for the system model (antennas, sources, SNR, etc.)
-- **dataset**: Parameters for dataset generation and loading
-- **model**: Parameters for model selection and configuration
-- **training**: Parameters for model training
-- **simulation_commands**: Control which parts of the experiment to run
-- **evaluation**: Parameters for model evaluation
+Example:
 
-### Example: Configuring a Typical Experiment
+```yaml
+system_model:
+  N: 127   # Number of antennas
+  M: 2     # Number of sources
+  T: 100   # Number of snapshots
+  snr: 10  # Signal-to-noise ratio (dB)
+  array_type: "ULA"
+  
+dataset:
+  dataset_type: "src.data"
+  dataset_class: "DOADataset"
+  num_samples: 1000
+  
+# ... other sections
+```
 
-Here's a typical workflow for setting up and running an experiment:
+## Directory Structure
 
-1. **Create a configuration file**:
-   ```bash
-   python main.py init -o experiments/my_experiment.yaml
-   ```
+- `configs/`: Configuration YAML files
+- `config/`: Configuration framework Python modules
+- `experiments/`: Experiment execution and results
+- `DCD_MUSIC/`: The DCD-MUSIC library (submodule)
 
-2. **Edit the configuration file** to set up your experiment:
-   ```yaml
-   # In experiments/my_experiment.yaml
-   system_model:
-     N: 64                    # Use 64 antennas
-     snr: 15.0                # Set SNR to 15 dB
-   
-   training:
-     epochs: 100              # Train for 100 epochs
-     batch_size: 64           # Use batch size of 64
-   
-   simulation_commands:
-     train_model: true        # Enable model training
-     save_model: true         # Save the trained model
-   ```
+## Extending the Framework
 
-3. **Run the experiment**:
-   ```bash
-   python main.py run experiments/my_experiment.yaml
-   ```
+### Adding New Models
 
-4. **Try a parameter variation**:
-   ```bash
-   python main.py run experiments/my_experiment.yaml -o system_model.snr=20
-   ```
+To add support for a new model:
+
+1. Update the `config/schema.py` file to include the new model's parameters
+2. Modify the `create_model` function in `config/factory.py`
+
+### Adding New Metrics
+
+To add new evaluation metrics:
+
+1. Update the `_calculate_metrics` method in `experiments/runner.py`
 
 ## License
 
-This project is licensed under the  License - see the LICENSE file for details.
-
-## Acknowledgments
-
-This project is a wrapper around the [DCD-MUSIC](https://github.com/Sensing-Intelligent-System/DCD-MUSIC) project, which provides the underlying algorithms and models for DOA and range estimation. 
+[Add license information here] 

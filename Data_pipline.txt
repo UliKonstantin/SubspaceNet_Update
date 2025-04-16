@@ -1,0 +1,175 @@
+# SubspaceNet Trajectory Data Pipeline
+
+This document explains the data generation and processing pipeline for trajectory-based DOA (Direction of Arrival) estimation in the SubspaceNet framework.
+
+## Overview
+
+The data pipeline creates synthetic trajectory datasets for training and evaluating DOA estimation models. It simulates moving signal sources in 2D space and generates corresponding sensor array observations over time.
+
+```
+┌───────────────────┐     ┌───────────────────┐     ┌───────────────────┐
+│ Configuration     │     │ Trajectory        │     │ Sensor Array      │
+│ Parameters        │────▶│ Generation        │────▶│ Observation       │
+└───────────────────┘     └───────────────────┘     └───────────────────┘
+                                                              │
+                                                              ▼
+┌───────────────────┐     ┌───────────────────┐     ┌───────────────────┐
+│ Neural Network    │◀────│ Dataset           │◀────│ Labels and        │
+│ Training          │     │ Creation          │     │ Feature Extraction│
+└───────────────────┘     └───────────────────┘     └───────────────────┘
+```
+
+## Data Pipeline Components
+
+### 1. Trajectory Generation (`_generate_trajectories`)
+
+**Purpose**: Create synthetic movement patterns for signal sources in 2D space.
+
+**Inputs**:
+- `samples_size`: Number of distinct trajectories (dataset length)
+- `trajectory_length`: Number of time steps in each trajectory
+- `trajectory_type`: Movement pattern (RANDOM, RANDOM_WALK, LINEAR, CIRCULAR, STATIC)
+- Custom parameters (optional)
+
+**Process**:
+- Determines the number of sources for each trajectory
+- Creates angle trajectories based on the specified pattern
+- Creates distance trajectories (starting at 20 units, increasing by 1 unit per step)
+- Generates verification plots for debugging
+
+**Outputs** (`trajectory_data`):
+- A tuple containing:
+  - Angle trajectories tensor: Shape `[samples_size, trajectory_length, max_sources]`
+  - Distance trajectories tensor: Shape `[samples_size, trajectory_length, max_sources]`
+  - List of sources per trajectory: Length `samples_size`
+
+### 2. Observation Creation (`_create_observations`)
+
+**Purpose**: Convert trajectory data into sensor array observations.
+
+**Inputs**:
+- `trajectory_data`: Output from the trajectory generation step
+
+**Process**:
+- For each trajectory and time step:
+  - Sets the angles and distances for the signal sources
+  - Creates sensor array observations using the signal model
+  - Extracts ground truth labels
+
+**Outputs**:
+- `time_series`: List of trajectory tensors, each with shape `[trajectory_length, num_antennas, num_snapshots]`
+- `labels`: List of label lists, each containing `trajectory_length` entries of DOA values
+- `sources_num`: List of source counts for each trajectory step
+
+### 3. Dataset Creation (`TrajectoryDataset`)
+
+**Purpose**: Organize the generated data into a format suitable for training models.
+
+**Inputs**:
+- `time_series`, `labels`, and `sources_num` from the observation creation step
+
+**Features**:
+- Implements PyTorch's Dataset interface for integration with DataLoader
+- Supports loading/saving datasets to HDF5 files for efficient storage
+- Custom collation function to handle variable-length trajectories
+- Built-in train/validation splitting
+
+**Data Access**:
+- Single item access: Returns a complete trajectory with all its time steps
+- Batch access: Returns batches of complete trajectories, preserving time ordering
+
+## Data Structures
+
+### Trajectory Data
+- **Angle Trajectories**: Tensor of shape `[samples_size, trajectory_length, max_sources]`
+- **Distance Trajectories**: Tensor of shape `[samples_size, trajectory_length, max_sources]`
+- **Sources Per Trajectory**: List of length `samples_size`
+
+### Observation Data
+- **Time Series**: List of tensors, each with shape `[trajectory_length, num_antennas, num_snapshots]`
+- **Labels**: List of lists, containing DOA values for each trajectory step
+- **Sources Count**: List of lists, containing the number of sources at each trajectory step
+
+### Dataset Structure
+When loaded into a DataLoader:
+- **Batch of Trajectories**: Tensor of shape `[batch_size, max_trajectory_length, num_antennas, num_snapshots]`
+- **Batch of Sources Count**: Tensor of shape `[batch_size, max_trajectory_length]`
+- **Batch of Labels**: Tensor of shape `[batch_size, max_trajectory_length, max_sources]`
+
+## Trajectory Types
+
+The pipeline supports multiple trajectory patterns:
+
+1. **RANDOM**: Completely random angles at each time step
+2. **RANDOM_WALK**: Random steps with continuity between time steps
+3. **LINEAR**: Linear interpolation between random start and end points
+4. **CIRCULAR**: Circular movement patterns with customizable parameters
+5. **STATIC**: Fixed position throughout the trajectory
+6. **CUSTOM**: User-defined trajectory generation function
+
+## Key Implementation Notes
+
+1. **Trajectory Integrity**: When shuffling in DataLoader, complete trajectories are shuffled as units, preserving the temporal relationships within each trajectory.
+
+2. **Variable Length Handling**: The custom collation function handles different trajectory lengths and varying numbers of sources by padding to create uniform tensors.
+
+3. **Memory Efficiency**: Supports both in-memory processing and disk-based storage with HDF5 files.
+
+4. **Distance Model**: All trajectories start at a fixed distance (20 units) from the origin and move outward at a constant rate (1 unit per step).
+
+5. **Verification**: Built-in plotting functionality visualizes trajectories to verify correct generation.
+
+## Example Usage
+
+```python
+from simulation.runners.data import TrajectoryDataHandler
+from DCD_MUSIC.src.system_model import SystemModelParams
+from config.schema import TrajectoryType
+from pathlib import Path
+
+# Create system parameters
+sys_params = SystemModelParams(
+    N=8,                # Number of antennas
+    T=100,              # Number of snapshots
+    M=2,                # Number of sources
+    field_type="near",  # Near-field model
+    doa_range=60        # Angle range (-30° to +30°)
+)
+
+# Create data handler
+handler = TrajectoryDataHandler(sys_params)
+
+# Generate synthetic dataset
+dataset, _ = handler.create_dataset(
+    samples_size=100,            # 100 different trajectories
+    trajectory_length=20,        # Each trajectory has 20 time steps
+    trajectory_type=TrajectoryType.RANDOM_WALK,
+    save_dataset=True,
+    dataset_path=Path("experiments/data")
+)
+
+# Create data loaders for training
+train_loader, val_loader = dataset.get_dataloaders(
+    batch_size=16, 
+    validation_split=0.2
+)
+
+# Use in training loop
+for epoch in range(num_epochs):
+    for batch_idx, (trajectories, sources_num, labels) in enumerate(train_loader):
+        # trajectories: [batch_size, max_traj_length, N, T]
+        # Pass to model, compute loss, etc.
+        ...
+```
+
+## Appendix: Data Dimensions
+
+| Variable | Shape | Description |
+|----------|-------|-------------|
+| `angle_trajectories` | `[samples_size, trajectory_length, max_sources]` | Angle of each source at each time step |
+| `distance_trajectories` | `[samples_size, trajectory_length, max_sources]` | Distance of each source at each time step |
+| `time_series` (list) | List of `samples_size` tensors | Sensor observations for each trajectory |
+| `time_series[i]` | `[trajectory_length, num_antennas, num_snapshots]` | Single trajectory observations |
+| `labels` | List of `samples_size` lists | Ground truth labels for each trajectory |
+| `sources_num` | List of `samples_size` lists | Number of sources at each time step |
+| DataLoader batch | `[batch_size, max_traj_length, num_antennas, num_snapshots]` | Batch of trajectories with padding |
