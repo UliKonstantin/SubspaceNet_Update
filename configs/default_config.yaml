@@ -1,0 +1,72 @@
+system_model:
+  N: 8  # number of antennas
+  M: 3   # number of sources
+  T: 200  # number of snapshots
+  snr: 0  # signal-to-noise ratio in dB
+  field_type: "far"  # "near" or "far"
+  signal_nature: "non-coherent"  # "non-coherent" or "coherent"
+  signal_type: "narrowband"  # "narrowband" only supported currently
+  wavelength: 0.06  # carrier wavelength in meters
+  eta: 0.0  # steering vector uniform error variance
+  bias: 0  # steering vector bias error
+  sv_noise_var: 0.0  # steering vector additive gaussian error noise variance
+  doa_range: 60  # range of DOA values [-doa_range, doa_range]
+  doa_resolution: 1  # resolution of DOA values in degrees
+  max_range_ratio_to_limit: 0.5  # ratio of maximum range to Fraunhofer distance
+  range_resolution: 1  # resolution of range values in meters
+
+dataset:
+  samples_size: 4096  # overall dataset size
+  train_test_ratio: 1  # ratio between train and test datasets
+  create_data: false  # whether to create new data or use existing data
+  save_dataset: false  # whether to save the dataset
+  true_doa_train: null  # predefined angles for training (null for random)
+  true_range_train: null  # predefined ranges for training (null for random)
+  true_doa_test: null  # predefined angles for testing (null for random)
+  true_range_test: null  # predefined ranges for testing (null for random)
+
+model:
+  type: "SubspaceNet"  # SubspaceNet, DCD-MUSIC
+  params:
+    diff_method: "esprit"  # esprit, music_1D, music_2D, beamformer
+    train_loss_type: "music_spectrum"  # music_spectrum, rmspe
+    tau: 8  # number of autocorrelation lags
+    field_type: "Far"  # Far, Near
+    regularization: "null"  # aic, mdl, threshold, null
+    variant: "small"  # big, small
+    norm_layer: false
+    batch_norm: false
+
+training:
+  enabled: True  # whether training is enabled
+  epochs: 10
+  batch_size: 32
+  optimizer: "Adam"  # Adam, SGD
+  scheduler: "ReduceLROnPlateau"  # StepLR, ReduceLROnPlateau
+  learning_rate: 0.001
+  weight_decay: 1e-9
+  step_size: 50
+  gamma: 0.5
+  training_objective: "angle"  # angle, range, (angle, range)
+  use_wandb: False
+  simulation_name: None
+  save_checkpoint: true  # whether to save model checkpoints during training
+
+simulation:
+  train_model: true
+  evaluate_model: true
+  load_model: false
+  save_model: false
+  plot_results: true
+  save_plots: false
+
+evaluation:
+  methods:
+    - "2D-MUSIC"
+    - "Beamformer"
+
+trajectory:
+  enabled: false
+  trajectory_type: "random_walk"
+  trajectory_length: 10
+  save_trajectory: false 
