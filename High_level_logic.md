@@ -1,3 +1,4 @@
+```mermaid
 graph TD
     %% ===== Diagram 1: Main & Configuration Flow =====
 
