@@ -81,5 +81,7 @@ graph TD
     %% Connections between modules with return values on arrows
     M_CallConfig --> CH_Setup
     CH_CallFactory --> F_CreateComponents
-    F_Package -- "components dict" --> CH_CallFactory %% Arrow points back to caller, label indicates return
-    CH_CallFactory -- "config_obj, components, output_dir" --> M_Proceed %% Arrow points back to caller, label indicates return
+    F_Package -- "components dict" --> CH_CallFactory
+%% Arrow points back to caller, label indicates return
+    CH_CallFactory -- "config_obj, components, output_dir" --> M_Proceed
+ %% Arrow points back to caller, label indicates return
