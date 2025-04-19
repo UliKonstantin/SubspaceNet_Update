@@ -1,3 +1,4 @@
+```mermaid
 graph TD
     %% Define Styles
     classDef Orchestrator fill:#ddeeff,stroke:#6699cc,stroke-width:2px,font-weight:bold %% Style for main.py and core.py
