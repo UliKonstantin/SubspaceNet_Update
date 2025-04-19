@@ -1,3 +1,4 @@
+```mermaid
 graph TD
     %% ===== Diagram 2: Core Simulation Logic Flow =====
 
