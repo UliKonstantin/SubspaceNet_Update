@@ -1,3 +1,4 @@
+```mermaid
 graph TD
     %% ===== Configuration & Factory Flow (Simplified Returns) =====
 
