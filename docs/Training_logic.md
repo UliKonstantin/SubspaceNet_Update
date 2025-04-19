@@ -1,7 +1,4 @@
----
-config:
-  layout: fixed
----
+```mermaid
 flowchart TD
  subgraph s1["trainer.train()"]
     direction TB
