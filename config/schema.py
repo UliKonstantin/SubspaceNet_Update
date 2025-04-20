@@ -106,6 +106,14 @@ class TrajectoryConfig(BaseModel):
     trajectory_type: TrajectoryType = TrajectoryType.RANDOM
     trajectory_length: int = 10
     save_trajectory: bool = False
+    random_walk_std_dev: float = 1.0  # Standard deviation for random walk angles (degrees)
+
+
+class KalmanFilterConfig(BaseModel):
+    """Kalman Filter configuration parameters."""
+    process_noise_std_dev: Optional[float] = None  # If None, uses trajectory.random_walk_std_dev
+    measurement_noise_std_dev: float = 1e-3  # Near-zero for initial implementation (identity observation model)
+    initial_covariance: float = 1.0  # Initial state covariance (uncertainty)
 
 
 class Config(BaseModel):
@@ -116,7 +124,8 @@ class Config(BaseModel):
     training: TrainingConfig = TrainingConfig()
     simulation: SimulationConfig = SimulationConfig()
     evaluation: EvaluationConfig = EvaluationConfig()
-    trajectory: TrajectoryConfig = TrajectoryConfig() 
+    trajectory: TrajectoryConfig = TrajectoryConfig()
+    kalman_filter: KalmanFilterConfig = KalmanFilterConfig()
 
 
     #missing: critirion, balance factor, sequential_dataset_train, sequential_dataset_test, evaluation params, simulation_commands

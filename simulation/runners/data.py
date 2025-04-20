@@ -192,13 +192,21 @@ class TrajectoryDataHandler:
                     )
                 )
                 
-                # Random walk with step size proportional to range
-                step_size = (angle_max - angle_min) / 20.0
+                # Get random walk step size from config
+                random_walk_std_dev = 1.0  # Default value
+                if self.config and hasattr(self.config.trajectory, 'random_walk_std_dev'):
+                    random_walk_std_dev = self.config.trajectory.random_walk_std_dev
+                    
+                logger.info(f"Using random walk with std dev: {random_walk_std_dev}")
                 
+                # Apply state-space model: θ_k = θ_{k-1} + w_k
+                # where w_k is zero-mean Gaussian noise with std_dev = random_walk_std_dev
                 for t in range(1, trajectory_length):
-                    # Random step for each source
-                    steps = torch.randn(num_sources) * step_size
-                    angle_trajectories[i, t, :num_sources] = angle_trajectories[i, t-1, :num_sources] + steps
+                    # Generate process noise
+                    w_k = torch.randn(num_sources) * random_walk_std_dev
+                    
+                    # Update angle using state transition: θ_k = θ_{k-1} + w_k
+                    angle_trajectories[i, t, :num_sources] = angle_trajectories[i, t-1, :num_sources] + w_k
                     
                     # Ensure angles stay within bounds
                     angle_trajectories[i, t, :num_sources] = torch.clamp(

@@ -103,7 +103,7 @@ class Simulation:
         Execute the data preparation pipeline.
         
         Creates or loads datasets based on configuration and
-        sets up dataloaders for training and evaluation.
+        sets up dataloaders for training, validation, and testing.
         """
         logger.info("Starting data pipeline")
         
@@ -135,7 +135,7 @@ class Simulation:
         
         self.dataset = dataset
         
-        # Create dataloaders
+        # Create dataloaders for training and validation
         logger.info("Creating dataloaders with batch size: %d", self.config.training.batch_size)
         self.train_dataloader, self.valid_dataloader = dataset.get_dataloaders(
             batch_size=self.config.training.batch_size,
@@ -148,6 +148,39 @@ class Simulation:
         # Store dataloaders in components
         self.components["train_dataloader"] = self.train_dataloader
         self.components["valid_dataloader"] = self.valid_dataloader
+        
+        # Create test dataset (1/4 of training dataset size)
+        logger.info("Creating test dataset (1/4 of training size)")
+        test_samples_size = self.config.dataset.samples_size // 4
+        
+        if self.config.trajectory.enabled:
+            if self.trajectory_handler:
+                test_dataset, _ = self._create_trajectory_dataset_for_testing(test_samples_size)
+            else:
+                logger.error("Trajectory mode enabled but no trajectory_handler found for testing")
+                return
+        else:
+            # Create standard test dataset
+            test_dataset = self._create_standard_test_dataset(test_samples_size)
+        
+        if test_dataset is None:
+            logger.error("Failed to create test dataset")
+            return
+            
+        # Create test dataloader directly
+        from torch.utils.data import DataLoader
+        self.test_dataloader = DataLoader(
+            test_dataset, 
+            batch_size=self.config.training.batch_size, 
+            shuffle=False,  # No shuffling for test data
+            # Add collate_fn if needed, especially for trajectory data
+            collate_fn=test_dataset._collate_trajectories if hasattr(test_dataset, '_collate_trajectories') else None
+        )
+        
+        logger.info(f"Created test dataloader with {len(self.test_dataloader)} batches")
+        
+        # Store test dataloader in components
+        self.components["test_dataloader"] = self.test_dataloader
         
     def _create_trajectory_dataset(self) -> Tuple[Any, Any]:
         """Create a dataset with trajectory support."""
@@ -275,10 +308,182 @@ class Simulation:
         logger.info("Training completed")
         
     def _run_evaluation_pipeline(self) -> None:
-        """Execute the evaluation pipeline."""
-        logger.info("Starting evaluation pipeline")
-        # Placeholder for evaluation implementation
+        """
+        Execute the evaluation pipeline.
         
+        Evaluates the model using trajectories for testing:
+        1. Uses the test dataloader with trajectory data
+        2. Loops through each trajectory and evaluates performance
+        3. Applies Kalman filtering for tracking predictions
+        4. Calculates and stores evaluation metrics
+        """
+        logger.info("Starting evaluation pipeline")
+        
+        if self.trained_model is None and self.model is not None:
+            logger.info("Using loaded model for evaluation")
+            self.trained_model = self.model
+        elif self.trained_model is None:
+            logger.error("No model available for evaluation")
+            return
+            
+        # Ensure model is in evaluation mode
+        self.trained_model.eval()
+        
+        # Check if we have test dataloader
+        if not hasattr(self, 'test_dataloader') or self.test_dataloader is None:
+            if self.valid_dataloader is not None:
+                logger.warning("No test dataloader available, using validation dataloader instead")
+                test_dataloader = self.valid_dataloader
+            else:
+                logger.error("No validation or test dataloader available for evaluation")
+                return
+        else:
+            test_dataloader = self.test_dataloader
+            
+        try:
+            logger.info("Evaluating model on trajectory test data")
+            
+            # Import necessary libraries
+            import torch
+            import numpy as np
+            from tqdm import tqdm
+            from simulation.kalman_filter import KalmanFilter1D
+            
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            
+            # Check if we're dealing with near-field model
+            is_near_field = hasattr(self.trained_model, 'field_type') and self.trained_model.field_type.lower() == "near"
+            if is_near_field:
+                error_msg = "Near-field option is not available in the current evaluation pipeline"
+                logger.error(error_msg)
+                self.results["evaluation_error"] = error_msg
+                return
+            
+            # Configure Kalman Filter parameters
+            # Get process noise from config (use random_walk_std_dev if process_noise_std_dev is not set)
+            kf_process_noise_std_dev = self.config.kalman_filter.process_noise_std_dev
+            if kf_process_noise_std_dev is None:
+                kf_process_noise_std_dev = self.config.trajectory.random_walk_std_dev
+                logger.info(f"Using trajectory.random_walk_std_dev ({kf_process_noise_std_dev}) for KF process noise")
+            
+            # Calculate variances from standard deviations
+            kf_Q = kf_process_noise_std_dev ** 2
+            kf_R = self.config.kalman_filter.measurement_noise_std_dev ** 2
+            kf_P0 = self.config.kalman_filter.initial_covariance
+            
+            logger.info(f"Kalman Filter parameters: Q={kf_Q}, R={kf_R}, P0={kf_P0}")
+            
+            # Results container
+            trajectory_results = []
+            test_metrics = {}
+            total_loss = 0.0
+            total_samples = 0
+            
+            # Trajectory-level evaluation with Kalman filtering
+            with torch.no_grad():
+                for batch_idx, batch_data in enumerate(tqdm(test_dataloader, desc="Evaluating trajectories")):
+                    # Get batch data
+                    trajectories, sources_num, labels = batch_data
+                    batch_size, trajectory_length = trajectories.shape[0], trajectories.shape[1]
+                    
+                    # Process each trajectory separately
+                    for traj_idx in range(batch_size):
+                        # Extract single trajectory
+                        single_trajectory = trajectories[traj_idx].to(device)
+                        single_sources = sources_num[traj_idx].to(device)
+                        
+                        # Initialize results for this trajectory
+                        traj_preds = []
+                        traj_ground_truth = []
+                        traj_kf_preds = []  # Kalman filter predictions
+                        
+                        # Determine number of sources for this trajectory
+                        # For simplicity, we assume constant sources per trajectory
+                        num_sources = single_sources[0].item()
+                        
+                        # Get initial true angles for this trajectory
+                        initial_true_angles = labels[traj_idx, 0, :num_sources].cpu().numpy()
+                        
+                        # Initialize Kalman filters - one per source
+                        k_filters = [KalmanFilter1D(Q=kf_Q, R=kf_R, P0=kf_P0) for _ in range(num_sources)]
+                        for s_idx in range(num_sources):
+                            k_filters[s_idx].initialize_state(initial_true_angles[s_idx])
+                        
+                        # Process each step in the trajectory
+                        for step in range(trajectory_length):
+                            # Get data for current step
+                            step_data = single_trajectory[step].unsqueeze(0)  # Add batch dimension
+                            step_sources = single_sources[step].unsqueeze(0)
+                            
+                            # Extract angles (for far-field)
+                            step_angles = labels[traj_idx, step, :num_sources].unsqueeze(0).to(device)
+                            
+                            # Perform Kalman Filter prediction for each source
+                            kf_step_predictions = np.zeros(num_sources)
+                            for s_idx in range(num_sources):
+                                kf_step_predictions[s_idx] = k_filters[s_idx].predict()
+                            
+                            # Store KF predictions before update
+                            traj_kf_preds.append(kf_step_predictions.copy())
+                            
+                            # Model forward pass
+                            angles_pred, _, _ = self.trained_model(step_data, step_sources)
+                            
+                            # Store model predictions and ground truth
+                            traj_preds.append(angles_pred.cpu().numpy())
+                            traj_ground_truth.append(step_angles.cpu().numpy())
+                            
+                            # Update Kalman Filters with model predictions
+                            model_angles_step = angles_pred.squeeze().cpu().numpy()
+                            for s_idx in range(num_sources):
+                                # Get the measurement for this source
+                                measurement = model_angles_step[s_idx] if num_sources > 1 else model_angles_step
+                                # Update KF with model prediction
+                                k_filters[s_idx].update(measurement)
+                            
+                            # Calculate loss for metrics
+                            step_loss = torch.nn.functional.mse_loss(angles_pred, step_angles)
+                            
+                            # Accumulate loss
+                            total_loss += step_loss.item()
+                            total_samples += 1
+                        
+                        # Calculate metrics for this trajectory
+                        # TODO: Implement trajectory-specific metrics
+                        # (e.g., average prediction error, tracking stability)
+                        
+                        # Store trajectory results
+                        trajectory_results.append({
+                            'predictions': traj_preds,
+                            'ground_truth': traj_ground_truth,
+                            'kf_predictions': traj_kf_preds,
+                            'sources': single_sources.cpu().numpy()
+                        })
+                
+                # Calculate overall metrics
+                test_loss = total_loss / total_samples
+                test_metrics['loss'] = test_loss
+                
+                # TODO: Calculate additional metrics using trajectory_results
+                # (e.g., average trajectory tracking error, convergence time)
+            
+            # Store results
+            self.results["test_loss"] = test_loss
+            self.results["test_metrics"] = test_metrics
+            self.results["trajectory_results"] = trajectory_results
+            
+            # Log results
+            logger.info(f"Test loss: {test_loss:.6f}")
+            for metric_name, metric_value in test_metrics.items():
+                logger.info(f"Test {metric_name}: {metric_value:.6f}")
+            
+            logger.info(f"Evaluated {len(trajectory_results)} trajectories")
+            logger.info("Kalman filter applied to trajectory predictions")
+                
+        except Exception as e:
+            logger.exception(f"Error during evaluation: {e}")
+            self.results["evaluation_error"] = str(e)
+    
     def _save_results(self) -> None:
         """Save simulation results to the output directory."""
         logger.info(f"Saving results to {self.output_dir}")
@@ -337,4 +542,31 @@ class Simulation:
             # Store in components
             self.components["trajectory_handler"] = self.trajectory_handler
             
-            logger.info("Trajectory data handler created successfully") 
+            logger.info("Trajectory data handler created successfully")
+
+    def _create_trajectory_dataset_for_testing(self, samples_size: int) -> Tuple[Any, Any]:
+        """Create a trajectory dataset specifically for testing."""
+        return self.trajectory_handler.create_dataset(
+            samples_size=samples_size,
+            trajectory_length=self.config.trajectory.trajectory_length,
+            trajectory_type=self.config.trajectory.trajectory_type,
+            save_dataset=False,  # Don't save test datasets
+            dataset_path=Path("data/datasets").absolute()
+        )
+    
+    def _create_standard_test_dataset(self, samples_size: int) -> Any:
+        """Create a standard (non-trajectory) dataset for testing."""
+        from DCD_MUSIC.src.signal_creation import Samples
+        from DCD_MUSIC.src.data_handler import create_dataset
+        
+        samples_model = Samples(self.system_model.params)
+        dataset, _ = create_dataset(
+            samples_model=samples_model,
+            samples_size=samples_size,
+            save_datasets=False,  # Don't save test datasets
+            datasets_path=Path("data/datasets").absolute(),
+            true_doa=self.config.dataset.true_doa_test if hasattr(self.config.dataset, "true_doa_test") else self.config.dataset.true_doa_train,
+            true_range=self.config.dataset.true_range_test if hasattr(self.config.dataset, "true_range_test") else self.config.dataset.true_range_train,
+            phase="test"
+        )
+        return dataset 
