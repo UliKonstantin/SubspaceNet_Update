@@ -263,17 +263,19 @@ class TrajectoryTrainer:
                 
                 # Zero gradients
                 self.optimizer.zero_grad()
-                
+                # reset gradients
+                self.model.zero_grad()
                 # Forward pass - this will vary based on model type and field type
                 loss, accuracy, loss_components = self._forward_step(step_data, step_sources, step_labels)
                 
                 # Backward pass
-                loss.backward()
+                loss.backward(retain_graph=True)
                 self.optimizer.step()
-                
                 # Store step results
-                batch_losses.append(loss.item())
-                batch_accuracies.append(accuracy)
+                if batch_size > 0:
+                    batch_losses.append(loss.item() / batch_size) # loss is sum over N_traj_in_batch items
+                else:
+                    batch_losses.append(0.0)
                 
                 if loss_components:
                     angle_loss, range_loss = loss_components
@@ -356,21 +358,31 @@ class TrajectoryTrainer:
                     # Extract labels for current step
                     step_labels = self._extract_step_labels(labels, step, step_sources)
                     
-                    # Forward pass
-                    loss, accuracy, loss_components = self._forward_step(step_data, step_sources, step_labels, is_train=False)
+                    # Forward pass for validation
+                    # loss_val is sum over batch_size items in step_data (from model.validation_step)
+                    loss_val, accuracy_val, loss_components_val = self._forward_step(step_data, step_sources, step_labels, is_train=False)
                     
-                    # Store step results
-                    batch_losses.append(loss.item())
-                    batch_accuracies.append(accuracy)
+                    # Store per-item average loss for this step
+                    if batch_size > 0:
+                        batch_losses.append(loss_val.item() / batch_size) 
+                    else:
+                        batch_losses.append(0.0)
                     
-                    if loss_components:
-                        angle_loss, range_loss = loss_components
-                        batch_angle_losses.append(angle_loss)
-                        batch_range_losses.append(range_loss)
+                    batch_accuracies.append(accuracy_val) # Assuming accuracy_val is appropriately scaled or an average
+                    
+                    if loss_components_val: # If model.validation_step returns decomposed losses
+                        angle_loss_step_sum, range_loss_step_sum = loss_components_val
+                        if batch_size > 0:
+                            # Assuming components are also sums that need averaging per item
+                            batch_angle_losses.append(angle_loss_step_sum.item() / batch_size if hasattr(angle_loss_step_sum, 'item') else angle_loss_step_sum / batch_size)
+                            batch_range_losses.append(range_loss_step_sum.item() / batch_size if hasattr(range_loss_step_sum, 'item') else range_loss_step_sum / batch_size)
+                        else:
+                            batch_angle_losses.append(0.0)
+                            batch_range_losses.append(0.0)
                 
                 # Calculate average loss and accuracy for this batch
-                avg_batch_loss = np.mean(batch_losses)
-                avg_batch_accuracy = np.mean(batch_accuracies)
+                avg_batch_loss = np.mean(batch_losses) if batch_losses else 0.0
+                avg_batch_accuracy = np.mean(batch_accuracies) if batch_accuracies else 0.0
                 
                 # Update progress bar
                 progress_bar.set_postfix({
@@ -378,24 +390,24 @@ class TrajectoryTrainer:
                     'acc': f"{avg_batch_accuracy*100:.1f}%"
                 })
                 
-                # Update totals
+                # Update totals (this logic remains the same as in _train_epoch)
                 total_loss += avg_batch_loss * batch_size
                 total_accuracy += avg_batch_accuracy * batch_size
                 samples_count += batch_size
                 
-                if batch_angle_losses and batch_range_losses:
+                if batch_angle_losses and batch_range_losses: # if components were successfully processed
                     total_angle_loss += np.mean(batch_angle_losses) * batch_size
                     total_range_loss += np.mean(batch_range_losses) * batch_size
         
         # Calculate averages
-        avg_loss = total_loss / samples_count
-        avg_accuracy = total_accuracy / samples_count
+        avg_loss = total_loss / samples_count if samples_count > 0 else 0.0
+        avg_accuracy = total_accuracy / samples_count if samples_count > 0 else 0.0
         
         # Return loss components if available
         loss_components = None
-        if total_angle_loss > 0 and total_range_loss > 0:
-            avg_angle_loss = total_angle_loss / samples_count
-            avg_range_loss = total_range_loss / samples_count
+        if total_angle_loss > 0 or total_range_loss > 0: # Check if components were accumulated
+            avg_angle_loss = total_angle_loss / samples_count if samples_count > 0 else 0.0
+            avg_range_loss = total_range_loss / samples_count if samples_count > 0 else 0.0
             loss_components = (avg_angle_loss, avg_range_loss)
             
         return avg_loss, avg_accuracy, loss_components
@@ -421,66 +433,93 @@ class TrajectoryTrainer:
         
         # Let PyTorch handle tensor types - don't modify tensor types here
         
-        # Make sure step_sources is a single integer if needed
-        # The SubspaceMethod.subspace_separation requires a single integer value
-        # but we're passing a batch of values during validation
-        if step_sources.numel() > 1:
-            # During validation with batches, use the first value (assuming uniform sources per batch)
-            # or the maximum value (to ensure enough capacity)
-            single_source_count = step_sources[0].item()
-        else:
-            single_source_count = step_sources.item() if step_sources.numel() == 1 else step_sources
-        
-        # Handle far-field case
-        if not is_near_field:
-            angles = step_labels
-            
-            # Forward pass
-            if hasattr(self.model, 'training_step') and is_train:
-                # Use model's built-in training_step if available
-                batch = (step_data, step_sources, angles)
-                loss, accuracy, eigen_regularization = self.model.training_step(batch, None)
-                return loss, accuracy, None
-            else:
-                # Otherwise use standard forward pass
-                angles_pred, source_estimation, _ = self.model(step_data, single_source_count)
-                
-                # Calculate loss and accuracy
-                loss = self._calculate_loss(angles_pred, angles)
-                accuracy = self._calculate_accuracy(step_sources, source_estimation)
-                
-                return loss, accuracy, None
-        
-        # Handle near-field case
-        else:
-            # Split labels into angles and ranges
-            angles, ranges = step_labels
-            
-            # Forward pass
-            if hasattr(self.model, 'training_step') and is_train:
-                # Use model's built-in training_step if available
-                batch = (step_data, step_sources, torch.cat([angles, ranges], dim=1))
-                loss, accuracy, eigen_regularization = self.model.training_step(batch, None)
-                
-                # Check if loss is returned as tuple (combined, angle, range)
-                if isinstance(loss, tuple) and len(loss) == 3:
-                    combined_loss, angle_loss, range_loss = loss
-                    return combined_loss, accuracy, (angle_loss, range_loss)
+        # Make sure step_sources is a single integer if needed for model forward pass
+        # or use the batch of source counts for model's training/validation_step
+        single_source_count_for_forward = step_sources[0].item() if step_sources.numel() > 1 else (step_sources.item() if step_sources.numel() == 1 else step_sources)
+
+        if is_train:
+            # --- Training Step ---
+            if not is_near_field:
+                angles = step_labels
+                if hasattr(self.model, 'training_step'):
+                    batch = (step_data, step_sources, angles)
+                    loss, accuracy, eigen_regularization = self.model.training_step(batch, None)
+                    return loss, accuracy, None  # Eigen_regularization is part of the loss from training_step
                 else:
+                    # Fallback if model doesn't have training_step (unlikely for SubspaceNet)
+                    logger.warning_once("Model does not have a 'training_step' method. Using generic forward and MSE loss for training.")
+                    angles_pred, source_estimation, _ = self.model(step_data, single_source_count_for_forward)
+                    loss = self._calculate_loss(angles_pred, angles)
+                    accuracy = self._calculate_accuracy(step_sources, source_estimation)
                     return loss, accuracy, None
-            else:
-                # Otherwise use standard forward pass - use single_source_count for validation
-                angles_pred, ranges_pred, source_estimation, _ = self.model(step_data, single_source_count)
+            else: # Near-field training
+                angles, ranges = step_labels
+                if hasattr(self.model, 'training_step'):
+                    # DCD_MUSIC SubspaceNet expects labels as [batch, num_sources * 2] for near-field training_step
+                    model_step_labels = torch.cat([angles, ranges], dim=1) 
+                    batch = (step_data, step_sources, model_step_labels)
+                    loss, accuracy, eigen_regularization = self.model.training_step(batch, None)
+                    
+                    # Check if loss is returned as tuple (combined, angle, range) by model's training_step
+                    if isinstance(loss, tuple) and len(loss) == 3:
+                        combined_loss, angle_loss_val, range_loss_val = loss
+                        return combined_loss, accuracy, (angle_loss_val, range_loss_val) # loss_components might be tensors
+                    else:
+                        return loss, accuracy, None # Eigen_regularization is part of the loss from training_step
+                else:
+                    # Fallback if model doesn't have training_step
+                    logger.warning_once("Model does not have a 'training_step' method. Using generic forward and MSE loss for near-field training.")
+                    angles_pred, ranges_pred, source_estimation, _ = self.model(step_data, single_source_count_for_forward)
+                    angle_loss = self._calculate_loss(angles_pred, angles)
+                    range_loss = self._calculate_loss(ranges_pred, ranges)
+                    combined_loss = angle_loss + range_loss
+                    accuracy = self._calculate_accuracy(step_sources, source_estimation)
+                    return combined_loss, accuracy, (angle_loss.item(), range_loss.item())
+        else:
+            # --- Validation Step ---
+            if hasattr(self.model, 'validation_step'):
+                model_step_labels = None
+                if not is_near_field:
+                    angles = step_labels
+                    model_step_labels = angles
+                else: # Near-field validation
+                    angles, ranges = step_labels
+                    # DCD_MUSIC SubspaceNet expects labels as [batch, num_sources * 2] for near-field validation_step
+                    model_step_labels = torch.cat([angles, ranges], dim=1)
                 
-                # Calculate loss
-                angle_loss = self._calculate_loss(angles_pred, angles)
-                range_loss = self._calculate_loss(ranges_pred, ranges)
-                combined_loss = angle_loss + range_loss  # Simple sum, can be weighted if needed
-                
-                # Calculate accuracy
-                accuracy = self._calculate_accuracy(step_sources, source_estimation)
-                
-                return combined_loss, accuracy, (angle_loss.item(), range_loss.item())
+                batch = (step_data, step_sources, model_step_labels)
+                # SubspaceNet.validation_step typically returns (loss, acc, eigen_reg_value)
+                # The loss here should be the primary loss criterion (e.g., RMSPE) without regularization added for metrics.
+                loss, accuracy = self.model.validation_step(batch, None) # We don't use the eigen_reg for the loss metric
+
+                # If model.validation_step provides decomposed losses (e.g., for near-field)
+                loss_components = None
+                if isinstance(loss, tuple) and len(loss) == 3: # Assuming (combined, angle, range) like training_step could
+                    combined_loss, angle_loss_val, range_loss_val = loss
+                    loss = combined_loss # Use combined loss for overall validation loss
+                    loss_components = (angle_loss_val.item() if isinstance(angle_loss_val, torch.Tensor) else angle_loss_val, 
+                                       range_loss_val.item() if isinstance(range_loss_val, torch.Tensor) else range_loss_val)
+                elif isinstance(loss, torch.Tensor) and is_near_field: # If only combined loss is returned, no components
+                     pass # loss is already the combined loss
+
+                return loss, accuracy, loss_components
+
+            else: # Fallback if model doesn't have validation_step
+                logger.warning_once("Model does not have a 'validation_step' method. Using generic forward and MSE loss for validation.")
+                if not is_near_field:
+                    angles = step_labels
+                    angles_pred, source_estimation, _ = self.model(step_data, single_source_count_for_forward)
+                    loss = self._calculate_loss(angles_pred, angles)
+                    accuracy = self._calculate_accuracy(step_sources, source_estimation)
+                    return loss, accuracy, None
+                else: # Near-field validation with MSE fallback
+                    angles, ranges = step_labels
+                    angles_pred, ranges_pred, source_estimation, _ = self.model(step_data, single_source_count_for_forward)
+                    angle_loss = self._calculate_loss(angles_pred, angles)
+                    range_loss = self._calculate_loss(ranges_pred, ranges)
+                    combined_loss = angle_loss + range_loss
+                    accuracy = self._calculate_accuracy(step_sources, source_estimation)
+                    return combined_loss, accuracy, (angle_loss.item(), range_loss.item())
     
     def _extract_step_labels(self, labels, step, step_sources):
         """

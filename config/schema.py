@@ -43,7 +43,7 @@ class DatasetConfig(BaseModel):
 class ModelParamsConfig(BaseModel):
     """Model parameters configuration."""
     diff_method: Union[Literal["music_2D", "music_1D", "esprit"], tuple[str, str]] = "esprit"
-    train_loss_type: Union[Literal["music_spectrum", "rmspe"], tuple[str, str]] = "music_spectrum"
+    train_loss_type: Union[Literal["music_spectrum", "rmspe"], tuple[str, str]] = "rmspe"
     tau: int = 8
     field_type: Literal["Near", "Far"] = "Far"
     regularization: Optional[Literal["aic", "mdl", "threshold", "null"]] = None
@@ -83,11 +83,12 @@ class SimulationConfig(BaseModel):
     save_model: bool = False
     plot_results: bool = True
     save_plots: bool = False
+    subspace_methods: List[str] = Field(default_factory=list, description="List of classic subspace methods to evaluate (e.g., ['1D-MUSIC', 'Root-MUSIC','ESPRIT']).")
 
 
 class EvaluationConfig(BaseModel):
     """Evaluation configuration parameters."""
-    methods: List[str] = ["2D-MUSIC", "Beamformer"] #TBD: 
+    pass
 
 
 class TrajectoryType(str, Enum):

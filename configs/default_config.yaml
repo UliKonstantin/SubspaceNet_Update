@@ -16,7 +16,7 @@ system_model:
   range_resolution: 1  # resolution of range values in meters
 
 dataset:
-  samples_size: 100  # overall dataset size
+  samples_size: 4096  # overall dataset size
   train_test_ratio: 1  # ratio between train and test datasets
   create_data: false  # whether to create new data or use existing data
   save_dataset: false  # whether to save the dataset
@@ -29,7 +29,7 @@ model:
   type: "SubspaceNet"  # SubspaceNet, DCD-MUSIC
   params:
     diff_method: "esprit"  # esprit, music_1D, music_2D, beamformer
-    train_loss_type: "music_spectrum"  # music_spectrum, rmspe
+    train_loss_type: "rmspe"  # music_spectrum, rmspe
     tau: 8  # number of autocorrelation lags
     field_type: "Far"  # Far, Near
     regularization: "null"  # aic, mdl, threshold, null
@@ -39,8 +39,8 @@ model:
 
 training:
   enabled: True  # whether training is enabled
-  epochs: 2
-  batch_size: 32
+  epochs: 3
+  batch_size: 256
   optimizer: "Adam"  # Adam, SGD
   scheduler: "ReduceLROnPlateau"  # StepLR, ReduceLROnPlateau
   learning_rate: 0.001
@@ -59,11 +59,11 @@ simulation:
   save_model: false
   plot_results: true
   save_plots: false
+  subspace_methods:
+    - "ESPRIT"
 
-evaluation:
-  methods:
-    - "2D-MUSIC"
-    - "Beamformer"
+
+evaluation: {}
 
 trajectory:
   enabled: false
