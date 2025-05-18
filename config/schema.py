@@ -83,6 +83,7 @@ class SimulationConfig(BaseModel):
     save_model: bool = False
     plot_results: bool = True
     save_plots: bool = False
+    model_path: Optional[str] = None  # Path to load pretrained model from
     subspace_methods: List[str] = Field(default_factory=list, description="List of classic subspace methods to evaluate (e.g., ['1D-MUSIC', 'Root-MUSIC','ESPRIT']).")
 
 
@@ -99,6 +100,7 @@ class TrajectoryType(str, Enum):
     CIRCULAR = "circular"
     STATIC = "static"
     CUSTOM = "custom"
+    FULL_RANDOM = "full_random"  # Completely random angles for each source in each trajectory step
 
 
 class TrajectoryConfig(BaseModel):

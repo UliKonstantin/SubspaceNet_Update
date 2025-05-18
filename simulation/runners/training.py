@@ -687,8 +687,7 @@ class TrajectoryTrainer:
                 self.optimizer,
                 mode="min",
                 factor=self.config.gamma,
-                patience=10,
-                verbose=True
+                patience=10
             )
         elif scheduler_type == "CosineAnnealingLR":
             return lr_scheduler.CosineAnnealingLR(

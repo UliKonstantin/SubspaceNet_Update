@@ -149,6 +149,27 @@ class TrajectoryDataHandler:
         
         logger.info(f"Generating trajectories with angle range: [{angle_min}, {angle_max}]")
         
+        # Get random walk step size from config if we're using random walk
+        if trajectory_type == TrajectoryType.RANDOM_WALK:
+            random_walk_std_dev = 1.0  # Default value
+            if self.config and hasattr(self.config.trajectory, 'random_walk_std_dev'):
+                random_walk_std_dev = self.config.trajectory.random_walk_std_dev
+            logger.info(f"Using random walk with std dev: {random_walk_std_dev}")
+        
+        # Log trajectory type information before starting generation
+        if trajectory_type == TrajectoryType.RANDOM:
+            logger.info("Using RANDOM trajectory type: completely random angles at each step")
+        elif trajectory_type == TrajectoryType.STATIC:
+            logger.info("Using STATIC trajectory type: fixed angles throughout trajectory")
+        elif trajectory_type == TrajectoryType.LINEAR:
+            logger.info("Using LINEAR trajectory type: linear interpolation between random start and end angles")
+        elif trajectory_type == TrajectoryType.CIRCULAR:
+            logger.info("Using CIRCULAR trajectory type: angles follow sinusoidal motion around center points")
+        elif trajectory_type == TrajectoryType.CUSTOM:
+            logger.info("Using CUSTOM trajectory type with provided trajectory function")
+        elif trajectory_type == TrajectoryType.FULL_RANDOM:
+            logger.info("Using FULL_RANDOM trajectory type: completely independent random angles for each source and step")
+        
         # Create empty trajectories arrays
         max_sources = max(sources_per_trajectory)
         angle_trajectories = torch.zeros(
@@ -191,13 +212,6 @@ class TrajectoryDataHandler:
                         size=num_sources
                     )
                 )
-                
-                # Get random walk step size from config
-                random_walk_std_dev = 1.0  # Default value
-                if self.config and hasattr(self.config.trajectory, 'random_walk_std_dev'):
-                    random_walk_std_dev = self.config.trajectory.random_walk_std_dev
-                    
-                logger.info(f"Using random walk with std dev: {random_walk_std_dev}")
                 
                 # Apply state-space model: θ_k = θ_{k-1} + w_k
                 # where w_k is zero-mean Gaussian noise with std_dev = random_walk_std_dev
@@ -295,7 +309,16 @@ class TrajectoryDataHandler:
                     angle_max
                 )
                 angle_trajectories[i, :, :num_sources] = torch.FloatTensor(custom_trajectories)
-        
+            
+            elif trajectory_type == TrajectoryType.FULL_RANDOM:
+                # Generate completely independent random angles for each step and each source
+                # Unlike RANDOM which assigns the same random pattern to each source
+                for t in range(trajectory_length):
+                    for s in range(num_sources):
+                        angle_trajectories[i, t, s] = torch.FloatTensor([
+                            np.random.uniform(angle_min, angle_max)
+                        ])
+            
         # Plot the last trajectory for verification
         self._plot_trajectory_verification(
             angle_trajectories[-1, :, :sources_per_trajectory[-1]],
@@ -366,8 +389,7 @@ class TrajectoryDataHandler:
             output_dir.mkdir(parents=True, exist_ok=True)
             output_path = output_dir / filename
             plt.savefig(output_path)
-            print(f"Trajectory plot saved to: {output_path}")
-            plt.show()
+            logger.info(f"Trajectory plot saved to: {output_path}")
             
         except ImportError:
             logger.warning("matplotlib not available for trajectory verification plot")
@@ -423,9 +445,8 @@ class TrajectoryDataHandler:
                     source_number=num_sources
                 )[0]
                 
-                # Simply convert to tensor without forcing any particular type
-                # Let PyTorch handle tensor types internally
-                X_tensor = torch.tensor(X)
+                # Use as_tensor instead of tensor to avoid copy warnings
+                X_tensor = torch.as_tensor(X)
                 
                 # Get ground truth labels
                 Y = self.samples_model.get_labels()
@@ -542,13 +563,13 @@ class TrajectoryDataset(Dataset):
         
         # Load time series for all steps in trajectory
         time_series = [
-            torch.tensor(self.h5f[f'X/{idx}/step_{step}'][:]) 
+            torch.as_tensor(self.h5f[f'X/{idx}/step_{step}'][:]) 
             for step in range(trajectory_length)
         ]
         
         # Load labels for all steps
         labels = [
-            torch.tensor(self.h5f[f'Y/{idx}/label_{step}'][:]) 
+            torch.as_tensor(self.h5f[f'Y/{idx}/label_{step}'][:]) 
             for step in range(trajectory_length)
         ]
         
@@ -704,7 +725,7 @@ class TrajectoryDataset(Dataset):
         # Initialize padded tensors
         padded_time_series = torch.zeros(
             (batch_size, max_trajectory_length, n_sensors, n_snapshots),
-            dtype=torch.float32
+            dtype=torch.complex64
         )
         
         padded_labels = torch.zeros(
@@ -725,7 +746,7 @@ class TrajectoryDataset(Dataset):
             padded_time_series[i, :traj_len] = ts
             
             # Copy sources_num
-            padded_sources_num[i, :traj_len] = torch.tensor(src)
+            padded_sources_num[i, :traj_len] = torch.as_tensor(src)
             
             # Copy labels (with padding for varying number of sources)
             for t in range(traj_len):

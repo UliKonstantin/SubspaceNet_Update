@@ -53,6 +53,43 @@ def run_command(config: str, output: Optional[str], override: List[str]):
         logger.error(f"Error running experiment: {e}", exc_info=True)
         sys.exit(1)
 
+@cli.command('evaluate')
+@config_option
+@output_option
+@override_option
+@click.option('--model', '-m', type=str, required=True, help='Path to the trained model to evaluate')
+@click.option('--trajectory/--no-trajectory', default=False, help='Enable trajectory-based data')
+def evaluate_command(config: str, output: Optional[str], override: List[str],
+                    model: str, trajectory: bool):
+    """Evaluate a pre-trained model without training."""
+    try:
+        # Add required overrides to skip training and use the provided model
+        override = list(override) + [
+            "simulation.train_model=false",
+            "simulation.load_model=true",
+            f"simulation.model_path={model}",
+            "simulation.evaluate_model=true"
+        ]
+        
+        # Add trajectory override if enabled
+        if trajectory:
+            override.append("trajectory.enabled=true")
+            
+        # Use config_handler to set up configuration and components
+        config_obj, components, output_dir = setup_configuration(config, output, override)
+        
+        # Create simulation
+        logger.info(f"Evaluating model: {model}")
+        sim = Simulation(config_obj, components, output_dir)
+        
+        # Run simulation (will skip training and load the model)
+        results = sim.run()
+        logger.info("Evaluation completed successfully")
+        
+    except Exception as e:
+        logger.error(f"Error evaluating model: {e}", exc_info=True)
+        sys.exit(1)
+
 @cli.command('simulate')
 @config_option
 @output_option

@@ -11,12 +11,13 @@ import logging
 import numpy as np
 import torch
 from tqdm import tqdm
+import datetime
 
 from config.schema import Config
 from .runners.data import TrajectoryDataHandler
 from .runners.training import Trainer, TrainingConfig, TrajectoryTrainer
 from .runners.evaluation import Evaluator
-from simulation.kalman_filter import KalmanFilter1D
+from simulation.kalman_filter import KalmanFilter1D, BatchKalmanFilter1D
 from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
 from DCD_MUSIC.src.signal_creation import Samples
 from DCD_MUSIC.src.evaluation import get_model_based_method, evaluate_model_based
@@ -86,18 +87,64 @@ class Simulation:
                 logger.error("Data pipeline failed, skipping training and evaluation")
                 return {"status": "error", "message": "Data pipeline failed"}
             
-            # Execute training pipeline if enabled
-            if self.config.training.enabled:
+            # Load model if configured
+            if self.config.simulation.load_model:
+                if hasattr(self.config.simulation, 'model_path') and self.config.simulation.model_path:
+                    model_path = Path(self.config.simulation.model_path)
+                    success, message = self._load_and_apply_weights(model_path, device)
+                    if not success:
+                        # Loading failed, return error status
+                        return {"status": "error", "message": message}
+                    # If partial success, message is logged by helper, continue simulation
+                else:
+                    logger.error("Model loading requested but no model_path provided in config")
+                    return {"status": "error", "message": "No model_path provided"}
+            
+            # Execute training pipeline if enabled AND train_model is True
+            if self.config.training.enabled and self.config.simulation.train_model:
+                logger.info("Running training pipeline (training.enabled=True, simulation.train_model=True)")
                 self._run_training_pipeline()
                 
                 # Check if training was successful
                 if self.trained_model is None:
                     logger.error("Training pipeline failed, skipping evaluation")
                     return {"status": "error", "message": "Training pipeline failed"}
+            elif not self.config.simulation.train_model:
+                logger.info("Skipping training (simulation.train_model=False)")
+            elif not self.config.training.enabled:
+                logger.info("Skipping training (training.enabled=False)")
                     
             # Execute evaluation pipeline if enabled
             if self.config.simulation.evaluate_model:
-                self._run_evaluation_pipeline()
+                # Make sure we have a model to evaluate
+                if self.trained_model is None and self.model is not None:
+                    logger.info("Using non-trained model for evaluation")
+                    self.trained_model = self.model
+                
+                # Run the evaluation
+                if self.trained_model is not None:
+                    self._run_evaluation_pipeline()
+                else:
+                    logger.error("No model available for evaluation")
+                    return {"status": "error", "message": "No model available for evaluation"}
+                
+            # Save model if configured
+            if self.config.simulation.save_model and self.trained_model is not None:
+                model_save_dir = self.output_dir / "checkpoints"
+                model_save_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                model_type = self.config.model.type
+                model_save_path = model_save_dir / f"saved_{model_type}_{timestamp}.pt"
+                
+                logger.info(f"Saving model to {model_save_path}")
+                
+                # Save only the state_dict, not the entire model
+                # This is more compatible across PyTorch versions
+                try:
+                    torch.save(self.trained_model.state_dict(), model_save_path)
+                    logger.info(f"Model saved successfully to {model_save_path}")
+                except Exception as e:
+                    logger.error(f"Failed to save model: {e}")
                 
             # Save results
             self._save_results()
@@ -317,10 +364,10 @@ class Simulation:
         
         logger.info("Training completed")
         
-    def _run_evaluation_pipeline_wrapper(self) -> None:
+    def _run_evaluation_pipeline(self) -> None:
         """
-        Execute the evaluation pipeline wrapper.
-        
+        Execute the evaluation pipeline.
+
         This function serves as the main wrapper for the evaluation process:
         1. Evaluates the DNN model with Kalman filtering
         2. Evaluates classic subspace methods (if configured)
@@ -361,18 +408,8 @@ class Simulation:
                 self.results["evaluation_error"] = error_msg
                 return
             
-            # Configure Kalman Filter parameters
-            kf_process_noise_std_dev = self.config.kalman_filter.process_noise_std_dev
-            if kf_process_noise_std_dev is None:
-                kf_process_noise_std_dev = self.config.trajectory.random_walk_std_dev
-                logger.info(f"Using trajectory.random_walk_std_dev ({kf_process_noise_std_dev}) for KF process noise")
-            
-            # Calculate variances from standard deviations
-            kf_Q = kf_process_noise_std_dev ** 2
-            kf_R = self.config.kalman_filter.measurement_noise_std_dev ** 2
-            kf_P0 = self.config.kalman_filter.initial_covariance
-            
-            logger.info(f"Kalman Filter parameters: Q={kf_Q}, R={kf_R}, P0={kf_P0}")
+            # Get Kalman filter parameters from config
+            kf_Q, kf_R, kf_P0 = KalmanFilter1D.from_config(self.config)
             
             # Instantiate RMSPELoss criterion
             rmspe_criterion = RMSPELoss().to(device)
@@ -402,76 +439,74 @@ class Simulation:
                     trajectories, sources_num, labels = batch_data
                     batch_size, trajectory_length = trajectories.shape[0], trajectories.shape[1]
                     
-                    # Process each trajectory separately
-                    for traj_idx in range(batch_size):
-                        # Extract single trajectory
-                        single_trajectory = trajectories[traj_idx].to(device)
-                        single_sources = sources_num[traj_idx].to(device)
+                    # Initialize storage for batch results
+                    batch_dnn_preds = [[] for _ in range(batch_size)]
+                    batch_dnn_kf_preds = [[] for _ in range(batch_size)]
+                    
+                    # Find maximum number of sources in batch for efficient batch processing
+                    max_sources = torch.max(sources_num).item()
+                    
+                    # Initialize the batch Kalman filter
+                    batch_kf = BatchKalmanFilter1D.from_config(
+                        self.config,
+                        batch_size=batch_size,
+                        max_sources=max_sources,
+                        device=device
+                    )
+                    
+                    # Initialize states directly from first step ground truth
+                    # Each trajectory might have different number of sources
+                    batch_kf.initialize_states(labels[:, 0, :max_sources], sources_num[:, 0])
+                    
+                    # Process each time step in the trajectory sequentially (required for Kalman filtering)
+                    for step in range(trajectory_length):
+                        # Get data for this time step across all trajectories
+                        step_data = trajectories[:, step].to(device)
+                        step_sources = sources_num[:, step].to(device)
                         
-                        # Determine number of sources for this trajectory
-                        num_sources = single_sources[0].item()
+                        # Create source mask for this step
+                        step_mask = torch.arange(max_sources, device=device).expand(batch_size, -1) < step_sources[:, None]
                         
-                        # Get ground truth angles for this trajectory
-                        traj_ground_truth = labels[traj_idx, :, :num_sources].cpu().numpy()
+                        # Evaluate DNN model and update Kalman filters for this time step
+                        model_preds, kf_preds, step_loss = self._evaluate_dnn_model_kf_step_batch(
+                            step_data, step_sources, labels[:, step, :max_sources], step_mask, batch_kf, 
+                            rmspe_criterion, is_near_field
+                        )
                         
-                        # Get initial true angles for Kalman Filter initialization
-                        initial_true_angles = traj_ground_truth[0, :]
+                        # Accumulate loss and store predictions
+                        dnn_total_loss += step_loss
+                        dnn_total_samples += batch_size
                         
-                        # Initialize Kalman filters - one per source
-                        k_filters = [KalmanFilter1D(Q=kf_Q, R=kf_R, P0=kf_P0) for _ in range(num_sources)]
-                        for s_idx in range(num_sources):
-                            k_filters[s_idx].initialize_state(initial_true_angles[s_idx])
+                        # Store predictions for this time step
+                        for i in range(batch_size):
+                            batch_dnn_preds[i].append(model_preds[i])
+                            batch_dnn_kf_preds[i].append(kf_preds[i])
                         
-                        # Initialize results for this trajectory
-                        dnn_traj_preds = []
-                        dnn_traj_kf_preds = []
-                        
-                        # Process each step in the trajectory
-                        for step in range(trajectory_length):
-                            # Step 1: Evaluate DNN model with Kalman filter
-                            step_dnn_result = self._evaluate_dnn_model_kf_step(
-                                single_trajectory[step],
-                                single_sources[step],
-                                labels[traj_idx, step, :num_sources],
-                                k_filters,
-                                rmspe_criterion,
-                                num_sources,
-                                is_near_field
+                        # Evaluate classic methods if enabled
+                        if classic_methods:
+                            classic_results = self._evaluate_classic_methods_step_batch(
+                                step_data, step_sources, labels[:, step, :max_sources],
+                                rmspe_criterion, classic_methods
                             )
                             
-                            # Store DNN results
-                            dnn_traj_preds.append(step_dnn_result["model_prediction"])
-                            dnn_traj_kf_preds.append(step_dnn_result["kf_prediction"])
-                            dnn_total_loss += step_dnn_result["loss"]
-                            dnn_total_samples += 1
-                            
-                            # Step 2: Evaluate classic methods if enabled
-                            if classic_methods:
-                                # Get data for current step
-                                step_data = single_trajectory[step]
-                                step_sources = single_sources[step]
-                                step_angles = labels[traj_idx, step, :num_sources].to(device)
-                                
-                                step_classic_results = self._evaluate_classic_methods_step(
-                                    step_data,
-                                    step_sources,
-                                    step_angles,
-                                    rmspe_criterion,
-                                    classic_methods
-                                )
-                                
-                                # Store classic method losses
-                                for method in classic_methods:
-                                    if method in step_classic_results:
-                                        classic_methods_losses[method]["total_loss"] += step_classic_results[method]["loss"]
-                                        classic_methods_losses[method]["total_samples"] += 1
+                            # Update classic method losses
+                            for method, results in classic_results.items():
+                                classic_methods_losses[method]["total_loss"] += results["total_loss"]
+                                classic_methods_losses[method]["total_samples"] += results["count"]
+                    
+                    # Store complete trajectory results
+                    for i in range(batch_size):
+                        num_sources_array = sources_num[i].cpu().numpy()
+                        gt_trajectory = np.array([
+                            labels[i, t, :num_sources_array[t]].cpu().numpy()
+                            for t in range(trajectory_length)
+                        ])
                         
-                        # Store trajectory results
                         dnn_trajectory_results.append({
-                            'model_predictions': dnn_traj_preds,
-                            'kf_predictions': dnn_traj_kf_preds,
-                            'ground_truth': traj_ground_truth,
-                            'sources': single_sources.cpu().numpy()
+                            'model_predictions': batch_dnn_preds[i],
+                            'kf_predictions': batch_dnn_kf_preds[i],
+                            'ground_truth': gt_trajectory,
+                            'sources': num_sources_array
                         })
                 
                 # Log evaluation results
@@ -490,71 +525,110 @@ class Simulation:
             logger.exception(f"Error during evaluation: {e}")
             self.results["evaluation_error"] = str(e)
 
-    def _evaluate_dnn_model_kf_step(
+    def _evaluate_dnn_model_kf_step_batch(
         self, 
         step_data: torch.Tensor, 
         step_sources: torch.Tensor,
         step_angles: torch.Tensor,
-        k_filters: List[KalmanFilter1D],
+        step_mask: torch.Tensor,
+        batch_kf: BatchKalmanFilter1D,
         rmspe_criterion: RMSPELoss,
-        num_sources: int,
         is_near_field: bool
-    ) -> Dict[str, Any]:
+    ) -> Tuple[List[np.ndarray], List[np.ndarray], float]:
         """
-        Evaluate the DNN model for a single step and apply Kalman filtering.
+        Evaluate the DNN model for a batch of steps and apply Kalman filtering.
         
         Args:
-            step_data: Trajectory step data
-            step_sources: Number of sources for this step
-            step_angles: Ground truth angles for this step
-            k_filters: List of Kalman filters (one per source)
+            step_data: Batch of trajectory step data for current time step [batch_size, T, N]
+            step_sources: Number of sources for each trajectory at current step [batch_size]
+            step_angles: Ground truth angles tensor [batch_size, max_sources]
+            step_mask: Mask indicating valid angles for each trajectory at current step
+            batch_kf: BatchKalmanFilter1D instance for efficient batch processing
             rmspe_criterion: Loss criterion for evaluation
-            num_sources: Number of sources in this step
             is_near_field: Whether the model is for near-field estimation
             
         Returns:
-            Dictionary containing model prediction, KF prediction, and loss
+            Tuple containing:
+            - List of model predictions for each trajectory
+            - List of KF predictions for each trajectory
+            - Total loss for this batch at this step
         """
-        result = {}
+        batch_size = step_data.shape[0]
+        max_sources = batch_kf.max_sources
         
-        # Add batch dimension for model
-        step_data = step_data.unsqueeze(0)
-        step_sources = step_sources.unsqueeze(0)
-        step_angles = step_angles.unsqueeze(0).to(device)
-        
-        # Perform Kalman Filter prediction for each source
-        kf_step_predictions = np.zeros(num_sources)
-        for s_idx in range(num_sources):
-            kf_step_predictions[s_idx] = k_filters[s_idx].predict()
-        
-        # Store KF predictions before update
-        result["kf_prediction"] = kf_step_predictions.copy()
-        
-        # Model forward pass
-        if is_near_field:
-            angles_pred, ranges_pred, _ = self.trained_model(step_data, step_sources)
-            result["ranges_prediction"] = ranges_pred.cpu().numpy()
-        else:
-            angles_pred, _, _ = self.trained_model(step_data, step_sources)
-        
-        # Store model prediction
-        result["model_prediction"] = angles_pred.cpu().numpy()
-        
-        # Update Kalman Filters with model predictions
-        model_angles_step = angles_pred.squeeze().cpu().numpy()
-        for s_idx in range(num_sources):
-            # Get the measurement for this source
-            measurement = model_angles_step[s_idx] if s_idx < len(model_angles_step) else model_angles_step
-            # Update KF with model prediction
-            k_filters[s_idx].update(measurement)
-        
-        # Calculate loss using RMSPELoss
-        step_loss = rmspe_criterion(angles_pred, step_angles)
-        result["loss"] = step_loss.item()
-        
-        return result
+        # Collect model predictions per trajectory
+        batch_angles_pred_list = []
+        total_loss = 0.0
 
-    def _evaluate_classic_methods_step(
+        # Loop through batch because the model (or underlying method) doesn't support batch source counts
+        for i in range(batch_size):
+            # Extract data for a single trajectory
+            single_step_data = step_data[i].unsqueeze(0) # Add batch dim back
+            single_step_sources = step_sources[i] # This should be a scalar tensor
+            num_sources_item = single_step_sources.item()
+
+            # Skip if no sources
+            if num_sources_item <= 0:
+                batch_angles_pred_list.append(torch.empty((0,), device=device))
+                continue
+
+            # Ensure source count is a 0-dim tensor or scalar int if needed by model
+            # Some models might expect tensor(2), others just 2.
+            # Assuming the model can handle a 0-dim tensor:
+            # single_step_sources = single_step_sources # Keep as 0-dim tensor
+            # Or if it needs an int:
+            # single_step_sources_arg = num_sources_item
+
+            # Model forward pass for single trajectory
+            # We pass the 0-dim tensor, assuming the model handles it.
+            # Adjust if the model strictly requires an integer.
+            if is_near_field:
+                # TODO: Confirm near-field output structure and handling if needed
+                angles_pred_single, _, _ = self.trained_model(single_step_data, single_step_sources)
+            else:
+                angles_pred_single, _, _ = self.trained_model(single_step_data, single_step_sources)
+
+            # Ensure prediction tensor has correct shape [1, num_sources]
+            angles_pred_single = angles_pred_single.view(1, -1)[:, :num_sources_item]
+            batch_angles_pred_list.append(angles_pred_single.squeeze(0))
+
+            # Calculate loss for this trajectory
+            with torch.no_grad():
+                truth = step_angles[i, :num_sources_item].unsqueeze(0)
+                loss = rmspe_criterion(angles_pred_single, truth)
+                total_loss += loss.item()
+
+        # Combine predictions into a batch tensor for KF update
+        # Need padding if source counts vary
+        padded_angles_pred = torch.zeros((batch_size, max_sources), device=device)
+        for i, pred in enumerate(batch_angles_pred_list):
+            num_sources = pred.shape[0]
+            if num_sources > 0:
+                padded_angles_pred[i, :num_sources] = pred
+
+        # Apply the Kalman filter to the predicted angles (using the padded batch tensor)
+        # First, get predictions (before update) for output
+        kf_predictions_before_update = batch_kf.predict().cpu().numpy()
+
+        # Then update with new measurements (model predictions)
+        batch_kf.update(padded_angles_pred, step_mask)
+
+        # Convert predictions to list of numpy arrays with proper dimensions
+        model_predictions_list = []
+        kf_predictions_list = []
+
+        for i in range(batch_size):
+            num_sources = step_sources[i].item()
+            if num_sources > 0:
+                model_predictions_list.append(padded_angles_pred[i, :num_sources].cpu().numpy())
+                kf_predictions_list.append(kf_predictions_before_update[i, :num_sources])
+            else:
+                model_predictions_list.append(np.array([]))
+                kf_predictions_list.append(np.array([]))
+
+        return model_predictions_list, kf_predictions_list, total_loss
+
+    def _evaluate_classic_methods_step_batch(
         self,
         step_data: torch.Tensor,
         step_sources: torch.Tensor,
@@ -563,93 +637,88 @@ class Simulation:
         methods: List[str]
     ) -> Dict[str, Dict[str, Any]]:
         """
-        Evaluate classic subspace methods for a single step.
+        Evaluate classic subspace methods for a batch of trajectories at one time step.
         
         Args:
-            step_data: Trajectory step data
-            step_sources: Number of sources for this step
-            step_angles: Ground truth angles for this step
+            step_data: Batch of trajectory step data for current time step [batch_size, T, N]
+            step_sources: Number of sources for each trajectory at current step [batch_size]
+            step_angles: Tensor of ground truth angles for each trajectory at current step
             rmspe_criterion: Loss criterion for evaluation
             methods: List of classic subspace methods to evaluate
             
         Returns:
-            Dictionary mapping method names to their results (prediction and loss)
+            Dictionary mapping method names to their batch results
         """
+        batch_size = step_data.shape[0]
         results = {}
         
-        try:
-            # Get a copy of the existing system model params
-            system_model_params = self.system_model.params
-            
-            # Store the original M value to restore later
-            original_M = system_model_params.M
-            
-            # Temporarily update the number of sources
-            num_sources = int(step_sources.item())
-            system_model_params.M = num_sources
-            
-            # Format the data as expected by test_step
-            # The sample_covariance function expects shape [batch_size, sensor_number, samples_number]
-            # Our step_data shape is likely [T, N] where T=samples and N=sensors
-            # We need to transpose it to [N, T] and then add a batch dimension to get [1, N, T]
-            
-            # Log the original shape for debugging
-            logger.debug(f"Original step_data shape: {step_data.shape}")
-            
-            # Transpose and add batch dimension
-            # Going from [T, N] to [1, N, T]
-            if step_data.dim() == 2:
-                # If step_data is [T, N], transpose to [N, T] and add batch dim
-                processed_data = step_data.transpose(0, 1).unsqueeze(0)
-            elif step_data.dim() == 3:
-                # If already [B, T, N], transpose to [B, N, T]
-                processed_data = step_data.transpose(1, 2)
-            else:
-                # Handle unexpected shapes
-                logger.error(f"Unexpected step_data shape: {step_data.shape}")
-                return results
-                
-            logger.debug(f"Processed data shape: {processed_data.shape}")
-            
-            # Format the data as expected by test_step
-            # test_step expects a tuple of (x, sources_num, label, masks)
-            batch_data = (
-                processed_data,  # Shape should be [1, N, T]
-                step_sources.unsqueeze(0),  # Add batch dimension to sources [1]
-                step_angles.unsqueeze(0),  # Add batch dimension to angles [1, M]
-                torch.ones_like(step_angles).unsqueeze(0)  # Add masks (all ones) [1, M]
-            )
-            
-            for method_name in methods:
-                try:
-                    # This creates a method instance
-                    classic_method = get_model_based_method(method_name, system_model_params)
-                    
-                    if classic_method is not None:
-                        # Call test_step to get the loss and accuracy
-                        loss, accuracy, test_length = classic_method.test_step(batch_data, 0)  # 0 is the batch index
-                        
-                        # Store only loss and accuracy (no predictions)
-                        results[method_name] = {
-                            "loss": loss,
-                            "accuracy": accuracy
-                        }
-                    else:
-                        logger.warning(f"Failed to initialize classic method: {method_name}")
-                        logger.warning(f"Available methods may include: MUSIC, Root-MUSIC, ESPRIT")
-                except Exception as method_error:
-                    logger.error(f"Error with method {method_name}: {method_error}")
-                    import traceback
-                    logger.error(traceback.format_exc())
-            
-            # Restore the original M value
-            system_model_params.M = original_M
-            
-        except Exception as e:
-            logger.error(f"Error evaluating classic methods: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
+        # Initialize results for all methods
+        for method in methods:
+            results[method] = {"total_loss": 0.0, "count": 0}
         
+        # Process each trajectory separately for classic methods
+        # (classic methods generally don't support batch processing)
+        for traj_idx in range(batch_size):
+            # Get data for this trajectory at this time step
+            traj_data = step_data[traj_idx]
+            traj_sources = step_sources[traj_idx]
+            num_sources = traj_sources.item()
+            
+            # Skip trajectories with no sources
+            if num_sources <= 0:
+                continue
+                
+            # Extract the ground truth angles for this trajectory
+            traj_angles = step_angles[traj_idx, :num_sources]
+            
+            try:
+                # Get system model parameters
+                system_model_params = self.system_model.params
+                
+                # Store original M and temporarily update to current sources
+                original_M = system_model_params.M
+                system_model_params.M = int(num_sources)
+                
+                # Format data for test_step
+                # Transform to [1, N, T] as expected by classic methods
+                processed_data = traj_data.unsqueeze(0)
+                
+                # Create batch data structure for test_step
+                batch_data = (
+                    processed_data,  # Shape: [1, N, T]
+                    traj_sources.unsqueeze(0),  # Shape: [1]
+                    traj_angles.unsqueeze(0),  # Shape: [1, num_sources]
+                    torch.ones_like(traj_angles).unsqueeze(0)  # Shape: [1, num_sources]
+                )
+                
+                # Evaluate each classic method
+                for method_name in methods:
+                    try:
+                        # Get method instance
+                        classic_method = get_model_based_method(method_name, system_model_params)
+                        
+                        if classic_method is not None:
+                            # Call test_step to evaluate this method
+                            loss, accuracy, _ = classic_method.test_step(batch_data, 0)
+                            
+                            # Accumulate results
+                            results[method_name]["total_loss"] += loss
+                            results[method_name]["count"] += 1
+                        else:
+                            logger.warning(f"Failed to initialize classic method: {method_name}")
+                    except Exception as method_error:
+                        logger.error(f"Error with method {method_name} for trajectory {traj_idx}: {method_error}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                
+                # Restore original M
+                system_model_params.M = original_M
+                    
+            except Exception as e:
+                logger.error(f"Error evaluating classic methods for trajectory {traj_idx}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                
         return results
 
     def _log_evaluation_results(
@@ -738,7 +807,7 @@ class Simulation:
                 print(f"{method:<20} {avg_loss:<20.6f} {comparison:<30}")
         
         print("\n" + "="*80)
-
+        
     def _save_results(self) -> None:
         """Save simulation results to the output directory."""
         logger.info(f"Saving results to {self.output_dir}")
@@ -826,11 +895,129 @@ class Simulation:
         )
         return dataset 
 
-    def _run_evaluation_pipeline(self) -> None:
-        """
-        Execute the evaluation pipeline.
-        
-        This is a wrapper method that calls _run_evaluation_pipeline_wrapper
-        to maintain backward compatibility.
-        """
-        return self._run_evaluation_pipeline_wrapper() 
+    def _load_and_apply_weights(self, model_path: Path, device: torch.device) -> Tuple[bool, Optional[str]]:
+        """Loads weights from a checkpoint file and applies them to self.model."""
+        logger.info(f"Attempting to load model weights from: {model_path}")
+        try:
+            # First try without any specific parameters
+            try:
+                # Simple approach - let PyTorch handle it based on version
+                state_dict = torch.load(model_path, map_location=device)
+            except Exception as e:
+                # If any error occurs, try the backward compatibility mode
+                logger.warning(f"Standard loading failed, attempting with backward compatibility mode: {e}")
+                try:
+                    # weights_only=False can help with older PyTorch versions or complex saved states
+                    state_dict = torch.load(model_path, map_location=device, weights_only=False)
+                except Exception as e2:
+                    # If both methods fail, raise a comprehensive error
+                    raise RuntimeError(f"Failed to load checkpoint file with both standard and compatibility methods: {e}, then: {e2}")
+
+            # Handle various checkpoint formats intelligently
+            original_state_dict = state_dict # Keep a reference before modification
+            if isinstance(state_dict, dict):
+                # Common keys where model weights might be stored
+                possible_keys = ['model_state_dict', 'state_dict', 'model', 'network', 'net_state_dict',
+                               'net', 'weights', 'params', 'parameters']
+
+                # Check if this is a checkpoint with nested weights or direct weights
+                model_keys = self.model.state_dict().keys()
+                # Check if *any* key from the model exists at the top level of the loaded dict
+                is_direct_weights = any(k in state_dict for k in model_keys)
+
+                if is_direct_weights:
+                    logger.info("Checkpoint contains direct model weights - using as-is")
+                else:
+                    # Try to find weights in nested dictionary
+                    found_key = None
+                    for key in possible_keys:
+                        if key in state_dict and isinstance(state_dict[key], dict):
+                            nested_dict = state_dict[key]
+                            # Check if the nested dict looks like model weights
+                            # Check if *any* key from the model exists in the nested dict
+                            if any(k in nested_dict for k in model_keys):
+                                found_key = key
+                                logger.info(f"Found model weights in checkpoint under '{key}' key")
+                                state_dict = nested_dict
+                                break
+
+                    if not found_key:
+                        logger.warning(f"Could not find model weights in checkpoint. Available keys: {list(state_dict.keys())}")
+                        logger.warning("Will attempt to use checkpoint as-is - this may fail")
+            else:
+                 # Handle cases where torch.load returns something other than a dict
+                 logger.warning(f"Loaded checkpoint is not a dictionary (type: {type(state_dict)}). Attempting to use as-is.")
+                 # If it's not a dict, we probably can't load it directly anyway, but let the next step try.
+
+            # Apply state dict to the model
+            try:
+                # Check for DataParallel/DistributedDataParallel wrapper
+                # which adds 'module.' prefix to all keys
+                if isinstance(state_dict, dict) and all(k.startswith('module.') for k in state_dict.keys()):
+                    logger.info("Detected DataParallel wrapped model weights - removing 'module.' prefix")
+                    state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+
+                incompatible_keys = self.model.load_state_dict(state_dict, strict=True)
+                # If strict=True succeeds, incompatible_keys should be empty for both missing and unexpected
+                logger.info("Model weights loaded successfully (strict=True)")
+                self.model = self.model.to(device)
+                self.trained_model = self.model # Mark as loaded/trained
+                return True, "Model loaded successfully"
+
+            except RuntimeError as e:
+                # This often happens when model architectures don't match or state_dict is wrong
+                logger.warning(f"Strict loading failed: {e}. Attempting partial loading (strict=False).")
+
+                # Get model architecture info for debugging, using the potentially modified state_dict
+                if isinstance(state_dict, dict):
+                    model_keys_set = set(self.model.state_dict().keys())
+                    state_dict_keys_set = set(state_dict.keys())
+                    missing_keys = model_keys_set - state_dict_keys_set
+                    unexpected_keys = state_dict_keys_set - model_keys_set
+                    if missing_keys:
+                        logger.warning(f"Missing keys in checkpoint: {missing_keys}")
+                    if unexpected_keys:
+                        logger.warning(f"Unexpected keys in checkpoint: {unexpected_keys}")
+                else:
+                    logger.warning("Cannot perform key comparison: loaded state_dict is not a dictionary.")
+
+
+                # Try partial loading with strict=False as fallback
+                try:
+                    # We need to re-apply the 'module.' removal if it happened before strict=True failed
+                    if isinstance(state_dict, dict) and all(k.startswith('module.') for k in state_dict.keys()):
+                        state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+
+                    # Need to handle the case where state_dict wasn't a dict from the start
+                    if not isinstance(state_dict, dict):
+                         raise TypeError(f"Cannot load state_dict: Expected a dictionary, but got {type(state_dict)}")
+
+                    incompatible_keys = self.model.load_state_dict(state_dict, strict=False)
+                    # Log specifics about partial load
+                    if incompatible_keys.missing_keys:
+                         logger.warning(f"Partial loading: Missing keys: {incompatible_keys.missing_keys}")
+                    if incompatible_keys.unexpected_keys:
+                         logger.warning(f"Partial loading: Unexpected keys: {incompatible_keys.unexpected_keys}")
+
+                    # Check if *any* weights were actually loaded
+                    if not incompatible_keys.missing_keys and not incompatible_keys.unexpected_keys:
+                         logger.info("Partial loading (strict=False) completed successfully with no incompatible keys.")
+                    elif len(incompatible_keys.missing_keys) < len(self.model.state_dict()):
+                         logger.warning("Partial loading (strict=False) completed, but some keys were missing or unexpected.")
+                    else:
+                         # If all keys are missing, it's essentially a failure
+                         raise RuntimeError("Partial loading failed: No matching keys found.")
+
+                    self.model = self.model.to(device)
+                    self.trained_model = self.model # Mark as loaded/trained
+                    msg = f"Model partially loaded. Missing: {incompatible_keys.missing_keys}, Unexpected: {incompatible_keys.unexpected_keys}"
+                    logger.info(msg)
+                    # Returning True because *some* weights were loaded, but message indicates partial success
+                    return True, msg
+                except Exception as e2:
+                    logger.error(f"Strict and partial loading both failed: {e2}")
+                    return False, f"Failed to apply state_dict to model. Strict error: {e}. Partial error: {e2}"
+
+        except Exception as load_err:
+            logger.error(f"Failed to load or apply model weights from {model_path}: {load_err}")
+            return False, f"Error during model loading: {load_err}" 

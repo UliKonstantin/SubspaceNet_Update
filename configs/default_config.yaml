@@ -2,11 +2,11 @@ system_model:
   N: 8  # number of antennas
   M: 3   # number of sources
   T: 200  # number of snapshots
-  snr: 0  # signal-to-noise ratio in dB
+  snr: 10  # signal-to-noise ratio in dB
   field_type: "far"  # "near" or "far"
   signal_nature: "non-coherent"  # "non-coherent" or "coherent"
   signal_type: "narrowband"  # "narrowband" only supported currently
-  wavelength: 0.06  # carrier wavelength in meters
+  wavelength: 1  # carrier wavelength in meters
   eta: 0.0  # steering vector uniform error variance
   bias: 0  # steering vector bias error
   sv_noise_var: 0.0  # steering vector additive gaussian error noise variance
@@ -32,6 +32,7 @@ model:
     train_loss_type: "rmspe"  # music_spectrum, rmspe
     tau: 8  # number of autocorrelation lags
     field_type: "Far"  # Far, Near
+
     regularization: "null"  # aic, mdl, threshold, null
     variant: "small"  # big, small
     norm_layer: false
@@ -39,7 +40,7 @@ model:
 
 training:
   enabled: True  # whether training is enabled
-  epochs: 3
+  epochs: 30
   batch_size: 256
   optimizer: "Adam"  # Adam, SGD
   scheduler: "ReduceLROnPlateau"  # StepLR, ReduceLROnPlateau
@@ -53,12 +54,13 @@ training:
   save_checkpoint: true  # whether to save model checkpoints during training
 
 simulation:
-  train_model: true
+  train_model: false
   evaluate_model: true
-  load_model: false
-  save_model: false
+  load_model: true
+  save_model: true
   plot_results: true
-  save_plots: false
+  save_plots: true
+  model_path: experiments/results/checkpoints/saved_SubspaceNet_20250517_140017.pt # Path to a trained model file (.pt)
   subspace_methods:
     - "ESPRIT"
 
@@ -66,7 +68,13 @@ simulation:
 evaluation: {}
 
 trajectory:
-  enabled: false
+  enabled: true
   trajectory_type: "random_walk"
-  trajectory_length: 10
+  trajectory_length: 30
+  random_walk_std_dev: 5  # standard deviation for random walk trajectory (degrees)
   save_trajectory: false 
+
+kalman_filter:
+  process_noise_std_dev: null  # standard deviation of process noise (degrees), null to use trajectory.random_walk_std_dev
+  measurement_noise_std_dev: 1.0e-3  # standard deviation of measurement noise (degrees)
+  initial_covariance: 1.0  # initial state covariance 
