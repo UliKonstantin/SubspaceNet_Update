@@ -753,4 +753,175 @@ class TrajectoryDataset(Dataset):
                 n_src = src[t]
                 padded_labels[i, t, :n_src] = lbl[t]
         
-        return padded_time_series, padded_sources_num, padded_labels 
+        return padded_time_series, padded_sources_num, padded_labels
+
+
+class OnlineLearningDataset(Dataset):
+    """
+    Dataset class for online learning with trajectory data.
+    
+    Extends Dataset to support windowed access to a single trajectory
+    for online learning and drift detection.
+    """
+    
+    def __init__(self, trajectory_data, window_size, stride=1):
+        """
+        Initialize the dataset with a single trajectory.
+        
+        Args:
+            trajectory_data: Tuple of (time_series, sources_num, labels) for a single trajectory
+                - time_series: Tensor of shape [trajectory_length, N, T]
+                - sources_num: List of source counts for each step
+                - labels: List of angle (and possibly range) labels for each step
+            window_size: Size of sliding window over the trajectory
+            stride: Step size for sliding window
+        """
+        self.time_series, self.sources_num, self.labels = trajectory_data
+        self.window_size = window_size
+        self.stride = stride
+        
+        # Calculate the number of windows
+        trajectory_length = len(self.time_series)
+        self.num_windows = max(0, (trajectory_length - window_size) // stride + 1)
+        
+        # Validate that we have at least one window
+        if self.num_windows == 0:
+            raise ValueError(f"Trajectory length {trajectory_length} is too short for window size {window_size}")
+            
+        logger.info(f"Created OnlineLearningDataset with {self.num_windows} windows of size {window_size} (stride={stride})")
+    
+    def __len__(self):
+        """Return the number of windows."""
+        return self.num_windows
+    
+    def __getitem__(self, idx):
+        """
+        Get a window of the trajectory.
+        
+        Args:
+            idx: Index of the window
+            
+        Returns:
+            Tuple of (time_series_window, sources_num_window, labels_window)
+        """
+        # Calculate start and end indices
+        start_idx = idx * self.stride
+        end_idx = start_idx + self.window_size
+        
+        # Extract window data
+        time_series_window = self.time_series[start_idx:end_idx]
+        sources_num_window = self.sources_num[start_idx:end_idx]
+        labels_window = [self.labels[i] for i in range(start_idx, end_idx)]
+        
+        return time_series_window, sources_num_window, labels_window
+    
+    def get_dataloader(self, batch_size=1, shuffle=False):
+        """
+        Create a dataloader for this dataset.
+        
+        Args:
+            batch_size: Batch size (typically 1 for online learning)
+            shuffle: Whether to shuffle the windows
+            
+        Returns:
+            DataLoader for the windows
+        """
+        return DataLoader(
+            self, 
+            batch_size=batch_size, 
+            shuffle=shuffle,
+            collate_fn=self._collate_windows
+        )
+    
+    def _collate_windows(self, batch):
+        """
+        Custom collate function for batches of windows.
+        
+        Args:
+            batch: List of (time_series_window, sources_num_window, labels_window) tuples
+            
+        Returns:
+            Collated batch with proper format for online learning
+        """
+        # This is typically called with batch_size=1 for online learning,
+        # but we handle the general case for flexibility
+        
+        time_series, sources_num, labels = zip(*batch)
+        batch_size = len(time_series)
+        
+        # Process each window
+        processed_time_series = []
+        processed_sources_num = []
+        processed_labels = []
+        
+        for i in range(batch_size):
+            # Fix: time_series[i] might already be a stacked tensor
+            if isinstance(time_series[i], list) or isinstance(time_series[i], tuple):
+                # If it's a list or tuple of tensors, stack them
+                window_time_series = torch.stack(time_series[i])
+            else:
+                # If it's already a tensor, use it directly
+                window_time_series = time_series[i]
+            
+            # Convert sources_num to tensor if it's not already
+            if isinstance(sources_num[i], list) or isinstance(sources_num[i], tuple):
+                window_sources_num = torch.tensor(sources_num[i])
+            else:
+                window_sources_num = sources_num[i]
+            
+            # Process labels
+            window_labels = labels[i]
+            
+            processed_time_series.append(window_time_series)
+            processed_sources_num.append(window_sources_num)
+            processed_labels.append(window_labels)
+        
+        # Stack across batch dimension
+        stacked_time_series = torch.stack(processed_time_series)
+        stacked_sources_num = torch.stack(processed_sources_num)
+        
+        # Labels need special handling since they might vary in size per step
+        # For now, we keep them as a list of lists
+        
+        return stacked_time_series, stacked_sources_num, processed_labels
+
+
+def create_online_learning_dataset(trajectory_handler, config, window_size=10, stride=5):
+    """
+    Create a dataset for online learning from a single trajectory.
+    
+    Args:
+        trajectory_handler: TrajectoryDataHandler instance
+        config: Configuration object
+        window_size: Size of sliding window
+        stride: Step size for sliding window
+        
+    Returns:
+        OnlineLearningDataset instance
+    """
+    logger.info(f"Creating online learning dataset with window_size={window_size}, stride={stride}")
+    
+    # Generate a single long trajectory
+    trajectory_length = config.trajectory.trajectory_length
+    if hasattr(config.online_learning, 'trajectory_length'):
+        trajectory_length = config.online_learning.trajectory_length
+    
+    logger.info(f"Generating single trajectory with length {trajectory_length}")
+    
+    # Create a dataset with a single trajectory
+    single_trajectory_dataset, samples_model = trajectory_handler.create_dataset(
+        samples_size=1,  # Just one trajectory
+        trajectory_length=trajectory_length,
+        trajectory_type=config.trajectory.trajectory_type,
+        save_dataset=False
+    )
+    
+    # Extract the single trajectory
+    time_series, sources_num, labels = single_trajectory_dataset[0]
+    
+    # Create the online learning dataset
+    return OnlineLearningDataset(
+        trajectory_data=(time_series, sources_num, labels),
+        window_size=window_size,
+        stride=stride
+    ) 

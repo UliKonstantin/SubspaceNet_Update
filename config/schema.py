@@ -4,7 +4,7 @@ Configuration schema for SubspaceNet using Pydantic models.
 This module defines the schema for validating configuration files using Pydantic.
 """
 
-from typing import Optional, List, Literal, Union, Dict, Any
+from typing import Optional, List, Literal, Union, Dict, Any, Tuple
 from pydantic import BaseModel, Field
 from enum import Enum
 
@@ -119,6 +119,63 @@ class KalmanFilterConfig(BaseModel):
     initial_covariance: float = 1.0  # Initial state covariance (uncertainty)
 
 
+class OnlineLearningConfig(BaseModel):
+    """Online learning configuration parameters."""
+    enabled: bool = False
+    window_size: int = Field(default=10, description="Size of the sliding window for trajectory data.")
+    stride: int = Field(default=5, description="Stride between consecutive windows.")
+    loss_threshold: float = Field(default=0.5, description="Threshold for detecting model drift and triggering online learning.")
+    max_iterations: int = Field(default=10, description="Maximum number of training iterations per window.")
+    learning_rate: float = Field(default=1e-4, description="Learning rate for online training (smaller than main training).")
+    trajectory_length: Optional[int] = Field(default=None, description="Length of trajectory for online learning. If None, uses trajectory.trajectory_length.")
+
+
+class ScenarioSystemModelOverride(BaseModel):
+    """Defines overrides for SystemModelConfig for a specific scenario."""
+    N: Optional[int] = None
+    M: Optional[Union[int, Tuple[int, int]]] = None
+    T: Optional[int] = None
+    snr: Optional[float] = None
+    field_type: Optional[Literal["near", "far"]] = None
+    signal_nature: Optional[Literal["coherent", "non-coherent"]] = None
+    signal_type: Optional[Literal["narrowband", "broadband"]] = None
+    wavelength: Optional[float] = None
+    eta: Optional[float] = None
+    bias: Optional[float] = None
+    sv_noise_var: Optional[float] = None
+    doa_range: Optional[int] = None
+    doa_resolution: Optional[int] = None
+    max_range_ratio_to_limit: Optional[float] = None
+    range_resolution: Optional[int] = None
+
+    class Config:
+        extra = 'forbid'  # Prevent unspecified fields
+
+
+class ScenarioModelOverride(BaseModel):
+    """Defines overrides for ModelConfig for a specific scenario."""
+    type: Optional[str] = None  # e.g., "SubspaceNet", "DCD-MUSIC". If type changes, architecture changes.
+    # params: Optional[ModelParamsConfig] = None # For overriding model-specific parameters
+
+    class Config:
+        extra = 'forbid'
+
+
+class ScenarioDefinition(BaseModel):
+    """Defines a single scenario to be run."""
+    name: str = Field(..., description="Unique name for the scenario (used for output folders, results keys).")
+    system_model_overrides: Optional[ScenarioSystemModelOverride] = None
+    model_overrides: Optional[ScenarioModelOverride] = None
+    retrain_model: bool = Field(default=False, description="If True, model is retrained for this scenario. If False, uses base/loaded model.")
+
+
+class ScenarioConfig(BaseModel):
+    """Configuration for running a scenario with multiple parameter values."""
+    type: str = Field(..., description="Type of scenario to run (e.g., 'SNR', 'T', 'M', 'eta').")
+    values: List[float] = Field(..., description="List of values to test for this scenario type.")
+    retrain_model: bool = Field(default=False, description="Whether to retrain the model for each scenario value.")
+
+
 class Config(BaseModel):
     """Complete configuration model."""
     system_model: SystemModelConfig = SystemModelConfig()
@@ -129,6 +186,11 @@ class Config(BaseModel):
     evaluation: EvaluationConfig = EvaluationConfig()
     trajectory: TrajectoryConfig = TrajectoryConfig()
     kalman_filter: KalmanFilterConfig = KalmanFilterConfig()
+    online_learning: OnlineLearningConfig = OnlineLearningConfig()
+    # New scenario-related fields
+    scenarios: Optional[List[ScenarioDefinition]] = Field(default=None, description="List of scenarios to run.")
+    train_base_model_only_once: bool = Field(default=True, description="If True and scenarios use a shared model, train it only once initially.")
+    scenario_config: Optional[ScenarioConfig] = Field(default=None, description="Configuration for running a scenario with multiple parameter values.")
 
 
     #missing: critirion, balance factor, sequential_dataset_train, sequential_dataset_test, evaluation params, simulation_commands

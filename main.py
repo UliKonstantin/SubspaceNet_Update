@@ -94,7 +94,7 @@ def evaluate_command(config: str, output: Optional[str], override: List[str],
 @config_option
 @output_option
 @override_option
-@click.option('--scenario', '-s', type=str, help='Run scenario (SNR, T, M, etc.)')
+@click.option('--scenario', '-s', type=str, help='Run scenario (SNR, T, M, eta, etc.)')
 @click.option('--values', '-v', multiple=True, type=float, help='Values to test in scenario (can be used multiple times)')
 @click.option('--trajectory/--no-trajectory', default=False, help='Enable trajectory-based data')
 def simulate_command(config: str, output: Optional[str], override: List[str], 
@@ -111,6 +111,16 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
         # Create simulation
         logger.info("Creating simulation")
         sim = Simulation(config_obj, components, output_dir)
+        
+        # Check if scenario and values are provided via command line
+        # If not, try to read them from the config file
+        if not scenario and hasattr(config_obj, 'scenario_config') and config_obj.scenario_config:
+            scenario = config_obj.scenario_config.type
+            logger.info(f"Using scenario type from config: {scenario}")
+            
+        if not values and hasattr(config_obj, 'scenario_config') and config_obj.scenario_config and config_obj.scenario_config.values:
+            values = config_obj.scenario_config.values
+            logger.info(f"Using scenario values from config: {values}")
         
         # Run a single simulation or a scenario
         if scenario and values:

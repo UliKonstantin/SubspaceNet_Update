@@ -128,24 +128,26 @@ class Simulation:
                     logger.error("No model available for evaluation")
                     return {"status": "error", "message": "No model available for evaluation"}
                 
+            # Execute online learning if enabled
+            if hasattr(self.config, 'online_learning') and getattr(self.config.online_learning, 'enabled', False):
+                logger.info("Running online learning pipeline (online_learning.enabled=True)")
+                
+                # Make sure we have a model for online learning
+                if self.trained_model is None and self.model is not None:
+                    logger.info("Using non-trained model for online learning")
+                    self.trained_model = self.model
+                
+                # Run online learning
+                if self.trained_model is not None:
+                    self._run_online_learning()
+                else:
+                    logger.error("No model available for online learning")
+                    return {"status": "error", "message": "No model available for online learning"}
+                
             # Save model if configured
             if self.config.simulation.save_model and self.trained_model is not None:
-                model_save_dir = self.output_dir / "checkpoints"
-                model_save_dir.mkdir(parents=True, exist_ok=True)
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                model_type = self.config.model.type
-                model_save_path = model_save_dir / f"saved_{model_type}_{timestamp}.pt"
-                
-                logger.info(f"Saving model to {model_save_path}")
-                
-                # Save only the state_dict, not the entire model
-                # This is more compatible across PyTorch versions
-                try:
-                    torch.save(self.trained_model.state_dict(), model_save_path)
-                    logger.info(f"Model saved successfully to {model_save_path}")
-                except Exception as e:
-                    logger.error(f"Failed to save model: {e}")
-                
+                self._save_model_state(self.trained_model)
+            
             # Save results
             self._save_results()
             
@@ -1021,3 +1023,314 @@ class Simulation:
         except Exception as load_err:
             logger.error(f"Failed to load or apply model weights from {model_path}: {load_err}")
             return False, f"Error during model loading: {load_err}" 
+
+    def _save_model_state(self, model, model_type=None):
+        """
+        Save model state to a timestamped file in the checkpoints directory.
+        
+        Args:
+            model: Model to save
+            model_type: Type of model for filename (uses config if None)
+            
+        Returns:
+            Path to saved model or None if save failed
+        """
+        if model is None:
+            logger.warning("Cannot save model: model is None")
+            return None
+        
+        model_save_dir = self.output_dir / "checkpoints"
+        model_save_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Determine model type from config if not provided
+        if model_type is None:
+            model_type = self.config.model.type
+        
+        model_save_path = model_save_dir / f"saved_{model_type}_{timestamp}.pt"
+        
+        logger.info(f"Saving model to {model_save_path}")
+        
+        # Save only the state_dict, not the entire model
+        try:
+            torch.save(model.state_dict(), model_save_path)
+            logger.info(f"Model saved successfully to {model_save_path}")
+            return model_save_path
+        except Exception as e:
+            logger.error(f"Failed to save model: {e}")
+            return None
+
+    def _run_online_learning(self) -> None:
+        """
+        Execute online learning on a single trajectory with drift detection.
+        
+        This method:
+        1. Loads a pre-trained model
+        2. Processes trajectory data window-by-window
+        3. Evaluates performance on each window to detect drift
+        4. Performs unsupervised online training when drift is detected
+        5. Tracks loss/performance over time
+        
+        Returns:
+            None, but stores results in self.results
+        """
+        logger.info("Starting online learning pipeline")
+        
+        # Validate that we have a model to use
+        if self.trained_model is None and self.model is not None:
+            logger.info("Using loaded model for online learning")
+            self.trained_model = self.model
+        elif self.trained_model is None:
+            logger.error("No model available for online learning")
+            self.results["online_learning_error"] = "No model available"
+            return
+        
+        # Ensure model is in evaluation mode initially
+        self.trained_model.eval()
+        
+        # Get online learning configuration parameters
+        if not hasattr(self.config, 'online_learning'):
+            logger.error("No online_learning configuration section found")
+            self.results["online_learning_error"] = "Missing online_learning configuration"
+            return
+        
+        window_size = getattr(self.config.online_learning, 'window_size', 10)
+        stride = getattr(self.config.online_learning, 'stride', 5)
+        loss_threshold = getattr(self.config.online_learning, 'loss_threshold', 0.5)
+        max_iterations = getattr(self.config.online_learning, 'max_iterations', 10)
+        
+        # Create trajectory handler if needed
+        if self.trajectory_handler is None:
+            self._create_trajectory_handler()
+        
+        if self.trajectory_handler is None:
+            logger.error("Failed to create trajectory handler")
+            self.results["online_learning_error"] = "Failed to create trajectory handler"
+            return
+        
+        try:
+            # Create online learning dataset
+            from simulation.runners.data import create_online_learning_dataset
+            
+            logger.info(f"Creating online learning dataset with window_size={window_size}, stride={stride}")
+            online_dataset = create_online_learning_dataset(
+                self.trajectory_handler,
+                self.config,
+                window_size=window_size,
+                stride=stride
+            )
+            
+            # Create dataloader
+            dataloader = online_dataset.get_dataloader(batch_size=1, shuffle=False)
+            logger.info(f"Created online learning dataloader with {len(dataloader)} windows")
+            
+            # Initialize results containers
+            drift_detected_count = 0
+            model_updated_count = 0
+            window_losses = []
+            window_update_flags = []
+            
+            # Initialize Kalman filter
+            kf_Q, kf_R, kf_P0 = KalmanFilter1D.from_config(self.config)
+            batch_kf = BatchKalmanFilter1D.from_config(
+                self.config,
+                batch_size=1,  # Single trajectory
+                max_sources=self.system_model.params.M,
+                device=device
+            )
+            
+            # Initialize online trainer
+            from simulation.runners.training import OnlineTrainer
+            online_trainer = OnlineTrainer(
+                model=self.trained_model,
+                config=self.config,
+                device=device
+            )
+            
+            # Process each window
+            with torch.no_grad():
+                for window_idx, trajectory_window in enumerate(tqdm(dataloader, desc="Online Learning")):
+                    # Unpack window data
+                    time_series, sources_num, labels = trajectory_window
+                    
+                    # Calculate loss on window
+                    window_loss = self._evaluate_window(time_series, sources_num, labels)
+                    window_losses.append(window_loss)
+                    
+                    logger.info(f"Window {window_idx}: Loss = {window_loss:.6f}")
+                    
+                    # Check if loss exceeds threshold (drift detected)
+                    if window_loss > loss_threshold:
+                        logger.info(f"Drift detected in window {window_idx} (loss: {window_loss:.6f} > threshold: {loss_threshold:.6f})")
+                        drift_detected_count += 1
+                        
+                        # Re-enable gradients for training
+                        with torch.enable_grad():
+                            # Perform online training
+                            updated_model, updated_loss = online_trainer.train_on_window(
+                                trajectory_window,
+                                max_iterations=max_iterations
+                            )
+                            
+                            # Update model if training improved performance
+                            if updated_loss < window_loss:
+                                logger.info(f"Model updated: Loss improved from {window_loss:.6f} to {updated_loss:.6f}")
+                                self.trained_model = updated_model
+                                model_updated_count += 1
+                                window_update_flags.append(True)
+                            else:
+                                logger.info(f"Model update rejected: Loss did not improve ({updated_loss:.6f} >= {window_loss:.6f})")
+                                window_update_flags.append(False)
+                    else:
+                        logger.info(f"No drift detected in window {window_idx} (loss: {window_loss:.6f} <= threshold: {loss_threshold:.6f})")
+                        window_update_flags.append(False)
+                
+                # Save final model if it was updated
+                if model_updated_count > 0:
+                    model_save_path = self._save_model_state(
+                        self.trained_model,
+                        model_type=f"{self.config.model.type}_online_updated"
+                    )
+                    logger.info(f"Saved final online-updated model to {model_save_path}")
+            
+            # Store results
+            self.results["online_learning"] = {
+                "window_losses": window_losses,
+                "window_updates": window_update_flags,
+                "drift_detected_count": drift_detected_count,
+                "model_updated_count": model_updated_count,
+                "window_count": len(dataloader),
+                "window_size": window_size,
+                "stride": stride,
+                "loss_threshold": loss_threshold
+            }
+            
+            # Plot results
+            self._plot_online_learning_results(window_losses, window_update_flags)
+            
+            logger.info(f"Online learning completed: {drift_detected_count} drifts detected, {model_updated_count} model updates")
+            
+        except Exception as e:
+            logger.exception(f"Error during online learning: {e}")
+            self.results["online_learning_error"] = str(e)
+
+    def _evaluate_window(self, window_time_series, window_sources_num, window_labels):
+        """
+        Calculate loss on a window of trajectory data.
+        
+        Args:
+            window_time_series: Time series data for window [batch, window_size, N, T]
+            window_sources_num: Source counts for window [batch, window_size]
+            window_labels: Labels for window (list of tensors)
+            
+        Returns:
+            Average loss across window
+        """
+        # Assuming batch size of 1 for online learning
+        time_series = window_time_series[0]
+        sources_num = window_sources_num[0]
+        labels = window_labels[0]
+        
+        window_size = time_series.shape[0]
+        total_loss = 0.0
+        
+        # Check if we're dealing with far-field or near-field
+        is_near_field = hasattr(self.trained_model, 'field_type') and self.trained_model.field_type.lower() == "near"
+        
+        # Use RMSPE loss for evaluation
+        from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
+        rmspe_criterion = RMSPELoss().to(device)
+        
+        # Process each step in window
+        for step in range(window_size):
+            # Extract data for this step
+            step_data = time_series[step:step+1].to(device)  # Add batch dimension
+            step_sources = sources_num[step].item()
+            
+            # Skip if no sources
+            if step_sources <= 0:
+                continue
+            
+            # Forward pass through model
+            if not is_near_field:
+                angles_pred, _, _ = self.trained_model(step_data, step_sources)
+                
+                # Get ground truth labels
+                step_labels = torch.tensor(labels[step][:step_sources]).unsqueeze(0).to(device)
+                
+                # Calculate loss
+                loss = rmspe_criterion(angles_pred, step_labels)
+            else:
+                # Near-field case
+                angles_pred, ranges_pred, _, _ = self.trained_model(step_data, step_sources)
+                
+                # Get ground truth labels (assuming format matches)
+                step_labels = torch.tensor(labels[step]).unsqueeze(0).to(device)
+                angles_gt = step_labels[:, :step_sources]
+                ranges_gt = step_labels[:, step_sources:step_sources*2]
+                
+                # Calculate loss (combined angle and range)
+                angle_loss = rmspe_criterion(angles_pred, angles_gt)
+                range_loss = rmspe_criterion(ranges_pred, ranges_gt)
+                loss = angle_loss + range_loss
+            
+            total_loss += loss.item()
+        
+        # Calculate average loss
+        if window_size > 0:
+            return total_loss / window_size
+        else:
+            return float('inf')
+
+    def _plot_online_learning_results(self, window_losses, window_updates):
+        """
+        Plot online learning results.
+        
+        Args:
+            window_losses: List of loss values per window
+            window_updates: List of boolean flags indicating model updates
+        """
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            # Create figure
+            plt.figure(figsize=(12, 6))
+            
+            # Create x-axis values
+            x = np.arange(len(window_losses))
+            
+            # Plot losses
+            plt.plot(x, window_losses, 'b-', label='Window Loss')
+            
+            # Highlight windows where model was updated
+            update_indices = [i for i, updated in enumerate(window_updates) if updated]
+            if update_indices:
+                update_losses = [window_losses[i] for i in update_indices]
+                plt.scatter(update_indices, update_losses, color='r', s=80, marker='o', label='Model Updated')
+            
+            # Add threshold line if configured
+            if hasattr(self.config.online_learning, 'loss_threshold'):
+                threshold = self.config.online_learning.loss_threshold
+                plt.axhline(y=threshold, color='g', linestyle='--', label=f'Threshold ({threshold})')
+            
+            # Add labels and title
+            plt.xlabel('Window Index')
+            plt.ylabel('Loss')
+            plt.title('Online Learning Results')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            # Save plot
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            plot_dir = self.output_dir / "plots"
+            plot_dir.mkdir(parents=True, exist_ok=True)
+            plot_path = plot_dir / f"online_learning_results_{timestamp}.png"
+            plt.savefig(plot_path)
+            
+            logger.info(f"Online learning results plot saved to {plot_path}")
+            
+        except ImportError:
+            logger.warning("matplotlib not available for plotting online learning results")
+        except Exception as e:
+            logger.error(f"Error plotting online learning results: {e}") 

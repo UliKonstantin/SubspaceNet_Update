@@ -125,6 +125,50 @@ To add new evaluation metrics:
 
 1. Update the `_calculate_metrics` method in `experiments/runner.py`
 
+## SubspaceNet Online Learning
+
+## Online Learning Framework
+
+The SubspaceNet online learning framework allows the model to adapt to changing conditions during inference through unsupervised learning. It monitors model performance in real-time and performs online adaptation when drift is detected.
+
+### Key Features
+
+- **Drift Detection**: Monitors model performance on sequential windows of trajectory data
+- **Unsupervised Adaptation**: Updates model parameters without ground truth through eigenvalue-based loss
+- **Adaptive Training**: Only retrains when necessary (when drift exceeds threshold)
+- **Performance Tracking**: Logs and visualizes model drift and update events
+
+### Running Online Learning
+
+To run a simulation with online learning enabled:
+
+```bash
+python main.py simulate -c configs/online_learning_example.yaml
+```
+
+### Configuration
+
+Online learning is controlled through the `online_learning` section in the configuration YAML:
+
+```yaml
+online_learning:
+  enabled: true                # Enable online learning
+  window_size: 20              # Size of sliding window
+  stride: 10                   # Step size for sliding window
+  loss_threshold: 0.5          # Threshold for detecting drift
+  max_iterations: 10           # Maximum iterations for online training
+  learning_rate: 0.0001        # Learning rate for online training
+  trajectory_length: 1000      # Length of trajectory for online learning
+```
+
+### Extending the Framework
+
+The online learning framework can be extended in several ways:
+
+1. **Custom Unsupervised Loss Functions**: Modify `_compute_unsupervised_loss` in `OnlineTrainer`
+2. **Advanced Drift Detection**: Implement more sophisticated detection in `_evaluate_window`
+3. **Specialized Window Processing**: Customize how trajectory windows are processed
+
 ## License
 
 [Add license information here] 

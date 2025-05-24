@@ -1,3 +1,9 @@
+# Online Learning Configuration
+# This configuration runs ONLY online learning with a pre-trained model
+# To use this config:
+# 1. Ensure model_path points to a valid model file (check 'ls -la experiments/results/checkpoints/')
+# 2. Run: python main.py simulate -c configs/online_learning_config.yaml -o experiments/results/online_learning_test
+
 system_model:
   N: 8  # number of antennas
   M: 3   # number of sources
@@ -32,49 +38,59 @@ model:
     train_loss_type: "rmspe"  # music_spectrum, rmspe
     tau: 8  # number of autocorrelation lags
     field_type: "Far"  # Far, Near
-
     regularization: "null"  # aic, mdl, threshold, null
     variant: "small"  # big, small
     norm_layer: false
     batch_norm: false
 
+# Disable regular training
 training:
-  enabled: false  # whether training is enabled
+  enabled: false
   epochs: 30
   batch_size: 256
-  optimizer: "Adam"  # Adam, SGD
-  scheduler: "ReduceLROnPlateau"  # StepLR, ReduceLROnPlateau
+  optimizer: "Adam"
+  scheduler: "ReduceLROnPlateau"
   learning_rate: 0.001
   weight_decay: 1e-9
   step_size: 50
   gamma: 0.5
-  training_objective: "angle"  # angle, range, (angle, range)
-  use_wandb: False
-  simulation_name: None
-  save_checkpoint: true  # whether to save model checkpoints during training
+  training_objective: "angle"
+  save_checkpoint: true
 
+# CRITICAL: Model loading must happen before online learning
+# Keep load_model true and provide a valid model path
 simulation:
   train_model: false
-  evaluate_model: true
-  load_model: true
+  evaluate_model: false
+  load_model: true  # IMPORTANT: Must be true to load model before online learning
   save_model: true
   plot_results: true
   save_plots: true
-  model_path: experiments/results/checkpoints/saved_SubspaceNet_20250517_140017.pt # Path to a trained model file (.pt)
-  subspace_methods:
-    - "ESPRIT"
-
+  # Use an existing model file found in the checkpoints directory
+  model_path: "experiments/results/checkpoints/saved_SubspaceNet_20250517_140017.pt"  # Latest model from May 17, 2025
+  subspace_methods: []  # No classic methods needed for online learning
 
 evaluation: {}
 
+# Enable trajectory with longer sequence for online learning
 trajectory:
   enabled: true
   trajectory_type: "random_walk"
-  trajectory_length: 30
-  random_walk_std_dev: 5  # standard deviation for random walk trajectory (degrees)
+  trajectory_length: 200  # Longer trajectory for online learning
+  random_walk_std_dev: 5.0  # standard deviation for random walk trajectory (degrees)
   save_trajectory: false 
 
 kalman_filter:
   process_noise_std_dev: null  # standard deviation of process noise (degrees), null to use trajectory.random_walk_std_dev
   measurement_noise_std_dev: 1.0e-3  # standard deviation of measurement noise (degrees)
-  initial_covariance: 1.0  # initial state covariance 
+  initial_covariance: 1.0  # initial state covariance
+
+# Enable online learning with appropriate parameters
+online_learning:
+  enabled: true  # Enable online learning
+  window_size: 20  # Size of sliding window
+  stride: 10  # Step size for sliding window
+  loss_threshold: 0.5  # Threshold for detecting drift and triggering online learning
+  max_iterations: 10  # Maximum iterations for online training
+  learning_rate: 0.0001  # Learning rate for online training (smaller than main training)
+  trajectory_length: 500  # Length of trajectory specifically for online learning 

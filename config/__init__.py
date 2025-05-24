@@ -12,7 +12,10 @@ from .schema import (
     ModelParamsConfig,
     TrainingConfig,
     SimulationConfig,
-    EvaluationConfig
+    EvaluationConfig,
+    TrajectoryConfig,
+    KalmanFilterConfig,
+    OnlineLearningConfig
 )
 
 from .loader import (
@@ -30,6 +33,9 @@ __all__ = [
     'TrainingConfig',
     'SimulationConfig',
     'EvaluationConfig',
+    'TrajectoryConfig',
+    'KalmanFilterConfig',
+    'OnlineLearningConfig',
     'load_config',
     'save_config',
     'apply_overrides'

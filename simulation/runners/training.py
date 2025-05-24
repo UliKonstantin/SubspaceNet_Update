@@ -803,3 +803,177 @@ class TrajectoryTrainer:
         # Print model size (number of parameters)
         num_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         logger.info(f"Number of trainable parameters: {num_params:,}") 
+
+class OnlineTrainer:
+    """
+    Trainer for online learning and adaptation of DOA estimation models.
+    
+    This trainer performs unsupervised online learning when model drift is detected,
+    allowing the model to adapt to changing conditions during inference.
+    """
+    
+    def __init__(self, model, config, device=None):
+        """
+        Initialize the online trainer.
+        
+        Args:
+            model: Neural network model to adapt
+            config: Configuration parameters for training
+            device: Device to use for training (default: use global device)
+        """
+        self.model = model
+        self.config = config
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Setup optimizer with smaller learning rate for fine-tuning
+        lr = config.online_learning.learning_rate if hasattr(config.online_learning, 'learning_rate') else 1e-4
+        self.optimizer = optim.Adam(
+            self.model.parameters(),
+            lr=lr,
+            weight_decay=1e-5
+        )
+        
+        # Metrics tracking
+        self.iteration_losses = []
+        self.update_count = 0
+        
+        logger.info(f"Initialized OnlineTrainer with learning rate {lr}")
+    
+    def train_on_window(self, window_data, max_iterations=10):
+        """
+        Perform unsupervised learning on a window of trajectory data.
+        
+        Args:
+            window_data: Tuple of (time_series, sources_num, labels) for a window
+            max_iterations: Maximum number of training iterations
+            
+        Returns:
+            Tuple of (updated_model, final_loss)
+        """
+        # Unpack window data
+        time_series, sources_num, _ = window_data
+        window_size = time_series.shape[0]
+        
+        # Switch model to training mode
+        self.model.train()
+        
+        # Track losses for this window
+        window_losses = []
+        
+        # Train for specified iterations
+        for iteration in range(max_iterations):
+            # Zero gradients
+            self.optimizer.zero_grad()
+            
+            # Compute unsupervised loss across all steps in window
+            total_loss = 0.0
+            
+            for step in range(window_size):
+                # Extract data for current step
+                step_data = time_series[step:step+1].to(self.device)  # Add batch dimension
+                step_sources = sources_num[step].item()
+                
+                # Apply unsupervised loss function
+                loss = self._compute_unsupervised_loss(step_data, step_sources)
+                total_loss += loss
+            
+            # Average loss across steps
+            avg_loss = total_loss / window_size
+            
+            # Backward pass and optimization
+            avg_loss.backward()
+            self.optimizer.step()
+            
+            # Record loss
+            window_losses.append(avg_loss.item())
+            
+            # Early stopping if loss improves negligibly
+            if iteration > 2 and abs(window_losses[-1] - window_losses[-2]) < 1e-4:
+                logger.info(f"Early stopping at iteration {iteration} - loss converged")
+                break
+        
+        # Update metrics
+        self.iteration_losses.extend(window_losses)
+        self.update_count += 1
+        
+        # Switch back to evaluation mode
+        self.model.eval()
+        
+        # Return updated model and final loss
+        final_loss = window_losses[-1] if window_losses else float('inf')
+        return self.model, final_loss
+    
+    def _compute_unsupervised_loss(self, data, num_sources):
+        """
+        Compute unsupervised loss for online learning.
+        
+        This is a placeholder implementation that can be customized based on
+        the specific unsupervised learning approach needed.
+        
+        Args:
+            data: Input data tensor
+            num_sources: Number of sources
+            
+        Returns:
+            Loss tensor
+        """
+        # Get field type from model if available
+        is_near_field = hasattr(self.model, 'field_type') and self.model.field_type.lower() == "near"
+        
+        # Forward pass
+        if not is_near_field:
+            angles_pred, _, eig_val = self.model(data, num_sources)
+        else:
+            angles_pred, ranges_pred, _, eig_val = self.model(data, num_sources)
+        
+        # Use eigenvalue-based loss for unsupervised learning
+        # This is just one possible approach - can be customized further
+        if isinstance(eig_val, torch.Tensor):
+            # Eigenvalue regularization loss - encourage larger separation between signal and noise subspaces
+            if eig_val.dim() > 1 and eig_val.shape[1] > num_sources:
+                # Get smallest signal eigenvalue and largest noise eigenvalue
+                signal_eigs = eig_val[0, :num_sources]
+                noise_eigs = eig_val[0, num_sources:]
+                
+                if signal_eigs.shape[0] > 0 and noise_eigs.shape[0] > 0:
+                    min_signal_eig = torch.min(signal_eigs)
+                    max_noise_eig = torch.max(noise_eigs)
+                    
+                    # Maximize gap between signal and noise eigenvalues
+                    gap_loss = torch.relu(max_noise_eig - min_signal_eig + 0.1)
+                    
+                    # Add smoothness constraint for predicted angles (if multiple sources)
+                    smoothness_loss = 0.0
+                    if angles_pred.shape[1] > 1:
+                        # Sort angles for consistent ordering
+                        sorted_angles, _ = torch.sort(angles_pred, dim=1)
+                        # Compute angular separation (want reasonable separation between sources)
+                        diff = torch.diff(sorted_angles, dim=1)
+                        # Penalize too small separations
+                        min_separation = 5.0  # Minimum desired separation in degrees
+                        smoothness_loss = torch.mean(torch.relu(min_separation - diff))
+                    
+                    # Combine losses
+                    return gap_loss + 0.2 * smoothness_loss
+            
+            # Fallback if eigenvalue shape is unexpected
+            return torch.mean(1.0 / (eig_val + 1e-10))
+        
+        # Default fallback if no eigenvalues available
+        # We use the consistency of angle predictions as a proxy for model confidence
+        if angles_pred.shape[1] > 1:
+            # Check consistency by sorting predicted angles
+            sorted_angles, _ = torch.sort(angles_pred, dim=1)
+            # Compute angular separation
+            diff = torch.diff(sorted_angles, dim=1)
+            # Encourage reasonable separation between sources
+            return torch.mean(torch.relu(5.0 - diff))  # Penalize separations < 5 degrees
+        
+        # If only one source, return a small constant loss
+        # We don't have good unsupervised loss in this case
+        return torch.tensor(0.1, device=self.device, requires_grad=True)
+    
+    def reset_metrics(self):
+        """Reset all metrics for new tracking."""
+        self.iteration_losses = []
+        self.update_count = 0 

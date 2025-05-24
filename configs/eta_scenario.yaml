@@ -7,7 +7,7 @@ system_model:
   signal_nature: "non-coherent"  # "non-coherent" or "coherent"
   signal_type: "narrowband"  # "narrowband" only supported currently
   wavelength: 1  # carrier wavelength in meters
-  eta: 0.0  # steering vector uniform error variance
+  eta: 0.0  # baseline steering vector calibration error (noise) variance
   bias: 0  # steering vector bias error
   sv_noise_var: 0.0  # steering vector additive gaussian error noise variance
   doa_range: 60  # range of DOA values [-doa_range, doa_range]
@@ -16,7 +16,7 @@ system_model:
   range_resolution: 1  # resolution of range values in meters
 
 dataset:
-  samples_size: 256  # overall dataset size
+  samples_size: 1024  # overall dataset size
   train_test_ratio: 1  # ratio between train and test datasets
   create_data: true  # whether to create new data or use existing data
   save_dataset: false  # whether to save the dataset
@@ -32,15 +32,14 @@ model:
     train_loss_type: "rmspe"  # music_spectrum, rmspe
     tau: 8  # number of autocorrelation lags
     field_type: "Far"  # Far, Near
-
     regularization: "null"  # aic, mdl, threshold, null
     variant: "small"  # big, small
     norm_layer: false
     batch_norm: false
 
 training:
-  enabled: false  # whether training is enabled
-  epochs: 30
+  enabled: true  # whether training is enabled
+  epochs: 2  # reduced for faster testing
   batch_size: 256
   optimizer: "Adam"  # Adam, SGD
   scheduler: "ReduceLROnPlateau"  # StepLR, ReduceLROnPlateau
@@ -49,21 +48,20 @@ training:
   step_size: 50
   gamma: 0.5
   training_objective: "angle"  # angle, range, (angle, range)
-  use_wandb: False
-  simulation_name: None
+  use_wandb: false
+  simulation_name: "eta_calibration"
   save_checkpoint: true  # whether to save model checkpoints during training
 
 simulation:
-  train_model: false
+  train_model: false  # we'll use a pre-trained model
   evaluate_model: true
   load_model: true
-  save_model: true
+  save_model: false
   plot_results: true
   save_plots: true
-  model_path: experiments/results/checkpoints/saved_SubspaceNet_20250517_140017.pt # Path to a trained model file (.pt)
+  model_path: "experiments/results/checkpoints/saved_SubspaceNet_20250517_140017.pt"  # Path to a trained model file (.pt)
   subspace_methods:
     - "ESPRIT"
-
 
 evaluation: {}
 
@@ -77,4 +75,10 @@ trajectory:
 kalman_filter:
   process_noise_std_dev: null  # standard deviation of process noise (degrees), null to use trajectory.random_walk_std_dev
   measurement_noise_std_dev: 1.0e-3  # standard deviation of measurement noise (degrees)
-  initial_covariance: 1.0  # initial state covariance 
+  initial_covariance: 1.0  # initial state covariance
+
+# Scenario configuration to run varying eta values
+scenario_config:
+  type: "eta"
+  values: [0.0, 0.05, 0.1, 0.2, 0.3,20]
+  retrain_model: false  # use the same model for all scenarios 
