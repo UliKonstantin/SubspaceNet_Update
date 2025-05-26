@@ -122,12 +122,21 @@ class KalmanFilterConfig(BaseModel):
 class OnlineLearningConfig(BaseModel):
     """Online learning configuration parameters."""
     enabled: bool = False
-    window_size: int = Field(default=10, description="Size of the sliding window for trajectory data.")
-    stride: int = Field(default=5, description="Stride between consecutive windows.")
+    window_size: int = Field(default=10, description="Size of the sliding window (number of steps) over the trajectory data.")
+    stride: int = Field(default=5, description="Stride between consecutive windows (number of steps). Defines window density and overlap.")
     loss_threshold: float = Field(default=0.5, description="Threshold for detecting model drift and triggering online learning.")
-    max_iterations: int = Field(default=10, description="Maximum number of training iterations per window.")
-    learning_rate: float = Field(default=1e-4, description="Learning rate for online training (smaller than main training).")
-    trajectory_length: Optional[int] = Field(default=None, description="Length of trajectory for online learning. If None, uses trajectory.trajectory_length.")
+    max_iterations: int = Field(default=10, description="Maximum number of training iterations per window when an update is triggered.")
+    learning_rate: float = Field(default=1e-4, description="Learning rate for online training (typically smaller than main training).")
+    
+    # trajectory_length now defines the total number of individual trajectory steps to be generated during the online learning session.
+    # This is used to determine the total number of windows that can be formed based on window_size and stride.
+    trajectory_length: Optional[int] = Field(default=1000, description="Total number of trajectory steps available for the entire online learning session.")
+
+    # Dynamic Eta Update Parameters
+    eta_update_interval_windows: Optional[int] = Field(default=None, description="Update eta every N windows. If None or 0, eta is not periodically updated by this mechanism. Manual/other triggers for eta change would still be possible.")
+    eta_increment: Optional[float] = Field(default=0.01, description="Amount to increment (if positive) or decrement (if negative) eta by when an update occurs.")
+    max_eta: Optional[float] = Field(default=0.5, description="Maximum allowed value for eta during dynamic updates.")
+    min_eta: Optional[float] = Field(default=0.0, description="Minimum allowed value for eta during dynamic updates.")
 
 
 class ScenarioSystemModelOverride(BaseModel):

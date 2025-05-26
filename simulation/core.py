@@ -240,6 +240,47 @@ class Simulation:
         
         # Store test dataloader in components
         self.components["test_dataloader"] = self.test_dataloader
+
+        # Create online learning dataset and dataloader if enabled
+        if hasattr(self.config, 'online_learning') and getattr(self.config.online_learning, 'enabled', False):
+            logger.info("Online learning is enabled, creating on-demand dataset and dataloader.")
+            if not self.config.trajectory.enabled:
+                logger.warning("Online learning typically relies on trajectory mode for continuous data generation. Ensure config is appropriate if trajectory.enabled is False.")
+            
+            # Ensure system_model and its params are available, as they are crucial for the generator
+            if self.system_model is None or not hasattr(self.system_model, 'params') or self.system_model.params is None:
+                logger.error("SystemModel or its params not available for online learning dataset creation. Online learning will be skipped.")
+                self.online_learning_dataloader = None
+            else:
+                # Use the refactored factory from simulation.runners.data
+                from simulation.runners.data import create_online_learning_dataset 
+                
+                online_config = self.config.online_learning
+                window_size = getattr(online_config, 'window_size', 10)
+                stride = getattr(online_config, 'stride', 5) 
+                
+                try:
+                    # Key change: Pass the shared self.system_model.params object.
+                    # This allows dynamic eta updates within the generator to be reflected.
+                    online_dataset = create_online_learning_dataset(
+                        system_model_params=self.system_model.params, # Shared instance
+                        config=self.config, # Pass full config for trajectory_length etc.
+                        window_size=window_size,
+                        stride=stride
+                    )
+                    # Batch size is 1 for online learning as we process window by window
+                    self.online_learning_dataloader = online_dataset.get_dataloader(batch_size=1, shuffle=False) 
+                    logger.info(f"Created on-demand online learning dataloader for {len(self.online_learning_dataloader)} windows.")
+                    self.components["online_learning_dataloader"] = self.online_learning_dataloader
+                except ValueError as e:
+                    logger.error(f"Error creating online learning dataset: {e}. Online learning may not function.")
+                    self.online_learning_dataloader = None
+                except Exception as e:
+                    logger.exception(f"Unexpected error during online learning dataset creation: {e}")
+                    self.online_learning_dataloader = None
+        else:
+            self.online_learning_dataloader = None # Ensure it's defined even if not used
+            logger.info("Online learning is not enabled. Skipping online learning dataset creation.")
         
     def _create_trajectory_dataset(self) -> Tuple[Any, Any]:
         """Create a dataset with trajectory support."""
@@ -1065,11 +1106,12 @@ class Simulation:
         Execute online learning on a single trajectory with drift detection.
         
         This method:
-        1. Loads a pre-trained model
-        2. Processes trajectory data window-by-window
-        3. Evaluates performance on each window to detect drift
-        4. Performs unsupervised online training when drift is detected
-        5. Tracks loss/performance over time
+        1. Uses a pre-loaded model (loaded in the main run method)
+        2. Uses a pre-loaded online learning dataloader (created in _run_data_pipeline)
+        3. Processes trajectory data window-by-window
+        4. Evaluates performance on each window to detect drift
+        5. Performs unsupervised online training when drift is detected
+        6. Tracks loss/performance over time
         
         Returns:
             None, but stores results in self.results
@@ -1077,67 +1119,47 @@ class Simulation:
         logger.info("Starting online learning pipeline")
         
         # Validate that we have a model to use
-        if self.trained_model is None and self.model is not None:
-            logger.info("Using loaded model for online learning")
-            self.trained_model = self.model
-        elif self.trained_model is None:
-            logger.error("No model available for online learning")
-            self.results["online_learning_error"] = "No model available"
+        if self.trained_model is None:
+            logger.error("No trained model available for online learning. Ensure model is loaded or trained beforehand.")
+            self.results["online_learning_error"] = "No model available for online learning"
             return
         
         # Ensure model is in evaluation mode initially
         self.trained_model.eval()
         
         # Get online learning configuration parameters
-        if not hasattr(self.config, 'online_learning'):
-            logger.error("No online_learning configuration section found")
-            self.results["online_learning_error"] = "Missing online_learning configuration"
+        if not hasattr(self.config, 'online_learning') or not self.config.online_learning.enabled:
+            logger.error("Online learning configuration section not found or not enabled.")
+            self.results["online_learning_error"] = "Missing or disabled online_learning configuration"
+            return
+
+        online_config = self.config.online_learning # Get the specific online learning config section
+
+        # Check for the pre-loaded dataloader (now on-demand)
+        if not hasattr(self, 'online_learning_dataloader') or self.online_learning_dataloader is None:
+            logger.error("Online learning dataloader not found. It should be created in _run_data_pipeline.")
+            self.results["online_learning_error"] = "Online learning dataloader missing"
             return
         
-        window_size = getattr(self.config.online_learning, 'window_size', 10)
-        stride = getattr(self.config.online_learning, 'stride', 5)
-        loss_threshold = getattr(self.config.online_learning, 'loss_threshold', 0.5)
-        max_iterations = getattr(self.config.online_learning, 'max_iterations', 10)
+        dataloader = self.online_learning_dataloader
+        logger.info(f"Using on-demand online learning dataloader, planning to generate {len(dataloader)} windows.")
+
+        loss_threshold = getattr(online_config, 'loss_threshold', 0.5)
+        max_iterations = getattr(online_config, 'max_iterations', 10)
         
-        # Create trajectory handler if needed
-        if self.trajectory_handler is None:
-            self._create_trajectory_handler()
-        
-        if self.trajectory_handler is None:
-            logger.error("Failed to create trajectory handler")
-            self.results["online_learning_error"] = "Failed to create trajectory handler"
+        # Trajectory handler is not directly used by the new on-demand generator for window data,
+        # but system_model.params (which the generator uses) should be initialized correctly.
+        if self.system_model is None or self.system_model.params is None:
+            logger.error("SystemModel or its params are unexpectedly None for online learning.")
+            self.results["online_learning_error"] = "SystemModel or params missing for online learning"
             return
         
         try:
-            # Create online learning dataset
-            from simulation.runners.data import create_online_learning_dataset
-            
-            logger.info(f"Creating online learning dataset with window_size={window_size}, stride={stride}")
-            online_dataset = create_online_learning_dataset(
-                self.trajectory_handler,
-                self.config,
-                window_size=window_size,
-                stride=stride
-            )
-            
-            # Create dataloader
-            dataloader = online_dataset.get_dataloader(batch_size=1, shuffle=False)
-            logger.info(f"Created online learning dataloader with {len(dataloader)} windows")
-            
             # Initialize results containers
             drift_detected_count = 0
             model_updated_count = 0
             window_losses = []
             window_update_flags = []
-            
-            # Initialize Kalman filter
-            kf_Q, kf_R, kf_P0 = KalmanFilter1D.from_config(self.config)
-            batch_kf = BatchKalmanFilter1D.from_config(
-                self.config,
-                batch_size=1,  # Single trajectory
-                max_sources=self.system_model.params.M,
-                device=device
-            )
             
             # Initialize online trainer
             from simulation.runners.training import OnlineTrainer
@@ -1147,51 +1169,87 @@ class Simulation:
                 device=device
             )
             
-            # Process each window
-            with torch.no_grad():
-                for window_idx, trajectory_window in enumerate(tqdm(dataloader, desc="Online Learning")):
-                    # Unpack window data
-                    time_series, sources_num, labels = trajectory_window
-                    
-                    # Calculate loss on window
-                    window_loss = self._evaluate_window(time_series, sources_num, labels)
-                    window_losses.append(window_loss)
-                    
-                    logger.info(f"Window {window_idx}: Loss = {window_loss:.6f}")
-                    
-                    # Check if loss exceeds threshold (drift detected)
-                    if window_loss > loss_threshold:
-                        logger.info(f"Drift detected in window {window_idx} (loss: {window_loss:.6f} > threshold: {loss_threshold:.6f})")
-                        drift_detected_count += 1
-                        
-                        # Re-enable gradients for training
-                        with torch.enable_grad():
-                            # Perform online training
-                            updated_model, updated_loss = online_trainer.train_on_window(
-                                trajectory_window,
-                                max_iterations=max_iterations
-                            )
-                            
-                            # Update model if training improved performance
-                            if updated_loss < window_loss:
-                                logger.info(f"Model updated: Loss improved from {window_loss:.6f} to {updated_loss:.6f}")
-                                self.trained_model = updated_model
-                                model_updated_count += 1
-                                window_update_flags.append(True)
-                            else:
-                                logger.info(f"Model update rejected: Loss did not improve ({updated_loss:.6f} >= {window_loss:.6f})")
-                                window_update_flags.append(False)
-                    else:
-                        logger.info(f"No drift detected in window {window_idx} (loss: {window_loss:.6f} <= threshold: {loss_threshold:.6f})")
-                        window_update_flags.append(False)
+            # Process each window (generated on-the-fly by the dataloader)
+            for window_idx, trajectory_window_batch_data in enumerate(tqdm(dataloader, desc="Online Learning")):
+                # The collate_fn of OnlineLearningDataset for batch_size=1 returns:
+                # - time_series_batch: Tensor[1, window_size, N, T]
+                # - sources_num_batch: Tensor[1, window_size] (list of M for each step)
+                # - labels_batch: List[1] containing a List[window_size] of np.ndarray (true angles per step)
                 
-                # Save final model if it was updated
-                if model_updated_count > 0:
-                    model_save_path = self._save_model_state(
-                        self.trained_model,
-                        model_type=f"{self.config.model.type}_online_updated"
-                    )
-                    logger.info(f"Saved final online-updated model to {model_save_path}")
+                time_series_single_window = trajectory_window_batch_data[0][0] # Shape: [window_size, N, T]
+                sources_num_single_window_list = trajectory_window_batch_data[1][0].tolist() # List[int] of len window_size
+                labels_single_window_list_of_arrays = trajectory_window_batch_data[2][0] # List[np.ndarray] of len window_size
+
+                # --- Dynamic Eta Update Logic ---
+                if online_config.eta_update_interval_windows and online_config.eta_update_interval_windows > 0 and \
+                   window_idx > 0 and window_idx % online_config.eta_update_interval_windows == 0:
+                    
+                    current_eta = self.system_model.params.eta # Get current eta from the shared SystemModelParams
+                    eta_increment = online_config.eta_increment if online_config.eta_increment is not None else 0.01
+                    new_eta = current_eta + eta_increment
+                    
+                    # Apply min/max bounds if configured
+                    if online_config.max_eta is not None:
+                        new_eta = min(new_eta, online_config.max_eta)
+                    if online_config.min_eta is not None: 
+                        new_eta = max(new_eta, online_config.min_eta)
+
+                    # Only call update if there's a meaningful change to avoid log spam
+                    if abs(new_eta - current_eta) > 1e-6: 
+                        logger.info(f"Online Learning: Dynamically updating eta at window {window_idx}. From {current_eta:.4f} to {new_eta:.4f}")
+                        # The dataset holds the generator, which updates the shared self.system_model.params.eta
+                        self.online_learning_dataloader.dataset.update_eta(new_eta) 
+                        # After this call, self.system_model.params.eta is updated, and the generator will use it.
+                # --- End Dynamic Eta Update Logic ---
+
+                # Calculate loss on the current window (generated with current eta)
+                # _evaluate_window expects: (Tensor[win_size, N, T], List[int], List[np.ndarray])
+                current_window_loss = self._evaluate_window(
+                    time_series_single_window, 
+                    sources_num_single_window_list, 
+                    labels_single_window_list_of_arrays
+                )
+                window_losses.append(current_window_loss)
+                
+                logger.info(f"Window {window_idx}: Loss = {current_window_loss:.6f} (current eta={self.system_model.params.eta:.4f})")
+                
+                # Check if loss exceeds threshold (drift detected)
+                if current_window_loss > loss_threshold:
+                    logger.info(f"Drift detected in window {window_idx} (loss: {current_window_loss:.6f} > threshold: {loss_threshold:.6f})")
+                    drift_detected_count += 1
+                    
+                    # Re-enable gradients for training
+                    # Pass the window data in the format expected by train_on_window
+                    # train_on_window expects (time_series_tensor, sources_num_list_or_tensor, labels_list_of_lists)
+                    # labels_single_window_list_of_arrays are the ground truth, used if loss needs them, ignored by unsupervised.
+                    training_window_data = (time_series_single_window, sources_num_single_window_list, labels_single_window_list_of_arrays)
+
+                    with torch.enable_grad(): 
+                        updated_model, updated_loss = online_trainer.train_on_window(
+                            training_window_data,
+                            max_iterations=max_iterations
+                        )
+                        
+                        # Update model if training improved performance
+                        if updated_loss < current_window_loss:
+                            logger.info(f"Model updated: Loss improved from {current_window_loss:.6f} to {updated_loss:.6f}")
+                            self.trained_model = updated_model # This updates the model instance used by online_trainer too
+                            model_updated_count += 1
+                            window_update_flags.append(True)
+                        else:
+                            logger.info(f"Model update rejected: Loss did not improve ({updated_loss:.6f} >= {current_window_loss:.6f})")
+                            window_update_flags.append(False)
+                else:
+                    logger.info(f"No drift detected in window {window_idx} (loss: {current_window_loss:.6f} <= threshold: {loss_threshold:.6f})")
+                    window_update_flags.append(False)
+            
+            # Save final model if it was updated
+            if model_updated_count > 0:
+                model_save_path = self._save_model_state(
+                    self.trained_model,
+                    model_type=f"{self.config.model.type}_online_updated"
+                )
+                logger.info(f"Saved final online-updated model to {model_save_path}")
             
             # Store results
             self.results["online_learning"] = {
@@ -1200,8 +1258,8 @@ class Simulation:
                 "drift_detected_count": drift_detected_count,
                 "model_updated_count": model_updated_count,
                 "window_count": len(dataloader),
-                "window_size": window_size,
-                "stride": stride,
+                "window_size": online_config.window_size,
+                "stride": online_config.stride,
                 "loss_threshold": loss_threshold
             }
             
@@ -1226,13 +1284,19 @@ class Simulation:
         Returns:
             Average loss across window
         """
-        # Assuming batch size of 1 for online learning
-        time_series = window_time_series[0]
-        sources_num = window_sources_num[0]
-        labels = window_labels[0]
+        # Assuming batch size of 1 for online learning as windows are processed sequentially.
+        # window_time_series: Tensor of shape [window_size, N, T]
+        # window_sources_num: List of source counts (int) for each step in the window [window_size]
+        # window_labels: List of true label np.arrays for each step in the window [window_size]
         
-        window_size = time_series.shape[0]
+        # Unpack arguments directly, assuming they are for a single window
+        time_series_steps = window_time_series # Already [window_size, N, T]
+        sources_num_per_step = window_sources_num # List[int]
+        labels_per_step_list = window_labels    # List[np.ndarray]
+        
+        current_window_len = time_series_steps.shape[0]
         total_loss = 0.0
+        num_valid_steps_for_loss = 0
         
         # Check if we're dealing with far-field or near-field
         is_near_field = hasattr(self.trained_model, 'field_type') and self.trained_model.field_type.lower() == "near"
@@ -1242,45 +1306,53 @@ class Simulation:
         rmspe_criterion = RMSPELoss().to(device)
         
         # Process each step in window
-        for step in range(window_size):
+        for step_idx in range(current_window_len):
             # Extract data for this step
-            step_data = time_series[step:step+1].to(device)  # Add batch dimension
-            step_sources = sources_num[step].item()
+            step_data_tensor = time_series_steps[step_idx:step_idx+1].to(device)  # Shape: [1, N, T] (add batch dim for model)
+            num_sources_this_step = sources_num_per_step[step_idx]
             
             # Skip if no sources
-            if step_sources <= 0:
+            if num_sources_this_step <= 0:
+                # total_loss += 0 # or some penalty? For now, skip contributing to loss.
+                # num_valid_steps_for_loss -=1
                 continue
             
             # Forward pass through model
-            if not is_near_field:
-                angles_pred, _, _ = self.trained_model(step_data, step_sources)
-                
-                # Get ground truth labels
-                step_labels = torch.tensor(labels[step][:step_sources]).unsqueeze(0).to(device)
-                
-                # Calculate loss
-                loss = rmspe_criterion(angles_pred, step_labels)
-            else:
-                # Near-field case
-                angles_pred, ranges_pred, _, _ = self.trained_model(step_data, step_sources)
-                
-                # Get ground truth labels (assuming format matches)
-                step_labels = torch.tensor(labels[step]).unsqueeze(0).to(device)
-                angles_gt = step_labels[:, :step_sources]
-                ranges_gt = step_labels[:, step_sources:step_sources*2]
-                
-                # Calculate loss (combined angle and range)
-                angle_loss = rmspe_criterion(angles_pred, angles_gt)
-                range_loss = rmspe_criterion(ranges_pred, ranges_gt)
-                loss = angle_loss + range_loss
+            self.trained_model.eval() # Ensure model is in eval mode for this evaluation part
+            with torch.no_grad():
+                if not is_near_field:
+                    # Model expects num_sources as int or 0-dim tensor
+                    angles_pred, _, _ = self.trained_model(step_data_tensor, num_sources_this_step)
+                    
+                    # Get ground truth labels for this step
+                    true_angles_this_step = torch.tensor(labels_per_step_list[step_idx][:num_sources_this_step], device=device).unsqueeze(0)
+                    
+                    # Calculate loss
+                    loss = rmspe_criterion(angles_pred, true_angles_this_step)
+                else:
+                    # Near-field case
+                    # Model expects num_sources as int or 0-dim tensor
+                    angles_pred, ranges_pred, _, _ = self.trained_model(step_data_tensor, num_sources_this_step)
+                    
+                    # Get ground truth labels (assuming format matches: angles then ranges)
+                    true_labels_this_step = torch.tensor(labels_per_step_list[step_idx], device=device).unsqueeze(0)
+                    angles_gt = true_labels_this_step[:, :num_sources_this_step]
+                    ranges_gt = true_labels_this_step[:, num_sources_this_step:num_sources_this_step*2] # Adjust if label format differs
+                    
+                    # Calculate loss (combined angle and range)
+                    angle_loss = rmspe_criterion(angles_pred, angles_gt)
+                    range_loss = rmspe_criterion(ranges_pred, ranges_gt)
+                    loss = angle_loss + range_loss # Example combination
             
             total_loss += loss.item()
+            num_valid_steps_for_loss += 1
         
-        # Calculate average loss
-        if window_size > 0:
-            return total_loss / window_size
+        # Calculate average loss for the window
+        if num_valid_steps_for_loss > 0:
+            return total_loss / num_valid_steps_for_loss
         else:
-            return float('inf')
+            logger.warning("No valid steps with sources found in the window for loss calculation.")
+            return float('inf') # Or 0.0, depending on desired behavior for empty windows
 
     def _plot_online_learning_results(self, window_losses, window_updates):
         """

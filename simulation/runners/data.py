@@ -21,7 +21,7 @@ from DCD_MUSIC.src.system_model import SystemModelParams
 from DCD_MUSIC.src.utils import device
 
 # Import from configuration module
-from config.schema import TrajectoryType
+from config.schema import TrajectoryType, TrajectoryConfig, Config
 
 logger = logging.getLogger('SubspaceNet.data')
 
@@ -756,172 +756,319 @@ class TrajectoryDataset(Dataset):
         return padded_time_series, padded_sources_num, padded_labels
 
 
+# NEW Class: OnlineLearningTrajectoryGenerator
+class OnlineLearningTrajectoryGenerator:
+    """
+    Generates a single, continuous trajectory on-demand for online learning.
+    Maintains the state of the true underlying trajectory and allows for
+    dynamic updates to system parameters like 'eta' which affect newly
+    generated noisy observations.
+    """
+    def __init__(self, system_model_params: SystemModelParams, 
+                 trajectory_config: TrajectoryConfig, 
+                 initial_eta: float,
+                 num_sources: Union[int, Tuple[int, int]]):
+        """
+        Initializes the generator.
+
+        Args:
+            system_model_params: The shared SystemModelParams instance. 
+                                 Changes to this instance (e.g., eta) will affect generation.
+            trajectory_config: Configuration for the trajectory generation (e.g., type, std_dev).
+            initial_eta: The initial value for eta.
+            num_sources: Number of sources (M). Can be an int or a tuple (min_M, max_M) for variable sources.
+        """
+        self.system_model_params = system_model_params
+        self.trajectory_config = trajectory_config
+        
+        # Set initial eta directly on the shared system_model_params
+        self.system_model_params.eta = initial_eta
+        
+        self.samples_model = Samples(self.system_model_params) # Uses the shared system_model_params
+
+        if isinstance(num_sources, tuple):
+            self.min_M, self.max_M = num_sources
+            self.M_is_variable = True
+            self.current_M = np.random.randint(self.min_M, self.max_M + 1)
+        else:
+            self.current_M = num_sources
+            self.M_is_variable = False
+
+        self.angle_min = -self.system_model_params.doa_range / 2
+        self.angle_max = self.system_model_params.doa_range / 2
+        
+        # State for the true underlying trajectory
+        self.last_true_angles = np.random.uniform(self.angle_min, self.angle_max, size=self.current_M)
+        # TODO: Add self.last_true_ranges for near-field if needed and make it dynamic based on field_type
+
+        self.current_step_in_session = 0
+        logger.info(f"OnlineLearningTrajectoryGenerator initialized. eta={self.system_model_params.eta:.4f}, M={self.current_M}, type={self.trajectory_config.trajectory_type.value}")
+
+    def update_eta(self, new_eta: float):
+        """Updates the eta value in the shared SystemModelParams."""
+        old_eta = self.system_model_params.eta
+        self.system_model_params.eta = new_eta
+        logger.info(f"Generator eta updated from {old_eta:.4f} to {self.system_model_params.eta:.4f} for future samples.")
+
+    def _generate_next_true_step(self) -> Tuple[np.ndarray, int]:
+        """Generates the next set of true angles (and potentially ranges) and the number of sources for this step."""
+        if self.M_is_variable: # Potentially change M at each step if configured
+             # Simple heuristic: 10% chance to change M
+            if np.random.rand() < 0.1:
+                self.current_M = np.random.randint(self.min_M, self.max_M + 1)
+                # If M changes, re-initialize angles for the new number of sources
+                self.last_true_angles = np.random.uniform(self.angle_min, self.angle_max, size=self.current_M)
+
+
+        # Trajectory generation logic (e.g., random walk)
+        # This should be more sophisticated, using self.trajectory_config.trajectory_type
+        # and other parameters like self.trajectory_config.random_walk_std_dev
+        
+        # Simplified Random Walk for now:
+        if self.trajectory_config.trajectory_type == TrajectoryType.RANDOM_WALK:
+            std_dev = self.trajectory_config.random_walk_std_dev if self.trajectory_config.random_walk_std_dev is not None else 1.0
+            noise = np.random.normal(0, std_dev, size=self.current_M)
+            next_angles = self.last_true_angles + noise
+            self.last_true_angles = np.clip(next_angles, self.angle_min, self.angle_max)
+        elif self.trajectory_config.trajectory_type == TrajectoryType.STATIC:
+            # Angles remain the same as self.last_true_angles (initialized once)
+            pass # No change needed for static
+        else: # Default to RANDOM if not specified or other types not implemented here yet
+            self.last_true_angles = np.random.uniform(self.angle_min, self.angle_max, size=self.current_M)
+            
+        # TODO: Implement other trajectory types (LINEAR, CIRCULAR etc.) if needed for online generation
+        # TODO: Handle near-field ranges generation based on self.system_model_params.field_type
+        
+        return self.last_true_angles.copy(), self.current_M
+
+    def get_next_window(self, window_size: int) -> Tuple[torch.Tensor, List[int], List[np.ndarray]]:
+        """
+        Generates the next window of trajectory data.
+
+        Args:
+            window_size: The number of time steps in the window.
+
+        Returns:
+            A tuple containing:
+            - observations_tensor: Tensor of shape [window_size, N_antennas, T_snapshots_per_step]
+            - sources_nums_list: List of source counts for each step in the window.
+            - true_labels_list: List of true angle (and range) np.arrays for each step.
+        """
+        window_observations_list = []
+        window_sources_nums_list = []
+        window_true_labels_list = []
+
+        for step_in_window in range(window_size):
+            current_true_angles, num_sources_for_step = self._generate_next_true_step()
+            
+            # Set labels for the Samples model (which uses the current eta from shared system_model_params)
+            if self.system_model_params.field_type.lower() == "far":
+                self.samples_model.set_labels(num_sources_for_step, angles=current_true_angles.tolist(), distances=None)
+            else: # near or full field
+                # TODO: Add actual distance generation for near-field
+                # For now, using placeholder distances if near-field
+                placeholder_distances = np.array([20.0] * num_sources_for_step) 
+                self.samples_model.set_labels(num_sources_for_step, angles=current_true_angles.tolist(), distances=placeholder_distances.tolist())
+            
+            # Generate noisy observation matrix using the current system_model_params.eta
+            # samples_creation returns (array_output, true_clean_signal, true_noise, sources_positions)
+            observation_matrix, _, _, _ = self.samples_model.samples_creation(source_number=num_sources_for_step)
+            
+            window_observations_list.append(torch.as_tensor(observation_matrix, dtype=torch.complex64))
+            window_sources_nums_list.append(num_sources_for_step)
+            
+            # Store ground truth for this step (angles and potentially ranges)
+            # For now, just angles. If near-field, this should include ranges.
+            true_label_for_step = current_true_angles.copy() 
+            window_true_labels_list.append(true_label_for_step)
+
+            self.current_step_in_session +=1
+
+        # Stack observations for the window: [window_size, N_antennas, T_snapshots_per_step]
+        observations_tensor = torch.stack(window_observations_list)
+        
+        # logger.debug(f"Generated window: {self.current_step_in_session - window_size +1} to {self.current_step_in_session}")
+        return observations_tensor, window_sources_nums_list, window_true_labels_list
+
+# REFACTORED OnlineLearningDataset class
 class OnlineLearningDataset(Dataset):
     """
-    Dataset class for online learning with trajectory data.
-    
-    Extends Dataset to support windowed access to a single trajectory
-    for online learning and drift detection.
+    Dataset for online learning that generates data on-the-fly using a
+    trajectory generator. It does not pre-compute or store the entire trajectory.
     """
     
-    def __init__(self, trajectory_data, window_size, stride=1):
+    def __init__(self, generator: OnlineLearningTrajectoryGenerator, 
+                 total_num_windows: int, window_size: int):
         """
-        Initialize the dataset with a single trajectory.
-        
         Args:
-            trajectory_data: Tuple of (time_series, sources_num, labels) for a single trajectory
-                - time_series: Tensor of shape [trajectory_length, N, T]
-                - sources_num: List of source counts for each step
-                - labels: List of angle (and possibly range) labels for each step
-            window_size: Size of sliding window over the trajectory
-            stride: Step size for sliding window
+            generator: An instance of OnlineLearningTrajectoryGenerator.
+            total_num_windows: The total number of windows this dataset will yield.
+            window_size: The size of each window (number of steps).
         """
-        self.time_series, self.sources_num, self.labels = trajectory_data
+        self.generator = generator
+        self.total_num_windows = total_num_windows
         self.window_size = window_size
-        self.stride = stride
-        
-        # Calculate the number of windows
-        trajectory_length = len(self.time_series)
-        self.num_windows = max(0, (trajectory_length - window_size) // stride + 1)
-        
-        # Validate that we have at least one window
-        if self.num_windows == 0:
-            raise ValueError(f"Trajectory length {trajectory_length} is too short for window size {window_size}")
-            
-        logger.info(f"Created OnlineLearningDataset with {self.num_windows} windows of size {window_size} (stride={stride})")
+        self._generated_windows_count = 0 # Internal counter
+
+        if self.total_num_windows <= 0:
+            raise ValueError(f"total_num_windows must be positive, got {total_num_windows}")
+        logger.info(f"OnlineLearningDataset initialized. Expecting to generate {total_num_windows} windows of size {window_size}.")
     
     def __len__(self):
-        """Return the number of windows."""
-        return self.num_windows
+        """Return the total number of windows to be generated."""
+        return self.total_num_windows
     
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, List[int], List[np.ndarray]]:
         """
-        Get a window of the trajectory.
-        
+        Generates and returns the next window of data.
+        The `idx` is used to ensure we don't generate more windows than `total_num_windows`.
+        """
+        if idx < 0 or idx >= self.total_num_windows:
+            raise IndexError(f"Index {idx} out of bounds for OnlineLearningDataset of size {self.total_num_windows}")
+
+        # This check ensures that __getitem__ is somewhat stateful regarding the number of windows yielded
+        # in a typical iteration. For random access (less common for online learning), this might behave unexpectedly
+        # if not iterated sequentially. However, DataLoader usually iterates sequentially.
+        if self._generated_windows_count >= self.total_num_windows:
+            # This case should ideally not be reached if DataLoader respects __len__
+            raise IndexError(f"Attempted to generate window beyond total_num_windows ({self.total_num_windows}).")
+
+        # time_series_window_tensor, sources_num_list, labels_list_of_arrays
+        window_data = self.generator.get_next_window(self.window_size)
+        self._generated_windows_count += 1
+        return window_data
+
+    def update_eta(self, new_eta: float):
+        """Delegates eta update to the underlying generator."""
+        self.generator.update_eta(new_eta)
+
+    def get_dataloader(self, batch_size: int, shuffle: bool = True, collate_fn: Optional[Callable] = None) -> DataLoader:
+        """
+        Creates a DataLoader for this dataset.
+
         Args:
-            idx: Index of the window
-            
+            batch_size: How many samples per batch to load.
+            shuffle: Whether to shuffle the data at every epoch.
+            collate_fn: Custom collate function. If None, uses a default.
+
         Returns:
-            Tuple of (time_series_window, sources_num_window, labels_window)
+            A DataLoader instance.
         """
-        # Calculate start and end indices
-        start_idx = idx * self.stride
-        end_idx = start_idx + self.window_size
-        
-        # Extract window data
-        time_series_window = self.time_series[start_idx:end_idx]
-        sources_num_window = self.sources_num[start_idx:end_idx]
-        labels_window = [self.labels[i] for i in range(start_idx, end_idx)]
-        
-        return time_series_window, sources_num_window, labels_window
-    
-    def get_dataloader(self, batch_size=1, shuffle=False):
-        """
-        Create a dataloader for this dataset.
-        
-        Args:
-            batch_size: Batch size (typically 1 for online learning)
-            shuffle: Whether to shuffle the windows
-            
-        Returns:
-            DataLoader for the windows
-        """
+        effective_collate_fn = collate_fn if collate_fn is not None else self._collate_windows
         return DataLoader(
-            self, 
-            batch_size=batch_size, 
+            self,
+            batch_size=batch_size,
             shuffle=shuffle,
-            collate_fn=self._collate_windows
+            collate_fn=effective_collate_fn
         )
-    
-    def _collate_windows(self, batch):
+
+    def _collate_windows(self, batch: List[Tuple[torch.Tensor, List[int], List[np.ndarray]]]) -> Tuple[torch.Tensor, torch.Tensor, List[List[np.ndarray]]]:
         """
         Custom collate function for batches of windows.
+        Typically, batch_size will be 1 for online learning.
         
         Args:
-            batch: List of (time_series_window, sources_num_window, labels_window) tuples
+            batch: A list of tuples, where each tuple is (time_series_window_tensor, sources_num_list, labels_list_of_arrays).
+                   - time_series_window_tensor: [window_size, N, T]
+                   - sources_num_list: List[int] of M for each step in the window
+                   - labels_list_of_arrays: List[np.ndarray] of true labels for each step
             
         Returns:
-            Collated batch with proper format for online learning
+            Collated batch:
+            - Batched time_series: Tensor[batch_size, window_size, N, T]
+            - Batched sources_num: Tensor[batch_size, window_size] (long)
+            - Batched labels: List of lists of np.ndarray, outer list for batch, inner for window steps.
         """
-        # This is typically called with batch_size=1 for online learning,
-        # but we handle the general case for flexibility
+        # Unzip the batch
+        time_series_windows, sources_num_lists, labels_lists = zip(*batch)
         
-        time_series, sources_num, labels = zip(*batch)
-        batch_size = len(time_series)
+        # Stack time_series tensors along a new batch dimension
+        # Each time_series_window is already [window_size, N, T]
+        batched_time_series = torch.stack(time_series_windows) # -> [batch_size, window_size, N, T]
         
-        # Process each window
-        processed_time_series = []
-        processed_sources_num = []
-        processed_labels = []
-        
-        for i in range(batch_size):
-            # Fix: time_series[i] might already be a stacked tensor
-            if isinstance(time_series[i], list) or isinstance(time_series[i], tuple):
-                # If it's a list or tuple of tensors, stack them
-                window_time_series = torch.stack(time_series[i])
-            else:
-                # If it's already a tensor, use it directly
-                window_time_series = time_series[i]
-            
-            # Convert sources_num to tensor if it's not already
-            if isinstance(sources_num[i], list) or isinstance(sources_num[i], tuple):
-                window_sources_num = torch.tensor(sources_num[i])
-            else:
-                window_sources_num = sources_num[i]
-            
-            # Process labels
-            window_labels = labels[i]
-            
-            processed_time_series.append(window_time_series)
-            processed_sources_num.append(window_sources_num)
-            processed_labels.append(window_labels)
-        
-        # Stack across batch dimension
-        stacked_time_series = torch.stack(processed_time_series)
-        stacked_sources_num = torch.stack(processed_sources_num)
-        
-        # Labels need special handling since they might vary in size per step
-        # For now, we keep them as a list of lists
-        
-        return stacked_time_series, stacked_sources_num, processed_labels
+        # Pad and stack sources_num lists
+        # Assuming all windows in a batch have the same window_size (which they should from __getitem__)
+        # max_window_len = max(len(s_list) for s_list in sources_num_lists) # Should be self.window_size
+        batched_sources_num_tensors = [torch.tensor(s_list, dtype=torch.long) for s_list in sources_num_lists]
+        batched_sources_num = torch.stack(batched_sources_num_tensors) # -> [batch_size, window_size]
 
+        # Labels (labels_lists) remain a list of lists of arrays because the number of sources (and thus label size)
+        # can vary per step, making direct tensor stacking complex if M changes.
+        # For online learning evaluation, this structure is often processed step-by-step.
+        batched_labels = list(labels_lists) # -> List[batch_size] of List[window_size] of np.ndarray
 
-def create_online_learning_dataset(trajectory_handler, config, window_size=10, stride=5):
+        return batched_time_series, batched_sources_num, batched_labels
+
+# REFACTORED create_online_learning_dataset factory function
+def create_online_learning_dataset(
+    system_model_params: SystemModelParams, 
+    config: Config, # Full config for access to online_learning and trajectory sections
+    window_size: int, 
+    stride: int # Stride determines the "granularity" or "density" of windows over the total duration
+) -> OnlineLearningDataset:
     """
-    Create a dataset for online learning from a single trajectory.
-    
+    Creates an OnlineLearningDataset that generates data on-the-fly.
+
     Args:
-        trajectory_handler: TrajectoryDataHandler instance
-        config: Configuration object
-        window_size: Size of sliding window
-        stride: Step size for sliding window
-        
+        system_model_params: The shared SystemModelParams instance.
+        config: The main simulation configuration object.
+        window_size: The number of time steps in each generated window.
+        stride: The step size between the start of consecutive windows. This, along with
+                trajectory_length and window_size, determines the total number of windows.
     Returns:
-        OnlineLearningDataset instance
+        An OnlineLearningDataset instance.
     """
-    logger.info(f"Creating online learning dataset with window_size={window_size}, stride={stride}")
+    online_config = config.online_learning
     
-    # Generate a single long trajectory
-    trajectory_length = config.trajectory.trajectory_length
-    if hasattr(config.online_learning, 'trajectory_length'):
-        trajectory_length = config.online_learning.trajectory_length
+    # total_duration_steps is the total number of individual simulation steps planned for the online learning session.
+    # The generator will be capable of producing up to this many steps in sequence.
+    total_duration_steps = online_config.trajectory_length
+    if total_duration_steps is None: # Fallback if not specified in online_learning
+        total_duration_steps = config.trajectory.trajectory_length
     
-    logger.info(f"Generating single trajectory with length {trajectory_length}")
+    if not isinstance(total_duration_steps, int) or total_duration_steps <= 0:
+        raise ValueError(f"online_learning.trajectory_length must be a positive integer, got {total_duration_steps}")
+
+    if window_size <= 0:
+        raise ValueError(f"window_size must be positive, got {window_size}")
+    if stride <= 0:
+        raise ValueError(f"stride must be positive, got {stride}")
+
+    if total_duration_steps < window_size:
+        raise ValueError(f"Online learning total_duration_steps ({total_duration_steps}) must be >= window_size ({window_size}).")
+
+    # Calculate the total number of unique windows that can be formed from the total_duration_steps
+    # This defines how many times we can call __getitem__ before exhausting the dataset.
+    num_possible_windows = (total_duration_steps - window_size) // stride + 1
     
-    # Create a dataset with a single trajectory
-    single_trajectory_dataset, samples_model = trajectory_handler.create_dataset(
-        samples_size=1,  # Just one trajectory
-        trajectory_length=trajectory_length,
-        trajectory_type=config.trajectory.trajectory_type,
-        save_dataset=False
+    if num_possible_windows <= 0:
+        # This can happen if, e.g., total_duration_steps = 10, window_size = 10, stride = 1 -> 1 window
+        # total_duration_steps = 10, window_size = 11, stride = 1 -> 0 windows
+        raise ValueError(
+            f"Cannot form any windows. total_duration_steps={total_duration_steps}, "
+            f"window_size={window_size}, stride={stride}. Results in {num_possible_windows} windows."
+        )
+
+    logger.info(
+        f"Creating on-demand OnlineLearningDataset: "
+        f"total_duration_steps={total_duration_steps}, window_size={window_size}, stride={stride}. "
+        f"This will yield {num_possible_windows} windows."
+    )
+
+    # Pass the shared system_model_params instance. Eta updates on this instance
+    # will be reflected in the generator.
+    # Also pass M (number of sources) which can be fixed or a range from system_model_params
+    num_sources_M = config.system_model.M 
+
+    generator = OnlineLearningTrajectoryGenerator(
+        system_model_params=system_model_params,
+        trajectory_config=config.trajectory, # For type, random_walk_std_dev etc.
+        initial_eta=system_model_params.eta, # Start with current eta from config (or last dynamic update)
+        num_sources=num_sources_M
     )
     
-    # Extract the single trajectory
-    time_series, sources_num, labels = single_trajectory_dataset[0]
-    
-    # Create the online learning dataset
     return OnlineLearningDataset(
-        trajectory_data=(time_series, sources_num, labels),
-        window_size=window_size,
-        stride=stride
+        generator=generator, 
+        total_num_windows=num_possible_windows, 
+        window_size=window_size
     ) 
