@@ -101,6 +101,8 @@ class TrajectoryType(str, Enum):
     STATIC = "static"
     CUSTOM = "custom"
     FULL_RANDOM = "full_random"  # Completely random angles for each source in each trajectory step
+    SINE_ACCEL_NONLINEAR = "sine_accel_nonlinear"  # Non-linear model with sine acceleration
+    MULT_NOISE_NONLINEAR = "mult_noise_nonlinear"  # Non-linear model with multiplicative noise
 
 
 class TrajectoryConfig(BaseModel):
@@ -110,10 +112,21 @@ class TrajectoryConfig(BaseModel):
     trajectory_length: int = 10
     save_trajectory: bool = False
     random_walk_std_dev: float = 1.0  # Standard deviation for random walk angles (degrees)
+    
+    # Parameters for sine acceleration non-linear model
+    sine_accel_omega0: float = 0.0    # Base angular velocity (rad/s)
+    sine_accel_kappa: float = 3.0     # Sine acceleration coefficient (rad/s²)
+    sine_accel_noise_std: float = 0.1 # Noise standard deviation (rad)
+    
+    # Parameters for multiplicative noise non-linear model
+    mult_noise_omega0: float = 0.0    # Base angular velocity (rad/s)
+    mult_noise_amp: float = 0.5       # Amplitude of multiplicative term (unitless)
+    mult_noise_base_std: float = 0.1  # Base noise standard deviation (rad)
 
 
 class KalmanFilterConfig(BaseModel):
     """Kalman Filter configuration parameters."""
+    filter_type: Optional[str] = Field(default="standard", description="Type of Kalman filter to use: 'standard' or 'extended'")
     process_noise_std_dev: Optional[float] = None  # If None, uses trajectory.random_walk_std_dev
     measurement_noise_std_dev: float = 1e-3  # Near-zero for initial implementation (identity observation model)
     initial_covariance: float = 1.0  # Initial state covariance (uncertainty)

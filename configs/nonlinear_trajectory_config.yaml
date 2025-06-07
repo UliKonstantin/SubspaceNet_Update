@@ -1,0 +1,99 @@
+# Configuration for non-linear trajectory experiments
+base_config: configs/online_learning_config.yaml  # Inherit from base online learning config
+
+# System model parameters
+system_model:
+  N: 8  # number of antennas
+  M: 2  # number of sources
+  T: 200  # number of snapshots
+  snr: 10  # signal-to-noise ratio in dB
+  field_type: "far"  # "near" or "far"
+  signal_nature: "non-coherent"  # "non-coherent" or "coherent"
+  signal_type: "narrowband"  # "narrowband" only supported currently
+  eta: 0.0  # steering vector uniform error variance
+  doa_range: 180  # range of DOA values [-doa_range, doa_range]
+
+# Dataset parameters
+dataset:
+  samples_size: 256  # overall dataset size
+  train_test_ratio: 0.8  # ratio between train and test datasets
+  create_data: true  # whether to create new data or use existing data
+  save_dataset: false  # whether to save the dataset
+
+# Model parameters
+model:
+  type: "SubspaceNet"  # SubspaceNet, DCD-MUSIC
+  params:
+    diff_method: "esprit"
+    train_loss_type: "rmspe"
+    tau: 8
+    field_type: "Far"
+    variant: "small"
+
+# Disable regular training
+training:
+  enabled: false
+
+# CRITICAL: Model loading must happen before online learning
+simulation:
+  train_model: false
+  evaluate_model: false
+  load_model: true  # IMPORTANT: Must be true to load model before online learning
+  save_model: true
+  plot_results: true
+  save_plots: true
+  # Load existing model from the specified path
+  model_path: "experiments/results/training_Online_model/checkpoints/saved_SubspaceNet_20250606_160353.pt"
+
+# Trajectory configuration with non-linear options
+trajectory:
+  enabled: true
+  trajectory_length: 100
+  save_trajectory: true
+  
+  # Choose one of these trajectory types (uncomment only one)
+  trajectory_type: sine_accel_nonlinear
+  #trajectory_type: mult_noise_nonlinear
+  #trajectory_type: random_walk
+  
+  # Parameters for sine acceleration non-linear model
+  sine_accel_omega0: 0.1    # Base angular velocity (rad/s)
+  sine_accel_kappa: 2.5     # Sine acceleration coefficient (rad/s²)
+  sine_accel_noise_std: 0.2 # Noise standard deviation (rad)
+  
+  # Parameters for multiplicative noise non-linear model
+  mult_noise_omega0: 0.05   # Base angular velocity (rad/s)
+  mult_noise_amp: 0.8       # Amplitude of multiplicative term (unitless)
+  mult_noise_base_std: 0.15 # Base noise standard deviation (rad)
+  
+  # Parameter for random walk model
+  random_walk_std_dev: 1.5  # Standard deviation for random walk angles (degrees)
+
+# Kalman filter configuration
+kalman_filter:
+  process_noise_std_dev: null  # standard deviation of process noise (degrees), null to use trajectory.random_walk_std_dev
+  measurement_noise_std_dev: 1.0e-3  # standard deviation of measurement noise (degrees)
+  initial_covariance: 1.0  # initial state covariance
+
+# Enable online learning with appropriate parameters
+online_learning:
+  enabled: true  # Enable online learning
+  window_size: 20  # Size of sliding window
+  stride: 10  # Step size for sliding window
+  loss_threshold: 0.5  # Threshold for detecting drift and triggering online learning
+  max_iterations: 10  # Maximum iterations for online training
+  learning_rate: 0.0001  # Learning rate for online training
+  trajectory_length: 500  # Length of trajectory for online learning
+  
+  # Dynamic Eta Update Parameters
+  eta_update_interval_windows: 10  # Update eta every 10 windows
+  eta_increment: 0.02             # Increase eta by 0.02 each time
+  max_eta: 0.5                    # Don't let eta go above 0.5
+  min_eta: 0.0                    # Don't let eta go below 0.0
+
+# Output settings
+output:
+  save_model: true
+  save_validation: false
+  save_metrics: true
+  checkpoint_frequency: 10 

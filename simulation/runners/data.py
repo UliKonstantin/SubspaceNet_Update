@@ -108,11 +108,13 @@ class TrajectoryDataHandler:
         dataset.load(dataset_path / filename)
         return dataset
     
-    def _generate_trajectories(self, 
-                             samples_size: int, 
-                             trajectory_length: int,
-                             trajectory_type: Union[TrajectoryType, str],
-                             custom_trajectory_fn: Optional[Callable] = None) -> Tuple[Tuple[torch.Tensor, torch.Tensor], List[int]]:
+    def _generate_trajectories(
+        self,
+        samples_size: int,
+        trajectory_length: int,
+        trajectory_type: Union[TrajectoryType, str],
+        custom_trajectory_fn: Optional[Callable] = None
+    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], List[int]]:
         """
         Generate angle and distance trajectories.
         
@@ -130,7 +132,7 @@ class TrajectoryDataHandler:
         # Convert string to enum if needed
         if isinstance(trajectory_type, str):
             trajectory_type = TrajectoryType(trajectory_type)
-            
+                
         # Determine number of sources
         if isinstance(self.system_model_params.M, tuple):
             low_M, high_M = self.system_model_params.M
@@ -149,12 +151,34 @@ class TrajectoryDataHandler:
         
         logger.info(f"Generating trajectories with angle range: [{angle_min}, {angle_max}]")
         
+        # Get parameters from config
+        cfg = self.config if self.config else None
+        
         # Get random walk step size from config if we're using random walk
-        if trajectory_type == TrajectoryType.RANDOM_WALK:
-            random_walk_std_dev = 1.0  # Default value
-            if self.config and hasattr(self.config.trajectory, 'random_walk_std_dev'):
-                random_walk_std_dev = self.config.trajectory.random_walk_std_dev
+        random_walk_std_dev = 1.0  # Default value
+        if trajectory_type == TrajectoryType.RANDOM_WALK and cfg and hasattr(cfg.trajectory, 'random_walk_std_dev'):
+            random_walk_std_dev = cfg.trajectory.random_walk_std_dev
             logger.info(f"Using random walk with std dev: {random_walk_std_dev}")
+        
+        # Parameters for sine acceleration non-linear model
+        sa_omega0 = 0.0
+        sa_kappa = 3.0
+        sa_noise_sd = 0.1
+        if trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR and cfg and hasattr(cfg.trajectory, 'sine_accel_omega0'):
+            sa_omega0 = cfg.trajectory.sine_accel_omega0
+            sa_kappa = cfg.trajectory.sine_accel_kappa
+            sa_noise_sd = cfg.trajectory.sine_accel_noise_std
+            logger.info(f"Using sine acceleration non-linear model with ω₀={sa_omega0}, κ={sa_kappa}, σ={sa_noise_sd}")
+        
+        # Parameters for multiplicative noise non-linear model
+        mn_omega0 = 0.0
+        mn_amp = 0.5
+        mn_base_sd = 0.1
+        if trajectory_type == TrajectoryType.MULT_NOISE_NONLINEAR and cfg and hasattr(cfg.trajectory, 'mult_noise_omega0'):
+            mn_omega0 = cfg.trajectory.mult_noise_omega0
+            mn_amp = cfg.trajectory.mult_noise_amp
+            mn_base_sd = cfg.trajectory.mult_noise_base_std
+            logger.info(f"Using multiplicative noise non-linear model with ω₀={mn_omega0}, amp={mn_amp}, σ={mn_base_sd}")
         
         # Log trajectory type information before starting generation
         if trajectory_type == TrajectoryType.RANDOM:
@@ -169,6 +193,10 @@ class TrajectoryDataHandler:
             logger.info("Using CUSTOM trajectory type with provided trajectory function")
         elif trajectory_type == TrajectoryType.FULL_RANDOM:
             logger.info("Using FULL_RANDOM trajectory type: completely independent random angles for each source and step")
+        elif trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
+            logger.info("Using SINE_ACCEL_NONLINEAR trajectory type: θ_{k+1} = θ_k + (ω0 + κ sin θ_k)T + η_k")
+        elif trajectory_type == TrajectoryType.MULT_NOISE_NONLINEAR:
+            logger.info("Using MULT_NOISE_NONLINEAR trajectory type: θ_{k+1} = θ_k + ω0 T + σ(θ_k) η_k")
         
         # Create empty trajectories arrays
         max_sources = max(sources_per_trajectory)
@@ -192,7 +220,66 @@ class TrajectoryDataHandler:
                 distance_trajectories[i, t, :num_sources] = distance_trajectories[i, t-1, :num_sources] + 1.0
             
             # Generate angle trajectories based on selected type
-            if trajectory_type == TrajectoryType.RANDOM:
+            if trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
+                # Start with random angles
+                angle_trajectories[i, 0, :num_sources] = torch.FloatTensor(
+                    np.random.uniform(angle_min, angle_max, size=num_sources)
+                )
+                
+                # Apply non-linear sine acceleration model: θ_{k+1} = θ_k + (ω0 + κ sin θ_k)T + η_k
+                for t in range(1, trajectory_length):
+                    theta_prev = angle_trajectories[i, t-1, :num_sources]
+                    # Convert to radians for trigonometric functions
+                    theta_prev_rad = theta_prev * (np.pi / 180.0)
+                    
+                    # Calculate acceleration term (ω0 + κ sin θ_k)
+                    delta = (sa_omega0 + sa_kappa * torch.sin(theta_prev_rad)) * 1.0  # T = 1 s
+                    
+                    # Add noise
+                    noise = torch.randn(num_sources) * sa_noise_sd
+                    
+                    # Update angle
+                    theta_new = theta_prev + delta + noise
+                    
+                    # Ensure angles stay within bounds
+                    angle_trajectories[i, t, :num_sources] = torch.clamp(
+                        theta_new, 
+                        min=angle_min, 
+                        max=angle_max
+                    )
+                    
+            elif trajectory_type == TrajectoryType.MULT_NOISE_NONLINEAR:
+                # Start with random angles
+                angle_trajectories[i, 0, :num_sources] = torch.FloatTensor(
+                    np.random.uniform(angle_min, angle_max, size=num_sources)
+                )
+                
+                # Apply multiplicative noise model: θ_{k+1} = θ_k + ω0 T + σ(θ_k) η_k
+                for t in range(1, trajectory_length):
+                    theta_prev = angle_trajectories[i, t-1, :num_sources]
+                    # Convert to radians for trigonometric functions
+                    theta_prev_rad = theta_prev * (np.pi / 180.0)
+                    
+                    # Deterministic part
+                    deterministic = mn_omega0 * 1.0  # T = 1 s
+                    
+                    # State-dependent noise standard deviation
+                    std = mn_base_sd * (1.0 + mn_amp * torch.sin(theta_prev_rad)**2)
+                    
+                    # Generate noise
+                    noise = torch.randn(num_sources) * std
+                    
+                    # Update angle
+                    theta_new = theta_prev + deterministic + noise
+                    
+                    # Ensure angles stay within bounds
+                    angle_trajectories[i, t, :num_sources] = torch.clamp(
+                        theta_new, 
+                        min=angle_min, 
+                        max=angle_max
+                    )
+                    
+            elif trajectory_type == TrajectoryType.RANDOM:
                 # Completely random angles at each step
                 for t in range(trajectory_length):
                     angle_trajectories[i, t, :num_sources] = torch.FloatTensor(

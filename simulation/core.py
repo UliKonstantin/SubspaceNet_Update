@@ -12,6 +12,11 @@ import numpy as np
 import torch
 from tqdm import tqdm
 import datetime
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+import time
+import copy
+import yaml
 
 from config.schema import Config
 from .runners.data import TrajectoryDataHandler
@@ -21,6 +26,7 @@ from simulation.kalman_filter import KalmanFilter1D, BatchKalmanFilter1D
 from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
 from DCD_MUSIC.src.signal_creation import Samples
 from DCD_MUSIC.src.evaluation import get_model_based_method, evaluate_model_based
+from simulation.kalman_filter.extended import ExtendedKalmanFilter1D
 
 logger = logging.getLogger(__name__)
 
@@ -1103,83 +1109,75 @@ class Simulation:
 
     def _run_online_learning(self) -> None:
         """
-        Execute online learning on a single trajectory with drift detection.
+        Run online learning pipeline.
         
-        This method:
-        1. Uses a pre-loaded model (loaded in the main run method)
-        2. Uses a pre-loaded online learning dataloader (created in _run_data_pipeline)
-        3. Processes trajectory data window-by-window
-        4. Evaluates performance on each window to detect drift
-        5. Performs unsupervised online training when drift is detected
-        6. Tracks loss/performance over time
-        
-        Returns:
-            None, but stores results in self.results
+        This method sets up and runs the online learning process, which:
+        1. Creates an on-demand dataset that generates data in windows
+        2. Evaluates the model on each window to detect drift
+        3. Updates the model if drift is detected and training improves loss
         """
-        logger.info("Starting online learning pipeline")
-        
-        # Validate that we have a model to use
-        if self.trained_model is None:
-            logger.error("No trained model available for online learning. Ensure model is loaded or trained beforehand.")
-            self.results["online_learning_error"] = "No model available for online learning"
-            return
-        
-        # Ensure model is in evaluation mode initially
-        self.trained_model.eval()
-        
-        # Get online learning configuration parameters
-        if not hasattr(self.config, 'online_learning') or not self.config.online_learning.enabled:
-            logger.error("Online learning configuration section not found or not enabled.")
-            self.results["online_learning_error"] = "Missing or disabled online_learning configuration"
-            return
-
-        online_config = self.config.online_learning # Get the specific online learning config section
-
-        # Check for the pre-loaded dataloader (now on-demand)
-        if not hasattr(self, 'online_learning_dataloader') or self.online_learning_dataloader is None:
-            logger.error("Online learning dataloader not found. It should be created in _run_data_pipeline.")
-            self.results["online_learning_error"] = "Online learning dataloader missing"
-            return
-        
-        dataloader = self.online_learning_dataloader
-        logger.info(f"Using on-demand online learning dataloader, planning to generate {len(dataloader)} windows.")
-
-        loss_threshold = getattr(online_config, 'loss_threshold', 0.5)
-        max_iterations = getattr(online_config, 'max_iterations', 10)
-        
-        # Trajectory handler is not directly used by the new on-demand generator for window data,
-        # but system_model.params (which the generator uses) should be initialized correctly.
-        if self.system_model is None or self.system_model.params is None:
-            logger.error("SystemModel or its params are unexpectedly None for online learning.")
-            self.results["online_learning_error"] = "SystemModel or params missing for online learning"
-            return
-        
         try:
-            # Initialize results containers
-            drift_detected_count = 0
-            model_updated_count = 0
-            window_losses = []
-            window_update_flags = []
+            # Access online learning configuration
+            online_config = self.config.online_learning
             
-            # Initialize online trainer
+            # Check if model is available for online learning
+            if self.trained_model is None:
+                logger.error("No model available for online learning")
+                return
+            
+            # Get online learning parameters
+            window_size = getattr(online_config, 'window_size', 10)
+            stride = getattr(online_config, 'stride', 5)
+            
+            # Create an on-demand dataset and dataloader for online learning
+            # This will generate data in windows with the current system_model.params.
+            # This allows dynamic eta updates within the generator to be reflected.
+            system_model_params = self.system_model.params
+            
+            from simulation.runners.data import create_online_learning_dataset
             from simulation.runners.training import OnlineTrainer
+            
+            # Create on-demand dataset using the factory function
+            logger.info("Online learning is enabled, creating on-demand dataset and dataloader.")
+            online_learning_dataset = create_online_learning_dataset(
+                system_model_params=system_model_params,
+                config=self.config,
+                window_size=window_size,
+                stride=stride
+            )
+            
+            # Create dataloader from on-demand dataset
+            from torch.utils.data import DataLoader
+            self.online_learning_dataloader = DataLoader(
+                online_learning_dataset,
+                batch_size=1,  # Process one window at a time
+                shuffle=False,
+                num_workers=0,  # On-demand dataset must use 0 workers
+                drop_last=False
+            )
+            logger.info(f"Created on-demand online learning dataloader for {len(self.online_learning_dataloader)} windows.")
+            
+            # Create online trainer
             online_trainer = OnlineTrainer(
                 model=self.trained_model,
                 config=self.config,
                 device=device
             )
             
-            # Process each window (generated on-the-fly by the dataloader)
-            for window_idx, trajectory_window_batch_data in enumerate(tqdm(dataloader, desc="Online Learning")):
-                # The collate_fn of OnlineLearningDataset for batch_size=1 returns:
-                # - time_series_batch: Tensor[1, window_size, N, T]
-                # - sources_num_batch: Tensor[1, window_size] (list of M for each step)
-                # - labels_batch: List[1] containing a List[window_size] of np.ndarray (true angles per step)
-                
-                time_series_single_window = trajectory_window_batch_data[0][0] # Shape: [window_size, N, T]
-                sources_num_single_window_list = trajectory_window_batch_data[1][0].tolist() # List[int] of len window_size
-                labels_single_window_list_of_arrays = trajectory_window_batch_data[2][0] # List[np.ndarray] of len window_size
-
+            # Set loss threshold for drift detection
+            loss_threshold = getattr(online_config, 'loss_threshold', 0.5)
+            max_iterations = getattr(online_config, 'max_iterations', 10)
+            
+            # Prepare for tracking results
+            window_losses = []
+            window_covariances = []
+            window_update_flags = []
+            window_eta_values = []
+            drift_detected_count = 0
+            model_updated_count = 0
+            
+            # Process each window of online data
+            for window_idx, (time_series_batch, sources_num_batch, labels_batch) in enumerate(tqdm(self.online_learning_dataloader, desc="Online Learning")):
                 # --- Dynamic Eta Update Logic ---
                 if online_config.eta_update_interval_windows and online_config.eta_update_interval_windows > 0 and \
                    window_idx > 0 and window_idx % online_config.eta_update_interval_windows == 0:
@@ -1188,30 +1186,52 @@ class Simulation:
                     eta_increment = online_config.eta_increment if online_config.eta_increment is not None else 0.01
                     new_eta = current_eta + eta_increment
                     
-                    # Apply min/max bounds if configured
+                    # Apply min/max constraints if specified
                     if online_config.max_eta is not None:
                         new_eta = min(new_eta, online_config.max_eta)
-                    if online_config.min_eta is not None: 
+                    if online_config.min_eta is not None:
                         new_eta = max(new_eta, online_config.min_eta)
-
-                    # Only call update if there's a meaningful change to avoid log spam
-                    if abs(new_eta - current_eta) > 1e-6: 
+                    
+                    # Only update if there's an actual change
+                    if abs(new_eta - current_eta) > 1e-6:
                         logger.info(f"Online Learning: Dynamically updating eta at window {window_idx}. From {current_eta:.4f} to {new_eta:.4f}")
                         # The dataset holds the generator, which updates the shared self.system_model.params.eta
-                        self.online_learning_dataloader.dataset.update_eta(new_eta) 
+                        self.online_learning_dataloader.dataset.update_eta(new_eta)
                         # After this call, self.system_model.params.eta is updated, and the generator will use it.
                 # --- End Dynamic Eta Update Logic ---
-
+                
+                # Unpack batch data
+                # The batch data shapes are:
+                # time_series_batch: [1, window_size, N, T] = [1, 10, 8, 200]
+                # sources_num_batch: [10, 1] (not [1, 10] as expected)
+                # labels_batch: [10, 1, 3] (not [1, 10, 3] as expected)
+                
+                # Extract the content properly from the batch
+                time_series_single_window = time_series_batch[0]  # Shape: [window_size, N, T]
+                
+                # Reshape sources_num to be a list of integers
+                sources_num_single_window_list = sources_num_batch[:, 0].tolist() if isinstance(sources_num_batch, torch.Tensor) else [s[0] for s in sources_num_batch]
+                
+                # Reshape labels to be a list of arrays
+                if isinstance(labels_batch, torch.Tensor):
+                    # If labels_batch is a tensor [10, 1, 3]
+                    labels_single_window_list_of_arrays = [arr[0].cpu().numpy() if isinstance(arr, torch.Tensor) else arr[0] for arr in labels_batch]
+                else:
+                    # If labels_batch is a list of tensors or arrays
+                    labels_single_window_list_of_arrays = [arr[0].cpu().numpy() if isinstance(arr, torch.Tensor) else arr[0] for arr in labels_batch]
+                
                 # Calculate loss on the current window (generated with current eta)
                 # _evaluate_window expects: (Tensor[win_size, N, T], List[int], List[np.ndarray])
-                current_window_loss = self._evaluate_window(
+                current_window_loss, avg_window_cov = self._evaluate_window(
                     time_series_single_window, 
                     sources_num_single_window_list, 
                     labels_single_window_list_of_arrays
                 )
                 window_losses.append(current_window_loss)
+                window_covariances.append(avg_window_cov)
+                window_eta_values.append(self.system_model.params.eta)
                 
-                logger.info(f"Window {window_idx}: Loss = {current_window_loss:.6f} (current eta={self.system_model.params.eta:.4f})")
+                logger.info(f"Window {window_idx}: Loss = {current_window_loss:.6f}, Cov = {avg_window_cov:.6f} (current eta={self.system_model.params.eta:.4f})")
                 
                 # Check if loss exceeds threshold (drift detected)
                 if current_window_loss > loss_threshold:
@@ -1254,17 +1274,24 @@ class Simulation:
             # Store results
             self.results["online_learning"] = {
                 "window_losses": window_losses,
+                "window_covariances": window_covariances,
+                "window_eta_values": window_eta_values,
                 "window_updates": window_update_flags,
                 "drift_detected_count": drift_detected_count,
                 "model_updated_count": model_updated_count,
-                "window_count": len(dataloader),
+                "window_count": len(self.online_learning_dataloader),
                 "window_size": online_config.window_size,
                 "stride": online_config.stride,
                 "loss_threshold": loss_threshold
             }
             
             # Plot results
-            self._plot_online_learning_results(window_losses, window_update_flags)
+            self._plot_online_learning_results(
+                window_losses=window_losses,
+                window_covariances=window_covariances,
+                window_eta_values=window_eta_values,
+                window_updates=window_update_flags
+            )
             
             logger.info(f"Online learning completed: {drift_detected_count} drifts detected, {model_updated_count} model updates")
             
@@ -1274,7 +1301,7 @@ class Simulation:
 
     def _evaluate_window(self, window_time_series, window_sources_num, window_labels):
         """
-        Calculate loss on a window of trajectory data.
+        Calculate loss on a window of trajectory data using Extended Kalman Filter.
         
         Args:
             window_time_series: Time series data for window [batch, window_size, N, T]
@@ -1282,19 +1309,40 @@ class Simulation:
             window_labels: Labels for window (list of tensors)
             
         Returns:
-            Average loss across window
+            Tuple of (average loss across window, average covariance across window)
         """
-        # Assuming batch size of 1 for online learning as windows are processed sequentially.
-        # window_time_series: Tensor of shape [window_size, N, T]
-        # window_sources_num: List of source counts (int) for each step in the window [window_size]
-        # window_labels: List of true label np.arrays for each step in the window [window_size]
+        # Imports for EKF
+        import torch
+        from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
+        import numpy as np
+        
+        # Debug: Log input shapes
+        logger.debug(f"_evaluate_window input shapes: "
+                     f"window_time_series={window_time_series.shape if hasattr(window_time_series, 'shape') else 'not tensor'}, "
+                     f"window_sources_num={len(window_sources_num)}, "
+                     f"window_labels={len(window_labels)}")
         
         # Unpack arguments directly, assuming they are for a single window
         time_series_steps = window_time_series # Already [window_size, N, T]
         sources_num_per_step = window_sources_num # List[int]
         labels_per_step_list = window_labels    # List[np.ndarray]
         
+        # Check that sizes match to avoid index errors
         current_window_len = time_series_steps.shape[0]
+        
+        # Sanity check the input lengths
+        if len(sources_num_per_step) < current_window_len:
+            logger.warning(f"Window source count list length ({len(sources_num_per_step)}) is less than time series length ({current_window_len}). Truncating window.")
+            current_window_len = len(sources_num_per_step)
+        
+        if len(labels_per_step_list) < current_window_len:
+            logger.warning(f"Window labels list length ({len(labels_per_step_list)}) is less than time series length ({current_window_len}). Truncating window.")
+            current_window_len = len(labels_per_step_list)
+        
+        if current_window_len == 0:
+            logger.error("Window has zero valid steps. Cannot evaluate.")
+            return float('inf'), float('nan')
+        
         total_loss = 0.0
         num_valid_steps_for_loss = 0
         
@@ -1302,96 +1350,231 @@ class Simulation:
         is_near_field = hasattr(self.trained_model, 'field_type') and self.trained_model.field_type.lower() == "near"
         
         # Use RMSPE loss for evaluation
-        from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
         rmspe_criterion = RMSPELoss().to(device)
+        
+        # Initialize Extended Kalman Filters - one for each potential source
+        # Use the system's trajectory configuration to determine the appropriate model
+        max_sources = self.config.system_model.M
+        ekf_filters = []
+        
+        # Create EKF instances
+        for i in range(max_sources):
+            ekf_filter = ExtendedKalmanFilter1D.create_from_config(self.config)
+            ekf_filters.append(ekf_filter)
+        
+        # Get current eta value from system model
+        current_eta = self.system_model.params.eta
+        
+        logger.info(f"Initialized {max_sources} EKF instances for window evaluation (eta={current_eta:.4f})")
+        
+        # Track the EKF predictions and covariances for each step and source
+        ekf_predictions = []
+        ekf_covariances = []
         
         # Process each step in window
         for step_idx in range(current_window_len):
-            # Extract data for this step
-            step_data_tensor = time_series_steps[step_idx:step_idx+1].to(device)  # Shape: [1, N, T] (add batch dim for model)
-            num_sources_this_step = sources_num_per_step[step_idx]
-            
-            # Skip if no sources
-            if num_sources_this_step <= 0:
-                # total_loss += 0 # or some penalty? For now, skip contributing to loss.
-                # num_valid_steps_for_loss -=1
+            try:
+                # Extract data for this step
+                step_data_tensor = time_series_steps[step_idx:step_idx+1].to(device)  # Shape: [1, N, T] (add batch dim for model)
+                num_sources_this_step = sources_num_per_step[step_idx]
+                
+                # Skip if no sources
+                if num_sources_this_step <= 0:
+                    ekf_predictions.append([])
+                    ekf_covariances.append([])
+                    continue
+                
+                # Get ground truth labels for this step
+                true_angles_this_step = labels_per_step_list[step_idx][:num_sources_this_step]
+                
+                # Forward pass through model
+                self.trained_model.eval() # Ensure model is in eval mode for this evaluation part
+                with torch.no_grad():
+                    if not is_near_field:
+                        # Model expects num_sources as int or 0-dim tensor
+                        angles_pred, _, _ = self.trained_model(step_data_tensor, num_sources_this_step)
+                        
+                        # Convert predictions to numpy for EKF processing
+                        angles_pred_np = angles_pred.cpu().numpy().flatten()[:num_sources_this_step]
+                        
+                        # Initialize EKF state if this is the first step
+                        if step_idx == 0:
+                            for i in range(num_sources_this_step):
+                                ekf_filters[i].initialize_state(angles_pred_np[i])
+                        
+                        # EKF update for each source
+                        step_predictions = []
+                        step_covariances = []
+                        for i in range(num_sources_this_step):
+                            # Predict
+                            predicted_angle = ekf_filters[i].predict()
+                            
+                            # Update with measurement
+                            updated_angle = ekf_filters[i].update(angles_pred_np[i])
+                            
+                            # Store prediction and covariance
+                            step_predictions.append(updated_angle)
+                            step_covariances.append(ekf_filters[i].P)
+                        
+                        # Store predictions and covariances for this step
+                        ekf_predictions.append(step_predictions)
+                        ekf_covariances.append(step_covariances)
+                        
+                        # Create tensor from EKF predictions for loss calculation
+                        ekf_angles_pred = torch.tensor(step_predictions, device=device).unsqueeze(0)
+                        true_angles_tensor = torch.tensor(true_angles_this_step, device=device).unsqueeze(0)
+                        
+                        # Calculate loss using EKF predictions
+                        loss = rmspe_criterion(ekf_angles_pred, true_angles_tensor)
+                    else:
+                        # Near-field case
+                        angles_pred, ranges_pred, _, _ = self.trained_model(step_data_tensor, num_sources_this_step)
+                        
+                        # Get ground truth labels (assuming format matches: angles then ranges)
+                        true_labels_this_step = torch.tensor(labels_per_step_list[step_idx], device=device).unsqueeze(0)
+                        angles_gt = true_labels_this_step[:, :num_sources_this_step]
+                        ranges_gt = true_labels_this_step[:, num_sources_this_step:num_sources_this_step*2]
+                        
+                        # Calculate loss (combined angle and range)
+                        angle_loss = rmspe_criterion(angles_pred, angles_gt)
+                        range_loss = rmspe_criterion(ranges_pred, ranges_gt)
+                        loss = angle_loss + range_loss
+                        
+                        # For near-field, just add empty entries for EKF tracking
+                        ekf_predictions.append([])
+                        ekf_covariances.append([])
+                
+                total_loss += loss.item()
+                num_valid_steps_for_loss += 1
+                
+                # Print EKF covariances for this step
+                if not is_near_field and num_sources_this_step > 0:
+                    covariance_str = ", ".join([f"{cov:.6f}" for cov in step_covariances])
+                    logger.info(f"Step {step_idx} - EKF Covariances: [{covariance_str}] (eta={current_eta:.4f})")
+            except Exception as e:
+                logger.warning(f"Error processing step {step_idx}: {e}")
+                # Skip this step on error
                 continue
-            
-            # Forward pass through model
-            self.trained_model.eval() # Ensure model is in eval mode for this evaluation part
-            with torch.no_grad():
-                if not is_near_field:
-                    # Model expects num_sources as int or 0-dim tensor
-                    angles_pred, _, _ = self.trained_model(step_data_tensor, num_sources_this_step)
-                    
-                    # Get ground truth labels for this step
-                    true_angles_this_step = torch.tensor(labels_per_step_list[step_idx][:num_sources_this_step], device=device).unsqueeze(0)
-                    
-                    # Calculate loss
-                    loss = rmspe_criterion(angles_pred, true_angles_this_step)
-                else:
-                    # Near-field case
-                    # Model expects num_sources as int or 0-dim tensor
-                    angles_pred, ranges_pred, _, _ = self.trained_model(step_data_tensor, num_sources_this_step)
-                    
-                    # Get ground truth labels (assuming format matches: angles then ranges)
-                    true_labels_this_step = torch.tensor(labels_per_step_list[step_idx], device=device).unsqueeze(0)
-                    angles_gt = true_labels_this_step[:, :num_sources_this_step]
-                    ranges_gt = true_labels_this_step[:, num_sources_this_step:num_sources_this_step*2] # Adjust if label format differs
-                    
-                    # Calculate loss (combined angle and range)
-                    angle_loss = rmspe_criterion(angles_pred, angles_gt)
-                    range_loss = rmspe_criterion(ranges_pred, ranges_gt)
-                    loss = angle_loss + range_loss # Example combination
-            
-            total_loss += loss.item()
-            num_valid_steps_for_loss += 1
         
-        # Calculate average loss for the window
+        # Calculate average loss and covariance for the window
         if num_valid_steps_for_loss > 0:
-            return total_loss / num_valid_steps_for_loss
+            avg_loss = total_loss / num_valid_steps_for_loss
+            
+            # Calculate average covariance across all sources and steps
+            avg_window_cov = 0.0
+            total_cov_points = 0
+            
+            # Print a summary of the EKF covariances across all steps
+            if len(ekf_covariances) > 0 and any(len(step_covs) > 0 for step_covs in ekf_covariances):
+                # Calculate average covariance for each source across all steps
+                avg_covs = []
+                for src_idx in range(max_sources):
+                    # Get covariances for this source from all steps that have this source
+                    src_covs = [step_covs[src_idx] for step_covs in ekf_covariances 
+                               if src_idx < len(step_covs)]
+                    
+                    if src_covs:
+                        avg_cov = sum(src_covs) / len(src_covs)
+                        avg_covs.append(avg_cov)
+                        avg_window_cov += sum(src_covs)
+                        total_cov_points += len(src_covs)
+                
+                if avg_covs:
+                    avg_cov_str = ", ".join([f"{cov:.6f}" for cov in avg_covs])
+                    logger.info(f"Window Average EKF Covariances: [{avg_cov_str}] (eta={current_eta:.4f})")
+            
+            # Calculate the overall average covariance across all sources and steps
+            if total_cov_points > 0:
+                avg_window_cov /= total_cov_points
+            else:
+                avg_window_cov = float('nan')  # No valid covariance points
+            
+            return avg_loss, avg_window_cov
         else:
             logger.warning("No valid steps with sources found in the window for loss calculation.")
-            return float('inf') # Or 0.0, depending on desired behavior for empty windows
+            return float('inf'), float('nan')  # Or 0.0, depending on desired behavior for empty windows
 
-    def _plot_online_learning_results(self, window_losses, window_updates):
+    def _plot_online_learning_results(self, window_losses, window_covariances, window_eta_values, window_updates):
         """
-        Plot online learning results.
+        Plot online learning results including plots as a function of eta.
         
         Args:
             window_losses: List of loss values per window
+            window_covariances: List of average covariance values per window
+            window_eta_values: List of eta values per window
             window_updates: List of boolean flags indicating model updates
         """
         try:
             import matplotlib.pyplot as plt
             import numpy as np
             
-            # Create figure
-            plt.figure(figsize=(12, 6))
+            # Create figure with multiple subplots
+            fig = plt.figure(figsize=(18, 12))
             
-            # Create x-axis values
+            # 1. Plot loss vs window index
+            ax1 = fig.add_subplot(2, 2, 1)
             x = np.arange(len(window_losses))
-            
-            # Plot losses
-            plt.plot(x, window_losses, 'b-', label='Window Loss')
+            ax1.plot(x, window_losses, 'b-', marker='o', label='Window Loss')
             
             # Highlight windows where model was updated
             update_indices = [i for i, updated in enumerate(window_updates) if updated]
             if update_indices:
                 update_losses = [window_losses[i] for i in update_indices]
-                plt.scatter(update_indices, update_losses, color='r', s=80, marker='o', label='Model Updated')
+                ax1.scatter(update_indices, update_losses, color='r', s=80, marker='o', label='Model Updated')
             
             # Add threshold line if configured
             if hasattr(self.config.online_learning, 'loss_threshold'):
                 threshold = self.config.online_learning.loss_threshold
-                plt.axhline(y=threshold, color='g', linestyle='--', label=f'Threshold ({threshold})')
+                ax1.axhline(y=threshold, color='g', linestyle='--', label=f'Threshold ({threshold})')
             
             # Add labels and title
-            plt.xlabel('Window Index')
-            plt.ylabel('Loss')
-            plt.title('Online Learning Results')
-            plt.legend()
-            plt.grid(True, alpha=0.3)
+            ax1.set_xlabel('Window Index')
+            ax1.set_ylabel('Loss')
+            ax1.set_title('Loss vs Window Index')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            
+            # 2. Plot covariance vs window index
+            ax2 = fig.add_subplot(2, 2, 2)
+            ax2.plot(x, window_covariances, 'g-', marker='o', label='Average Covariance')
+            
+            # Highlight windows where model was updated
+            if update_indices:
+                update_covs = [window_covariances[i] for i in update_indices]
+                ax2.scatter(update_indices, update_covs, color='r', s=80, marker='o', label='Model Updated')
+            
+            # Add labels and title
+            ax2.set_xlabel('Window Index')
+            ax2.set_ylabel('Average Covariance')
+            ax2.set_title('Covariance vs Window Index')
+            ax2.legend()
+            ax2.grid(True, alpha=0.3)
+            
+            # 3. Plot loss vs eta
+            ax3 = fig.add_subplot(2, 2, 3)
+            ax3.plot(window_eta_values, window_losses, 'b-', marker='o', label='Loss')
+            
+            # Add labels and title
+            ax3.set_xlabel('Eta Value')
+            ax3.set_ylabel('Loss')
+            ax3.set_title('Loss vs Eta')
+            ax3.legend()
+            ax3.grid(True, alpha=0.3)
+            
+            # 4. Plot covariance vs eta
+            ax4 = fig.add_subplot(2, 2, 4)
+            ax4.plot(window_eta_values, window_covariances, 'g-', marker='o', label='Covariance')
+            
+            # Add labels and title
+            ax4.set_xlabel('Eta Value')
+            ax4.set_ylabel('Covariance')
+            ax4.set_title('Covariance vs Eta')
+            ax4.legend()
+            ax4.grid(True, alpha=0.3)
+            
+            # Add overall title
+            plt.suptitle('Online Learning Results with EKF Covariance Analysis', fontsize=16)
+            plt.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust for suptitle
             
             # Save plot
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1400,7 +1583,43 @@ class Simulation:
             plot_path = plot_dir / f"online_learning_results_{timestamp}.png"
             plt.savefig(plot_path)
             
-            logger.info(f"Online learning results plot saved to {plot_path}")
+            # Save additional combined plot with loss and covariance vs eta
+            fig2, ax_combined = plt.subplots(figsize=(12, 8))
+            
+            # Plot both metrics on the same axes with different scales
+            color1 = 'tab:blue'
+            ax_combined.set_xlabel('Eta Value')
+            ax_combined.set_ylabel('Loss', color=color1)
+            line1 = ax_combined.plot(window_eta_values, window_losses, color=color1, marker='o', linestyle='-', label='Loss')
+            ax_combined.tick_params(axis='y', labelcolor=color1)
+            
+            # Create second y-axis for covariance
+            ax_cov = ax_combined.twinx()
+            color2 = 'tab:green'
+            ax_cov.set_ylabel('Average Covariance', color=color2)
+            line2 = ax_cov.plot(window_eta_values, window_covariances, color=color2, marker='s', linestyle='-', label='Covariance')
+            ax_cov.tick_params(axis='y', labelcolor=color2)
+            
+            # Add grid and title
+            ax_combined.grid(True, alpha=0.3)
+            plt.title('Loss and Covariance vs Eta')
+            
+            # Add combined legend
+            lines = line1 + line2
+            labels = [l.get_label() for l in lines]
+            ax_combined.legend(lines, labels, loc='best')
+            
+            # Adjust layout and save
+            plt.tight_layout()
+            combined_plot_path = plot_dir / f"online_learning_eta_combined_{timestamp}.png"
+            plt.savefig(combined_plot_path)
+            
+            # Log with filenames
+            main_plot_filename = plot_path.name
+            combined_plot_filename = combined_plot_path.name
+            logger.info(f"Online learning results plots saved to {plot_dir}:")
+            logger.info(f"  - Main results plot: {main_plot_filename}")
+            logger.info(f"  - Combined eta plot: {combined_plot_filename}")
             
         except ImportError:
             logger.warning("matplotlib not available for plotting online learning results")

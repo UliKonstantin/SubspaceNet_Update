@@ -871,7 +871,15 @@ class OnlineTrainer:
             for step in range(window_size):
                 # Extract data for current step
                 step_data = time_series[step:step+1].to(self.device)  # Add batch dimension
-                step_sources = sources_num[step].item()
+                
+                # Handle different types for sources_num - could be tensor or int/list
+                if isinstance(sources_num, torch.Tensor):
+                    step_sources = sources_num[step].item()
+                elif isinstance(sources_num, list):
+                    step_sources = sources_num[step]  # Already an int
+                else:
+                    # Fallback - convert to int if possible
+                    step_sources = int(sources_num[step]) if hasattr(sources_num, '__getitem__') else int(sources_num)
                 
                 # Apply unsupervised loss function
                 loss = self._compute_unsupervised_loss(step_data, step_sources)
@@ -926,7 +934,7 @@ class OnlineTrainer:
         else:
             angles_pred, ranges_pred, _, eig_val = self.model(data, num_sources)
         
-        # Use eigenvalue-based loss for unsupervised learning
+        # Use eigenvalue-based loss for unsupervised learning 
         # This is just one possible approach - can be customized further
         if isinstance(eig_val, torch.Tensor):
             # Eigenvalue regularization loss - encourage larger separation between signal and noise subspaces

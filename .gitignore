@@ -29,6 +29,10 @@ experiments/results/
 *.pt
 *.pkl
 
+# Dataset files
+data/datasets/
+*.h5
+
 # Distribution / packaging
 .env
 .venv

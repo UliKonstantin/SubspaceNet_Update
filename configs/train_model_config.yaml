@@ -16,7 +16,7 @@ system_model:
   range_resolution: 1  # resolution of range values in meters
 
 dataset:
-  samples_size: 256  # overall dataset size
+  samples_size: 4096  # overall dataset size
   train_test_ratio: 1  # ratio between train and test datasets
   create_data: true  # whether to create new data or use existing data
   save_dataset: false  # whether to save the dataset
@@ -54,13 +54,13 @@ training:
   save_checkpoint: true  # whether to save model checkpoints during training
 
 simulation:
-  train_model: false
+  train_model: true
   evaluate_model: true
-  load_model: true
+  load_model: false
   save_model: true
   plot_results: true
   save_plots: true
-  model_path: experiments/results/checkpoints/saved_SubspaceNet_20250517_140017.pt # Path to a trained model file (.pt)
+  model_path: None # Path to a trained model file (.pt)
   subspace_methods:
     - "ESPRIT"
 

@@ -67,7 +67,7 @@ simulation:
   plot_results: true
   save_plots: true
   # Use an existing model file found in the checkpoints directory
-  model_path: "experiments/results/checkpoints/saved_SubspaceNet_20250517_140017.pt"  # Latest model from May 17, 2025
+  model_path: "experiments/results/training_base_model/checkpoints/saved_SubspaceNet_20250606_160101.pt"  # Latest model from june 6, 2025
   subspace_methods: []  # No classic methods needed for online learning
 
 evaluation: {}
