@@ -1,3 +1,7 @@
+###############################################################################
+# Random Walk Training Config
+###############################################################################
+
 system_model:
   N: 8  # number of antennas
   M: 3   # number of sources
@@ -16,7 +20,7 @@ system_model:
   range_resolution: 1  # resolution of range values in meters
 
 dataset:
-  samples_size: 256  # overall dataset size
+  samples_size: 4096  # overall dataset size
   test_validation_train_split: [0.2, 0.2, 0.6]  # proportions for [test, validation, train] datasets
   create_data: true  # whether to create new data or use existing data
   save_dataset: false  # whether to save the dataset
@@ -32,7 +36,6 @@ model:
     train_loss_type: "rmspe"  # music_spectrum, rmspe
     tau: 8  # number of autocorrelation lags
     field_type: "Far"  # Far, Near
-
     regularization: "null"  # aic, mdl, threshold, null
     variant: "small"  # big, small
     norm_layer: false
@@ -40,7 +43,7 @@ model:
 
 training:
   enabled: True  # whether training is enabled
-  epochs: 30
+  epochs: 10
   batch_size: 256
   optimizer: "Adam"  # Adam, SGD
   scheduler: "ReduceLROnPlateau"  # StepLR, ReduceLROnPlateau
@@ -50,31 +53,34 @@ training:
   gamma: 0.5
   training_objective: "angle"  # angle, range, (angle, range)
   use_wandb: False
-  simulation_name: None
+  simulation_name: "SubspaceNet_randomwalk"  # Base name - parameters will be added automatically
   save_checkpoint: true  # whether to save model checkpoints during training
 
 simulation:
-  train_model: false
+  train_model: true
   evaluate_model: true
-  load_model: true
+  load_model: false
   save_model: true
   plot_results: true
   save_plots: true
-  model_path: experiments/results/checkpoints/saved_SubspaceNet_20250517_140017.pt # Path to a trained model file (.pt)
+  model_path: null # Path to a trained model file (.pt)
   subspace_methods:
     - "ESPRIT"
-
+  output_dir: "experiments/results/${training.simulation_name}"  # Output directory with simulation name variable
 
 evaluation: {}
 
+# Simplified trajectory configuration using random walk which is more stable
 trajectory:
-  enabled: true
-  trajectory_type: "random_walk"
-  trajectory_length: 30
-  random_walk_std_dev: 5  # standard deviation for random walk trajectory (degrees)
-  save_trajectory: false 
+  enabled: true                   # Enable trajectory generation
+  trajectory_type: "random_walk"  # Type of trajectory - simpler and more stable
+  trajectory_length: 100          # Length of trajectory
+  save_trajectory: true           # Save trajectory data
+  random_walk_std_dev: 3.0        # Standard deviation for random walk (degrees) - moderate value
 
+# Kalman filter configuration
 kalman_filter:
-  process_noise_std_dev: null  # standard deviation of process noise (degrees), null to use trajectory.random_walk_std_dev
-  measurement_noise_std_dev: 1.0e-3  # standard deviation of measurement noise (degrees)
-  initial_covariance: 1.0  # initial state covariance 
+  filter_type: "standard"         # Type of Kalman filter: "standard" is more stable than "extended"
+  process_noise_std_dev: 3.0      # Match random_walk_std_dev
+  measurement_noise_std_dev: 0.5  # Measurement noise standard deviation (degrees)
+  initial_covariance: 1.0         # Initial state covariance 

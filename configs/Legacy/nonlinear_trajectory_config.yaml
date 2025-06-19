@@ -16,7 +16,7 @@ system_model:
 # Dataset parameters
 dataset:
   samples_size: 256  # overall dataset size
-  train_test_ratio: 0.8  # ratio between train and test datasets
+  test_validation_train_split: [0.2, 0.2, 0.6]  # proportions for [test, validation, train] datasets
   create_data: true  # whether to create new data or use existing data
   save_dataset: false  # whether to save the dataset
 

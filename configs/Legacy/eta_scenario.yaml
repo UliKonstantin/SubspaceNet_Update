@@ -17,7 +17,7 @@ system_model:
 
 dataset:
   samples_size: 1024  # overall dataset size
-  train_test_ratio: 1  # ratio between train and test datasets
+  test_validation_train_split: [0.2, 0.2, 0.6]  # proportions for [test, validation, train] datasets
   create_data: true  # whether to create new data or use existing data
   save_dataset: false  # whether to save the dataset
   true_doa_train: null  # predefined angles for training (null for random)

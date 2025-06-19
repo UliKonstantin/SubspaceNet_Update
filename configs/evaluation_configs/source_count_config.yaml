@@ -1,0 +1,87 @@
+system_model:
+  N: 8  # number of antennas
+  M: 2  # Default source count - will be overridden during sweep
+  T: 200  # number of snapshots
+  snr: 15  # Moderate SNR to better evaluate source separation ability
+  field_type: "far"
+  signal_nature: "non-coherent"
+  signal_type: "narrowband"
+  wavelength: 1
+  eta: 0.0  # No calibration errors for this test
+  bias: 0
+  sv_noise_var: 0.0
+  doa_range: 60
+  doa_resolution: 1
+  max_range_ratio_to_limit: 0.5
+  range_resolution: 1
+  nominal: true
+
+dataset:
+  samples_size: 256 # Per source count value
+  test_validation_train_split: [1.0, 0.0, 0.0]
+  create_data: true
+  save_dataset: false
+  true_doa_test: null
+  true_range_test: null
+
+model:
+  type: "SubspaceNet"
+  params:
+    diff_method: "esprit"
+    train_loss_type: "rmspe"
+    tau: 8
+    field_type: "Far"
+    regularization: "null"
+    variant: "small"
+    norm_layer: false
+    batch_norm: false
+
+training:
+  enabled: false
+  batch_size: 128
+  optimizer: "Adam"
+  scheduler: "ReduceLROnPlateau"
+  learning_rate: 0.001
+  weight_decay: 1e-9
+  step_size: 50
+  gamma: 0.5
+  training_objective: "angle"
+  use_wandb: false
+  simulation_name: null
+
+simulation:
+  train_model: false
+  evaluate_model: true
+  load_model: true
+  save_model: false
+  plot_results: true
+  save_plots: true
+  model_path: "experiments/results/checkpoints/saved_SubspaceNet_20250517_140017.pt"
+  subspace_methods:
+    - "ESPRIT"
+    - "MUSIC"
+    - "RootMUSIC"
+
+evaluation:
+  save_results: true
+  results_format: "json"
+  detailed_metrics: true
+  kalman_filter: true
+  # Source count sweep parameters that will be used if --values is not specified on command line
+  sweep_parameter: "M"
+  sweep_values: [1, 2, 3, 4, 5]
+  min_source_separation: 10  # Minimum angular separation between sources (degrees)
+  plot_performance_curve: true
+  plot_resolution_stats: true
+
+trajectory:
+  enabled: true
+  trajectory_type: "random_walk"
+  trajectory_length: 30
+  random_walk_std_dev: 5
+  save_trajectory: false
+
+kalman_filter:
+  process_noise_std_dev: 5.0
+  measurement_noise_std_dev: 1.0e-3
+  initial_covariance: 1.0 

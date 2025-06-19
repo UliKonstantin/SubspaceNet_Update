@@ -8,7 +8,7 @@ configuration objects defined in the schema module.
 import sys
 import os
 import importlib
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import warnings
 from pathlib import Path
 import logging
@@ -68,8 +68,15 @@ def _create_system_model_params(config: Config) -> Any:
     
     # Set parameters from configuration
     for key, value in config_dict.items():
+        if key == 'eta':
+            logger.info(f"FACTORY DEBUG: eta being set in SystemModelParams: {value}")
         system_model_params.set_parameter(key, value)
-        
+    
+    # IMPORTANT: If sweep values are defined in evaluation config, they should be
+    # reflected in system_model before reaching this point. This is handled in the
+    # main evaluation loop where apply_overrides is called with system_model.{param}={value}
+    # Example: apply_overrides(config_obj, [f"system_model.{scenario.lower()}={value}"])
+    
     return system_model_params
 
 def create_system_model(config: Config) -> Any:
@@ -88,8 +95,8 @@ def create_system_model(config: Config) -> Any:
     # Import SystemModel
     SystemModel = _import_from_dcd_music("src.system_model", "SystemModel")
     
-    # Create system model
-    system_model = SystemModel(system_model_params, nominal=True)
+    # Create system model using the nominal parameter from config
+    system_model = SystemModel(system_model_params, nominal=config.system_model.nominal)
     
     return system_model
 
@@ -98,6 +105,9 @@ def create_dataset(config: Config, system_model: Any) -> Any:
     """
     Create a dataset from configuration.
     
+    DEPRECATED: Datasets should be created in the data pipeline (_run_data_pipeline),
+    not in the factory. This function remains for backward compatibility.
+    
     Args:
         config: Configuration object
         system_model: The system model
@@ -105,6 +115,12 @@ def create_dataset(config: Config, system_model: Any) -> Any:
     Returns:
         A dataset instance
     """
+    warnings.warn(
+        "create_dataset in factory.py is deprecated. Datasets should be created in _run_data_pipeline.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    
     try:
         # Import TimeSeriesDataset from DCD_MUSIC
         TimeSeriesDataset = _import_from_dcd_music("src.data_handler", "TimeSeriesDataset")
@@ -219,14 +235,14 @@ def create_model(config: Config, system_model: Any) -> Any:
         raise ValueError(f"Unknown model type: {model_type}")
 
 
-def create_trainer(config: Config, model: Any, dataset: Any) -> Any:
+def create_trainer(config: Config, model: Any, dataset: Optional[Any] = None) -> Any:
     """
     Create a trainer from configuration.
     
     Args:
         config: Configuration object
         model: The model to train
-        dataset: The dataset to use for training
+        dataset: The dataset to use for training (optional, can be set later)
         
     Returns:
         A trainer instance or None if creation fails
@@ -263,7 +279,8 @@ def create_trainer(config: Config, model: Any, dataset: Any) -> Any:
         )
         
         # Store the dataset reference for later use during run_experiment
-        trainer.dataset = dataset
+        if dataset is not None:
+            trainer.dataset = dataset
         
         return trainer
     except Exception as e:
@@ -302,6 +319,15 @@ def create_components_from_config(config: Config) -> Dict[str, Any]:
     """
     Create all components from configuration.
     
+    This function creates the following components:
+    - system_model: The system model using SystemModel class
+    - trajectory_handler: (if enabled) Handler for trajectory data
+    - model: The model (SubspaceNet or DCD-MUSIC) for training
+    - trainer: (if training enabled) Trainer for the model
+    
+    NOTE: Datasets are no longer created here. All dataset creation is now handled 
+    in the Simulation._run_data_pipeline method to ensure proper separation of concerns.
+    
     Args:
         config: Configuration object
         
@@ -329,18 +355,6 @@ def create_components_from_config(config: Config) -> Dict[str, Any]:
             else:
                 logger.warning("Trajectory data handler creation failed")
         
-        # Create dataset if create_data is True
-        if config.dataset.create_data:
-            logger.info("Creating dataset...")
-            dataset = create_dataset(config, system_model)
-            if dataset is not None:
-                components["dataset"] = dataset
-                logger.info("Dataset created successfully")
-            else:
-                logger.warning("Dataset creation failed, will continue with other components")
-        else:
-            logger.info("Skipping dataset creation (create_data is False)")
-        
         # Create model
         logger.info("Creating model...")
         model = create_model(config, system_model)
@@ -349,17 +363,15 @@ def create_components_from_config(config: Config) -> Dict[str, Any]:
         components["model"] = model
         logger.info("Model created successfully")
         
-        # Create trainer if training is enabled and we have a dataset
-        if config.training.enabled and "dataset" in components:
+        # Create trainer if training is enabled (without requiring dataset)
+        if config.training.enabled:
             logger.info("Creating trainer...")
-            trainer = create_trainer(config, model, components["dataset"])
+            trainer = create_trainer(config, model, None)  # Dataset will be added in data pipeline
             if trainer is not None:
                 components["trainer"] = trainer
                 logger.info("Trainer created successfully")
             else:
                 logger.warning("Trainer creation failed, but other components are available")
-        elif config.training.enabled:
-            logger.warning("Training is enabled but dataset is not available; skipping trainer creation")
         else:
             logger.info("Training is disabled; skipping trainer creation")
         

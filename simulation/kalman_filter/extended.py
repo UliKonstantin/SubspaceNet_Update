@@ -138,12 +138,17 @@ class ExtendedKalmanFilter1D:
         self.P = self.P0
         logger.debug(f"Initialized state to x0={x0} with covariance P0={self.P0}")
     
-    def predict(self):
+    def predict(self, generate_measurement=False):
         """
         Perform the time update (prediction) step.
         
+        Args:
+            generate_measurement: If True, also generates a noisy measurement for the
+                                predicted state and returns it along with the prediction
+        
         Returns:
-            Predicted state (scalar)
+            If generate_measurement is False: Predicted state (scalar)
+            If generate_measurement is True: Tuple of (predicted state, measurement)
         """
         if self.x is None:
             raise ValueError("State must be initialized before prediction")
@@ -165,20 +170,59 @@ class ExtendedKalmanFilter1D:
         self.P = P_pred
         
         logger.debug(f"Prediction: x={x_pred}, P={P_pred}, F={F}, Q={Q}")
-        return x_pred
+        
+        # Optionally generate measurement for the predicted state
+        if generate_measurement:
+            measurement = self.simulate_measurement(true_state=x_pred)
+            return x_pred, measurement
+        else:
+            return x_pred
     
-    def update(self, z):
+    def simulate_measurement(self, true_state=None):
+        """
+        Generate a simulated noisy measurement based on the current state.
+        
+        Args:
+            true_state: Optional true state to use instead of the filter's state estimate
+                        (useful for simulation when we know the ground truth)
+        
+        Returns:
+            Simulated noisy measurement (scalar)
+        """
+        if true_state is None:
+            if self.x is None:
+                raise ValueError("State must be initialized before simulating measurements")
+            state = self.x
+        else:
+            state = true_state
+            
+        # Generate measurement noise with variance R
+        measurement_noise = np.random.normal(0, np.sqrt(self.R))
+        
+        # Measurement model: z = x + v where v ~ N(0, R)
+        measurement = state + measurement_noise
+        
+        logger.debug(f"Simulated measurement: {measurement} (true state: {state}, noise: {measurement_noise})")
+        return measurement
+    
+    def update(self, z=None):
         """
         Perform the measurement update step.
         
         Args:
-            z: Measurement (scalar)
+            z: Measurement (scalar). If None, a measurement will be simulated
+               based on the current state estimate.
             
         Returns:
             Updated state estimate (scalar)
         """
         if self.x is None:
             raise ValueError("State must be initialized before update")
+        
+        # If no measurement provided, simulate one based on current state
+        if z is None:
+            z = self.simulate_measurement()
+            logger.debug(f"Using simulated measurement: {z}")
         
         # Measurement model is linear (H=1) for our problem
         # Innovation / measurement residual (y = z - H * x̂_k|k-1)
@@ -201,4 +245,31 @@ class ExtendedKalmanFilter1D:
         self.P = P_new
         
         logger.debug(f"Update with z={z}: y={y}, K={K}, x={x_new}, P={P_new}")
-        return x_new 
+        return x_new
+
+    def predict_and_update(self, true_state=None):
+        """
+        Perform a complete cycle of prediction and update with noise generation.
+        
+        This method:
+        1. Predicts the next state
+        2. Generates a noisy measurement based on provided true state or predicted state
+        3. Updates the filter state using this noisy measurement
+        
+        Args:
+            true_state: Optional ground truth state to use for measurement generation.
+                       If None, uses the filter's predicted state.
+        
+        Returns:
+            Tuple of (predicted_state, noisy_measurement, updated_state, covariance)
+        """
+        # Perform prediction step
+        predicted_state = self.predict()
+        
+        # Generate measurement (either from true state or from prediction)
+        measurement = self.simulate_measurement(true_state=true_state if true_state is not None else predicted_state)
+        
+        # Perform update step with generated measurement
+        updated_state = self.update(z=measurement)
+        
+        return predicted_state, measurement, updated_state, self.P 

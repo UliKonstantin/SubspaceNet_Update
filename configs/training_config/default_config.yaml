@@ -16,8 +16,8 @@ system_model:
   range_resolution: 1  # resolution of range values in meters
 
 dataset:
-  samples_size: 4096  # overall dataset size
-  train_test_ratio: 1  # ratio between train and test datasets
+  samples_size: 32  # overall dataset size
+  test_validation_train_split: [0.2, 0.2, 0.6]  # proportions for [test, validation, train] datasets
   create_data: true  # whether to create new data or use existing data
   save_dataset: false  # whether to save the dataset
   true_doa_train: null  # predefined angles for training (null for random)
@@ -40,8 +40,8 @@ model:
 
 training:
   enabled: True  # whether training is enabled
-  epochs: 30
-  batch_size: 256
+  epochs: 3
+  batch_size: 16
   optimizer: "Adam"  # Adam, SGD
   scheduler: "ReduceLROnPlateau"  # StepLR, ReduceLROnPlateau
   learning_rate: 0.001
@@ -50,7 +50,7 @@ training:
   gamma: 0.5
   training_objective: "angle"  # angle, range, (angle, range)
   use_wandb: False
-  simulation_name: None
+  simulation_name: "SubspaceNet_run"  # Base name - parameters will be added automatically
   save_checkpoint: true  # whether to save model checkpoints during training
 
 simulation:
@@ -60,10 +60,10 @@ simulation:
   save_model: true
   plot_results: true
   save_plots: true
-  model_path: None # Path to a trained model file (.pt)
+  model_path: null # Path to a trained model file (.pt)
   subspace_methods:
     - "ESPRIT"
-
+  output_dir: "experiments/results/${training.simulation_name}"  # Output directory with simulation name variable
 
 evaluation: {}
 

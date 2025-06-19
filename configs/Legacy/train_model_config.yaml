@@ -16,7 +16,7 @@ system_model:
   range_resolution: 1  # resolution of range values in meters
 
 dataset:
-  samples_size: 256  # overall dataset size
+  samples_size: 4096  # overall dataset size
   test_validation_train_split: [0.2, 0.2, 0.6]  # proportions for [test, validation, train] datasets
   create_data: true  # whether to create new data or use existing data
   save_dataset: false  # whether to save the dataset
@@ -54,13 +54,13 @@ training:
   save_checkpoint: true  # whether to save model checkpoints during training
 
 simulation:
-  train_model: false
+  train_model: true
   evaluate_model: true
-  load_model: true
+  load_model: false
   save_model: true
   plot_results: true
   save_plots: true
-  model_path: experiments/results/checkpoints/saved_SubspaceNet_20250517_140017.pt # Path to a trained model file (.pt)
+  model_path: None # Path to a trained model file (.pt)
   subspace_methods:
     - "ESPRIT"
 
@@ -69,12 +69,35 @@ evaluation: {}
 
 trajectory:
   enabled: true
-  trajectory_type: "random_walk"
+  trajectory_type: "sine_accel_nonlinear"
   trajectory_length: 30
-  random_walk_std_dev: 5  # standard deviation for random walk trajectory (degrees)
-  save_trajectory: false 
+  save_trajectory: false
+  
+  # Sine acceleration non-linear model parameters
+  sine_accel_omega0: 0.1          # Base angular velocity (rad/s)
+  sine_accel_kappa: 5.0           # Sine acceleration coefficient (rad/s²)
+  sine_accel_noise_std: 0.2       # Noise standard deviation (rad)
+  
+  # Multiplicative noise non-linear model parameters (not used with sine_accel_nonlinear type)
+  mult_noise_omega0: 0.2          # Base angular velocity (rad/s)
+  mult_noise_amp: 0.8             # Amplitude of multiplicative term
+  mult_noise_base_std: 0.2        # Base noise standard deviation (rad)
 
 kalman_filter:
-  process_noise_std_dev: null  # standard deviation of process noise (degrees), null to use trajectory.random_walk_std_dev
-  measurement_noise_std_dev: 1.0e-3  # standard deviation of measurement noise (degrees)
-  initial_covariance: 1.0  # initial state covariance 
+  filter_type: "extended"         # Type of Kalman filter: "standard" or "extended"
+  measurement_noise_std_dev: 0.5  # Measurement noise standard deviation (degrees)
+  initial_covariance: 1.0         # Initial state covariance
+
+# Online learning configuration
+online_learning:
+  enabled: true          # Enable online learning
+  window_size: 10        # Window size for online learning
+  stride: 2              # Stride between consecutive windows
+  loss_threshold: 0.5    # Threshold for model drift detection
+  max_iterations: 3      # Maximum iterations per window
+  learning_rate: 0.0001  # Learning rate for online updates
+  trajectory_length: 30  # Total trajectory length for online learning (matches trajectory.trajectory_length)
+  eta_update_interval_windows: 2  # Update eta every 2 windows
+  eta_increment: 3       # Amount to increment eta at each update
+  min_eta: 0.0           # Minimum eta value
+  max_eta: 8.0           # Maximum eta value

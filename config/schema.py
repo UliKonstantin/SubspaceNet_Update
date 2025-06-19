@@ -26,12 +26,14 @@ class SystemModelConfig(BaseModel):
     doa_resolution: int = 1
     max_range_ratio_to_limit: float = 0.5
     range_resolution: int = 1
+    nominal: bool = True  # If True, no calibration errors are applied in the steering vectors
 
 
 class DatasetConfig(BaseModel):
     """Dataset configuration parameters."""
     samples_size: int = 4096
-    train_test_ratio: float = 1
+    # Dataset splitting [test, validation, train] proportions
+    test_validation_train_split: List[float] = [0.2, 0.2, 0.6]
     create_data: bool = False
     save_dataset: bool = False
     true_doa_train: Optional[List[float]] = None
@@ -89,7 +91,15 @@ class SimulationConfig(BaseModel):
 
 class EvaluationConfig(BaseModel):
     """Evaluation configuration parameters."""
-    pass
+    save_results: bool = Field(default=True, description="Whether to save evaluation results to file")
+    results_format: Literal["json", "csv", "yaml"] = Field(default="json", description="Format for saving results")
+    detailed_metrics: bool = Field(default=True, description="Whether to include detailed metrics in results")
+    kalman_filter: bool = Field(default=True, description="Whether to use Kalman filter for trajectory evaluation")
+    
+    # Parameter sweep configuration
+    sweep_parameter: Optional[str] = Field(default=None, description="Parameter to sweep during evaluation (e.g., 'snr', 'M', 'eta')")
+    sweep_values: Optional[List[float]] = Field(default=None, description="Values to use for parameter sweep")
+    min_source_separation: Optional[float] = Field(default=None, description="Minimum angular separation between sources in degrees")
 
 
 class TrajectoryType(str, Enum):
@@ -150,6 +160,9 @@ class OnlineLearningConfig(BaseModel):
     eta_increment: Optional[float] = Field(default=0.01, description="Amount to increment (if positive) or decrement (if negative) eta by when an update occurs.")
     max_eta: Optional[float] = Field(default=0.5, description="Maximum allowed value for eta during dynamic updates.")
     min_eta: Optional[float] = Field(default=0.0, description="Minimum allowed value for eta during dynamic updates.")
+    
+    # Calibration error control
+    use_nominal: bool = Field(default=True, description="If True (default), nominal array configuration (no calibration errors) is used for sample generation. If False, calibration errors are applied based on eta.")
 
 
 class ScenarioSystemModelOverride(BaseModel):

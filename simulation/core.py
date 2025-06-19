@@ -77,20 +77,59 @@ class Simulation:
         
     def run(self) -> Dict[str, Any]:
         """
-        Run a single simulation.
+        Run a single simulation with all components (legacy method).
+        
+        This method runs all components in sequence: training, evaluation, and online learning.
+        For more focused execution, use run_training, run_evaluation, or run_online_learning.
         
         Returns:
-            Dict containing evaluation results.
+            Dict containing simulation results.
         """
-        logger.info("Starting simulation")
+        logger.info("Starting complete simulation (training, evaluation, and online learning)")
+        
+        # Run training first
+        training_results = self.run_training()
+        
+        # Check if training was successful
+        if training_results.get("status") == "error":
+            return training_results
+            
+        # Run evaluation if enabled
+        if self.config.simulation.evaluate_model:
+            evaluation_results = self.run_evaluation()
+            # Merge results
+            for key, value in evaluation_results.items():
+                if key != "status":  # Don't overwrite status from training
+                    training_results[key] = value
+                    
+        # Run online learning if enabled
+        if hasattr(self.config, 'online_learning') and getattr(self.config.online_learning, 'enabled', False):
+            online_results = self.run_online_learning()
+            # Merge results
+            for key, value in online_results.items():
+                if key != "status":  # Don't overwrite status from training
+                    training_results[key] = value
+                    
+        return training_results
+        
+    def run_training(self) -> Dict[str, Any]:
+        """
+        Run the training pipeline.
+        
+        This method focuses on dataset creation and model training.
+        
+        Returns:
+            Dict containing training results.
+        """
+        logger.info("Starting training pipeline")
         
         try:
-            # Execute data pipeline
-            self._run_data_pipeline()
+            # Execute data pipeline for training scenario only
+            self._run_data_pipeline(scenario="training")
             
             # Check if data pipeline was successful
             if self.train_dataloader is None:
-                logger.error("Data pipeline failed, skipping training and evaluation")
+                logger.error("Data pipeline failed, skipping training")
                 return {"status": "error", "message": "Data pipeline failed"}
             
             # Load model if configured
@@ -113,43 +152,13 @@ class Simulation:
                 
                 # Check if training was successful
                 if self.trained_model is None:
-                    logger.error("Training pipeline failed, skipping evaluation")
+                    logger.error("Training pipeline failed")
                     return {"status": "error", "message": "Training pipeline failed"}
             elif not self.config.simulation.train_model:
                 logger.info("Skipping training (simulation.train_model=False)")
             elif not self.config.training.enabled:
                 logger.info("Skipping training (training.enabled=False)")
-                    
-            # Execute evaluation pipeline if enabled
-            if self.config.simulation.evaluate_model:
-                # Make sure we have a model to evaluate
-                if self.trained_model is None and self.model is not None:
-                    logger.info("Using non-trained model for evaluation")
-                    self.trained_model = self.model
-                
-                # Run the evaluation
-                if self.trained_model is not None:
-                    self._run_evaluation_pipeline()
-                else:
-                    logger.error("No model available for evaluation")
-                    return {"status": "error", "message": "No model available for evaluation"}
-                
-            # Execute online learning if enabled
-            if hasattr(self.config, 'online_learning') and getattr(self.config.online_learning, 'enabled', False):
-                logger.info("Running online learning pipeline (online_learning.enabled=True)")
-                
-                # Make sure we have a model for online learning
-                if self.trained_model is None and self.model is not None:
-                    logger.info("Using non-trained model for online learning")
-                    self.trained_model = self.model
-                
-                # Run online learning
-                if self.trained_model is not None:
-                    self._run_online_learning()
-                else:
-                    logger.error("No model available for online learning")
-                    return {"status": "error", "message": "No model available for online learning"}
-                
+            
             # Save model if configured
             if self.config.simulation.save_model and self.trained_model is not None:
                 self._save_model_state(self.trained_model)
@@ -157,66 +166,210 @@ class Simulation:
             # Save results
             self._save_results()
             
-            return self.results
+            return {"status": "success", "trained_model": True if self.trained_model is not None else False}
             
         except Exception as e:
-            logger.exception(f"Error running simulation: {e}")
+            logger.exception(f"Error running training: {e}")
             return {"status": "error", "message": str(e), "exception": type(e).__name__}
     
-    def _run_data_pipeline(self) -> None:
+    def run_evaluation(self) -> Dict[str, Any]:
+        """
+        Run the evaluation pipeline.
+        
+        This method focuses on model evaluation against test data.
+        
+        Returns:
+            Dict containing evaluation results.
+        """
+        logger.info("Starting evaluation pipeline")
+        
+        try:
+            # Create evaluation dataset only
+            self._run_data_pipeline(scenario="evaluation")
+            
+            # Check if data pipeline was successful
+            if self.test_dataloader is None:
+                logger.error("Data pipeline failed, cannot create test dataset")
+                return {"status": "error", "message": "Failed to create test dataset"}
+            
+            # Load model from path if configured
+            if self.config.simulation.load_model:
+                if hasattr(self.config.simulation, 'model_path') and self.config.simulation.model_path:
+                    model_path = Path(self.config.simulation.model_path)
+                    logger.info(f"Loading model from path: {model_path}")
+                    success, message = self._load_and_apply_weights(model_path, device)
+                    if not success:
+                        logger.error(f"Failed to load model: {message}")
+                        return {"status": "error", "message": message}
+                else:
+                    logger.error("Model loading requested but no model_path provided in config")
+                    return {"status": "error", "message": "No model_path provided"}
+            
+            # Load model if not already loaded
+            if self.trained_model is None:
+                if self.model is not None:
+                    logger.info("Using non-trained model for evaluation")
+                    self.trained_model = self.model
+                else:
+                    logger.error("No model available for evaluation")
+                    return {"status": "error", "message": "No model available for evaluation"}
+            
+            # Run the evaluation
+            self._run_evaluation_pipeline()
+            
+            # Save results
+            self._save_results()
+            
+            return {"status": "success", "evaluation_results": self.results}
+            
+        except Exception as e:
+            logger.exception(f"Error running evaluation: {e}")
+            return {"status": "error", "message": str(e), "exception": type(e).__name__}
+    
+    def run_online_learning(self) -> Dict[str, Any]:
+        """
+        Run the online learning pipeline.
+        
+        This method focuses on online model adaptation with streaming data.
+        
+        Returns:
+            Dict containing online learning results.
+        """
+        logger.info("Starting online learning pipeline")
+        
+        try:
+            # Check if model is available for online learning
+            if self.trained_model is None:
+                if self.model is not None:
+                    logger.info("Using non-trained model for online learning")
+                    self.trained_model = self.model
+                else:
+                    logger.error("No model available for online learning")
+                    return {"status": "error", "message": "No model available for online learning"}
+            
+            # Run the online learning pipeline
+            self._run_online_learning()
+            
+            # Save results
+            self._save_results()
+            
+            return {"status": "success", "online_learning_results": self.results.get("online_learning", {})}
+            
+        except Exception as e:
+            logger.exception(f"Error running online learning: {e}")
+            return {"status": "error", "message": str(e), "exception": type(e).__name__}
+    
+    def _run_data_pipeline(self, scenario: str = "training") -> None:
         """
         Execute the data preparation pipeline.
         
         Creates or loads datasets based on configuration and
         sets up dataloaders for training, validation, and testing.
+        
+        This method handles all dataset creation for the simulation, enforcing a separation
+        of concerns from the factory system. All components that need access to datasets
+        (like trainers) will be updated with the datasets created here.
+        
+        Args:
+            scenario: The scenario to prepare data for. One of:
+                - "training": Creates training, validation, and test datasets
+                - "evaluation": Creates only test dataset
+                - "online_learning": Creates only online learning dataset
         """
-        logger.info("Starting data pipeline")
+        logger.info(f"Starting data pipeline for scenario: {scenario}")
         
-        # Check if trajectory mode is enabled
-        if self.config.trajectory.enabled:
-            if self.trajectory_handler:
-                logger.info("Using trajectory-based data pipeline")
-                dataset, samples_model = self._create_trajectory_dataset()
-                # Store samples_model for potential use in evaluation
-                self.components["samples_model"] = samples_model
-            else:
-                logger.error("Trajectory mode enabled but no trajectory_handler found")
-                return
-        else:
-            # Use standard dataset creation from factory
-            if "dataset" in self.components:
-                logger.info("Using pre-created dataset from components")
-                dataset = self.components["dataset"]
-            elif self.config.dataset.create_data:
-                logger.info("Creating new dataset")
-                dataset = self._create_standard_dataset()
-            else:
-                logger.info("Loading existing dataset")
-                dataset = self._load_standard_dataset()
-        
-        if dataset is None:
-            logger.error("Failed to create or load dataset")
+        # For "evaluation" scenario, we only need the test dataset
+        if scenario == "evaluation":
+            self._prepare_test_dataset()
             return
+            
+        # For "online_learning" scenario, we only need the online learning dataset
+        if scenario == "online_learning":
+            self._prepare_online_learning_dataset()
+            return
+            
+        # For "training" scenario, we need training, validation, and test datasets
+        if scenario == "training":
+            # Check if trajectory mode is enabled
+            if self.config.trajectory.enabled:
+                if self.trajectory_handler:
+                    logger.info("Using trajectory-based data pipeline")
+                    dataset, samples_model = self._create_trajectory_dataset()
+                    # Store samples_model for potential use in evaluation
+                    self.components["samples_model"] = samples_model
+                else:
+                    logger.error("Trajectory mode enabled but no trajectory_handler found")
+                    return
+            else:
+                # Always create/load datasets here in the data pipeline, not in the factory
+                if self.config.dataset.create_data:
+                    logger.info("Creating new dataset")
+                    dataset = self._create_standard_dataset()
+                else:
+                    logger.info("Loading existing dataset")
+                    dataset = self._load_standard_dataset()
+            
+            if dataset is None:
+                logger.error("Failed to create or load dataset")
+                return
+            
+            self.dataset = dataset
+            # Store dataset in components
+            self.components["dataset"] = dataset
+            
+            # Update trainer with dataset if trainer exists
+            if "trainer" in self.components and self.components["trainer"] is not None:
+                logger.info("Updating trainer with created dataset")
+                self.components["trainer"].dataset = dataset
+            
+            # Create dataloaders for training and validation
+            logger.info("Creating dataloaders with batch size: %d", self.config.training.batch_size)
+            
+            # Get split proportions [test, validation, train]
+            splits = getattr(self.config.dataset, "test_validation_train_split", [0.1, 0.1, 0.8])
+            # Normalize to ensure they sum to 1.0
+            total = sum(splits)
+            if abs(total - 1.0) > 1e-6:
+                splits = [p / total for p in splits]
+            
+            test_prop, val_prop, train_prop = splits
+            logger.info(f"Using split: test={test_prop:.2f}, val={val_prop:.2f}, train={train_prop:.2f}")
+            
+            # Calculate validation split relative to train+val
+            val_split = val_prop / (train_prop + val_prop) if (train_prop + val_prop) > 0 else 0
+            
+            # Create train and validation dataloaders
+            self.train_dataloader, self.valid_dataloader = dataset.get_dataloaders(
+                batch_size=self.config.training.batch_size,
+                validation_split=val_split
+            )
+            
+            logger.info(f"Created dataloaders: train={len(self.train_dataloader)}, val={len(self.valid_dataloader)}")
+            
+            # Store dataloaders in components
+            self.components["train_dataloader"] = self.train_dataloader
+            self.components["valid_dataloader"] = self.valid_dataloader
+            
+            # Create test dataset for training scenario
+            self._prepare_test_dataset()
+            return
+            
+        # If we get here, an invalid scenario was specified
+        logger.error(f"Invalid scenario: {scenario}")
+        raise ValueError(f"Invalid scenario: {scenario}")
+    
+    def _prepare_test_dataset(self) -> None:
+        """Create and set up the test dataset and dataloader."""
+        # Calculate test dataset size
+        splits = getattr(self.config.dataset, "test_validation_train_split", [0.1, 0.1, 0.8])
+        # Normalize
+        total = sum(splits)
+        if abs(total - 1.0) > 1e-6:
+            splits = [p / total for p in splits]
         
-        self.dataset = dataset
-        
-        # Create dataloaders for training and validation
-        logger.info("Creating dataloaders with batch size: %d", self.config.training.batch_size)
-        self.train_dataloader, self.valid_dataloader = dataset.get_dataloaders(
-            batch_size=self.config.training.batch_size,
-            validation_split=self.config.dataset.validation_split if hasattr(self.config.dataset, "validation_split") else 0.2
-        )
-        
-        logger.info(f"Created train dataloader with {len(self.train_dataloader)} batches")
-        logger.info(f"Created validation dataloader with {len(self.valid_dataloader)} batches")
-        
-        # Store dataloaders in components
-        self.components["train_dataloader"] = self.train_dataloader
-        self.components["valid_dataloader"] = self.valid_dataloader
-        
-        # Create test dataset (1/4 of training dataset size)
-        logger.info("Creating test dataset (1/4 of training size)")
-        test_samples_size = self.config.dataset.samples_size // 4
+        test_prop = splits[0]
+        test_samples_size = max(1, int(self.config.dataset.samples_size * test_prop))
+        logger.info(f"Creating test dataset: {test_samples_size} samples ({test_prop:.0%})")
         
         if self.config.trajectory.enabled:
             if self.trajectory_handler:
@@ -246,7 +399,9 @@ class Simulation:
         
         # Store test dataloader in components
         self.components["test_dataloader"] = self.test_dataloader
-
+    
+    def _prepare_online_learning_dataset(self) -> None:
+        """Create and set up the online learning dataset and dataloader."""
         # Create online learning dataset and dataloader if enabled
         if hasattr(self.config, 'online_learning') and getattr(self.config.online_learning, 'enabled', False):
             logger.info("Online learning is enabled, creating on-demand dataset and dataloader.")
@@ -287,7 +442,7 @@ class Simulation:
         else:
             self.online_learning_dataloader = None # Ensure it's defined even if not used
             logger.info("Online learning is not enabled. Skipping online learning dataset creation.")
-        
+    
     def _create_trajectory_dataset(self) -> Tuple[Any, Any]:
         """Create a dataset with trajectory support."""
         return self.trajectory_handler.create_dataset(
@@ -300,26 +455,28 @@ class Simulation:
     
     def _create_standard_dataset(self) -> Any:
         """Create a standard (non-trajectory) dataset."""
-        # This would normally call the factory's create_dataset function
-        # For now, we'll just use what's in components if available
-        if "dataset" in self.components:
-            return self.components["dataset"]
-        
-        # If we need to implement dataset creation directly:
+        # Directly create the dataset using DCD_MUSIC components
         from DCD_MUSIC.src.signal_creation import Samples
         from DCD_MUSIC.src.data_handler import create_dataset
         
-        samples_model = Samples(self.system_model.params)
-        dataset, _ = create_dataset(
-            samples_model=samples_model,
-            samples_size=self.config.dataset.samples_size,
-            save_datasets=self.config.dataset.save_dataset,
-            datasets_path=Path("data/datasets").absolute(),
-            true_doa=self.config.dataset.true_doa_train,
-            true_range=self.config.dataset.true_range_train,
-            phase="train"
-        )
-        return dataset
+        try:
+            samples_model = Samples(self.system_model.params)
+            # Store samples_model for potential later use
+            self.components["samples_model"] = samples_model
+            
+            dataset, _ = create_dataset(
+                samples_model=samples_model,
+                samples_size=self.config.dataset.samples_size,
+                save_datasets=self.config.dataset.save_dataset,
+                datasets_path=Path("data/datasets").absolute(),
+                true_doa=self.config.dataset.true_doa_train,
+                true_range=self.config.dataset.true_range_train,
+                phase="train"
+            )
+            return dataset
+        except Exception as e:
+            logger.error(f"Failed to create standard dataset: {e}")
+            return None
     
     def _load_standard_dataset(self) -> Any:
         """Load a standard (non-trajectory) dataset."""
@@ -481,6 +638,9 @@ class Simulation:
                 for method in classic_methods:
                     classic_methods_losses[method] = {"total_loss": 0.0, "total_samples": 0}
             
+            # Prepare evaluator for classic methods
+            evaluator = Evaluator(self.config, model=self.trained_model, system_model=self.system_model, output_dir=self.output_dir)
+            
             # Trajectory-level evaluation with both DNN+KF and classic methods
             with torch.no_grad():
                 for batch_idx, batch_data in enumerate(tqdm(test_dataloader, desc="Evaluating trajectories")):
@@ -517,7 +677,8 @@ class Simulation:
                         step_mask = torch.arange(max_sources, device=device).expand(batch_size, -1) < step_sources[:, None]
                         
                         # Evaluate DNN model and update Kalman filters for this time step
-                        model_preds, kf_preds, step_loss = self._evaluate_dnn_model_kf_step_batch(
+                        ###model_preds, kf_preds, step_loss = self._evaluate_dnn_model_kf_step_batch(
+                        model_preds, step_loss = self._evaluate_dnn_model_kf_step_batch(
                             step_data, step_sources, labels[:, step, :max_sources], step_mask, batch_kf, 
                             rmspe_criterion, is_near_field
                         )
@@ -529,20 +690,27 @@ class Simulation:
                         # Store predictions for this time step
                         for i in range(batch_size):
                             batch_dnn_preds[i].append(model_preds[i])
-                            batch_dnn_kf_preds[i].append(kf_preds[i])
+                            ###batch_dnn_kf_preds[i].append(kf_preds[i])
                         
                         # Evaluate classic methods if enabled
                         if classic_methods:
-                            classic_results = self._evaluate_classic_methods_step_batch(
+                            classic_results = evaluator._evaluate_classic_methods_step_batch(
                                 step_data, step_sources, labels[:, step, :max_sources],
                                 rmspe_criterion, classic_methods
                             )
-                            
                             # Update classic method losses
                             for method, results in classic_results.items():
                                 classic_methods_losses[method]["total_loss"] += results["total_loss"]
                                 classic_methods_losses[method]["total_samples"] += results["count"]
-                    
+                            if step ==5:
+                                print("classic_results: ", results["total_loss"]/results["count"])
+                                print("eta: ", self.system_model.eta)
+                            if step == 50: 
+                                print("classic_results: ", results["total_loss"]/results["count"])
+                                print("eta: ", self.system_model.eta)
+                            if step == 98:
+                                print("classic_results: ", results["total_loss"]/results["count"])
+                                print("eta: ", self.system_model.eta)
                     # Store complete trajectory results
                     for i in range(batch_size):
                         num_sources_array = sources_num[i].cpu().numpy()
@@ -553,7 +721,7 @@ class Simulation:
                         
                         dnn_trajectory_results.append({
                             'model_predictions': batch_dnn_preds[i],
-                            'kf_predictions': batch_dnn_kf_preds[i],
+                            'kf_predictions': 0, ###batch_dnn_kf_preds[i],
                             'ground_truth': gt_trajectory,
                             'sources': num_sources_array
                         })
@@ -657,118 +825,25 @@ class Simulation:
 
         # Apply the Kalman filter to the predicted angles (using the padded batch tensor)
         # First, get predictions (before update) for output
-        kf_predictions_before_update = batch_kf.predict().cpu().numpy()
+        ###kf_predictions_before_update = batch_kf.predict().cpu().numpy()
 
         # Then update with new measurements (model predictions)
-        batch_kf.update(padded_angles_pred, step_mask)
+        ###batch_kf.update(padded_angles_pred, step_mask)
 
         # Convert predictions to list of numpy arrays with proper dimensions
         model_predictions_list = []
-        kf_predictions_list = []
+        ###kf_predictions_list = []
 
         for i in range(batch_size):
             num_sources = step_sources[i].item()
             if num_sources > 0:
                 model_predictions_list.append(padded_angles_pred[i, :num_sources].cpu().numpy())
-                kf_predictions_list.append(kf_predictions_before_update[i, :num_sources])
+        ###        kf_predictions_list.append(kf_predictions_before_update[i, :num_sources])
             else:
                 model_predictions_list.append(np.array([]))
-                kf_predictions_list.append(np.array([]))
+        ###        kf_predictions_list.append(np.array([]))
 
-        return model_predictions_list, kf_predictions_list, total_loss
-
-    def _evaluate_classic_methods_step_batch(
-        self,
-        step_data: torch.Tensor,
-        step_sources: torch.Tensor,
-        step_angles: torch.Tensor,
-        rmspe_criterion: RMSPELoss,
-        methods: List[str]
-    ) -> Dict[str, Dict[str, Any]]:
-        """
-        Evaluate classic subspace methods for a batch of trajectories at one time step.
-        
-        Args:
-            step_data: Batch of trajectory step data for current time step [batch_size, T, N]
-            step_sources: Number of sources for each trajectory at current step [batch_size]
-            step_angles: Tensor of ground truth angles for each trajectory at current step
-            rmspe_criterion: Loss criterion for evaluation
-            methods: List of classic subspace methods to evaluate
-            
-        Returns:
-            Dictionary mapping method names to their batch results
-        """
-        batch_size = step_data.shape[0]
-        results = {}
-        
-        # Initialize results for all methods
-        for method in methods:
-            results[method] = {"total_loss": 0.0, "count": 0}
-        
-        # Process each trajectory separately for classic methods
-        # (classic methods generally don't support batch processing)
-        for traj_idx in range(batch_size):
-            # Get data for this trajectory at this time step
-            traj_data = step_data[traj_idx]
-            traj_sources = step_sources[traj_idx]
-            num_sources = traj_sources.item()
-            
-            # Skip trajectories with no sources
-            if num_sources <= 0:
-                continue
-                
-            # Extract the ground truth angles for this trajectory
-            traj_angles = step_angles[traj_idx, :num_sources]
-            
-            try:
-                # Get system model parameters
-                system_model_params = self.system_model.params
-                
-                # Store original M and temporarily update to current sources
-                original_M = system_model_params.M
-                system_model_params.M = int(num_sources)
-                
-                # Format data for test_step
-                # Transform to [1, N, T] as expected by classic methods
-                processed_data = traj_data.unsqueeze(0)
-                
-                # Create batch data structure for test_step
-                batch_data = (
-                    processed_data,  # Shape: [1, N, T]
-                    traj_sources.unsqueeze(0),  # Shape: [1]
-                    traj_angles.unsqueeze(0),  # Shape: [1, num_sources]
-                    torch.ones_like(traj_angles).unsqueeze(0)  # Shape: [1, num_sources]
-                )
-                
-                # Evaluate each classic method
-                for method_name in methods:
-                    try:
-                        # Get method instance
-                        classic_method = get_model_based_method(method_name, system_model_params)
-                        
-                        if classic_method is not None:
-                            # Call test_step to evaluate this method
-                            loss, accuracy, _ = classic_method.test_step(batch_data, 0)
-                            
-                            # Accumulate results
-                            results[method_name]["total_loss"] += loss
-                            results[method_name]["count"] += 1
-                        else:
-                            logger.warning(f"Failed to initialize classic method: {method_name}")
-                    except Exception as method_error:
-                        logger.error(f"Error with method {method_name} for trajectory {traj_idx}: {method_error}")
-                        import traceback
-                        logger.error(traceback.format_exc())
-                
-                # Restore original M
-                system_model_params.M = original_M
-                    
-            except Exception as e:
-                logger.error(f"Error evaluating classic methods for trajectory {traj_idx}: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
-                
-        return results
+        return model_predictions_list, total_loss ###kf_predictions_list, total_loss
 
     def _log_evaluation_results(
         self,
@@ -862,13 +937,14 @@ class Simulation:
         logger.info(f"Saving results to {self.output_dir}")
         # Placeholder for results saving implementation
         
-    def run_scenario(self, scenario_type: str, values: List[Any]) -> Dict[str, Dict[str, Any]]:
+    def run_scenario(self, scenario_type: str, values: List[Any], full_mode: bool = False) -> Dict[str, Dict[str, Any]]:
         """
         Run a parametric scenario with multiple values.
         
         Args:
             scenario_type: Type of scenario (e.g., "SNR", "T", "M", "eta")
             values: List of values to test
+            full_mode: If True, run the complete simulation pipeline instead of just training
             
         Returns:
             Dict mapping scenario values to their results
@@ -894,7 +970,15 @@ class Simulation:
             )
             
             # Run the simulation and store results
-            result = simulation.run()
+            if full_mode:
+                result = simulation.run()  # Run complete pipeline
+            elif self.config.simulation.evaluate_model and not self.config.simulation.train_model:
+                # If in evaluation-only mode, run evaluation instead of training
+                logger.info(f"Running evaluation for {scenario_type}={value}")
+                result = simulation.run_evaluation()
+            else:
+                result = simulation.run_training()  # Run training only
+                
             scenario_results[value] = result
             
         self.results[scenario_type] = scenario_results
@@ -950,6 +1034,14 @@ class Simulation:
         try:
             # First try without any specific parameters
             try:
+                # Add numpy.scalar to safe globals to fix PyTorch 2.6+ serialization issue
+                try:
+                    import torch.serialization
+                    torch.serialization.add_safe_globals(['numpy._core.multiarray.scalar'])
+                    logger.info("Added numpy.scalar to PyTorch safe globals list")
+                except Exception as e:
+                    logger.warning(f"Could not add numpy.scalar to safe globals: {e}")
+                
                 # Simple approach - let PyTorch handle it based on version
                 state_dict = torch.load(model_path, map_location=device)
             except Exception as e:
@@ -959,8 +1051,15 @@ class Simulation:
                     # weights_only=False can help with older PyTorch versions or complex saved states
                     state_dict = torch.load(model_path, map_location=device, weights_only=False)
                 except Exception as e2:
-                    # If both methods fail, raise a comprehensive error
-                    raise RuntimeError(f"Failed to load checkpoint file with both standard and compatibility methods: {e}, then: {e2}")
+                    # Try one more approach with safe_globals context manager
+                    try:
+                        logger.warning(f"Compatibility mode failed, trying with safe_globals context manager")
+                        from torch.serialization import safe_globals
+                        with safe_globals(['numpy._core.multiarray.scalar']):
+                            state_dict = torch.load(model_path, map_location=device)
+                    except Exception as e3:
+                        # If all methods fail, raise a comprehensive error
+                        raise RuntimeError(f"Failed to load checkpoint file with all methods: {e}, then: {e2}, then: {e3}")
 
             # Handle various checkpoint formats intelligently
             original_state_dict = state_dict # Keep a reference before modification

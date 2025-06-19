@@ -681,6 +681,15 @@ class TrajectoryDataset(Dataset):
         """
         # Split indices for training and validation
         indices = range(len(self))
+        total_samples = len(indices)
+        
+        # Safety check for small datasets
+        if total_samples <= 3:  # For very small datasets
+            adjusted_split = min(validation_split, 1.0/total_samples)
+            if adjusted_split != validation_split:
+                logger.warning(f"Adjusting validation_split from {validation_split} to {adjusted_split} due to small dataset size ({total_samples} samples)")
+                validation_split = adjusted_split
+        
         train_indices, val_indices = train_test_split(
             indices, 
             test_size=validation_split,
@@ -920,6 +929,51 @@ class OnlineLearningTrajectoryGenerator:
         elif self.trajectory_config.trajectory_type == TrajectoryType.STATIC:
             # Angles remain the same as self.last_true_angles (initialized once)
             pass # No change needed for static
+        elif self.trajectory_config.trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
+            # Get parameters for sine acceleration non-linear model
+            sa_omega0 = self.trajectory_config.sine_accel_omega0 if hasattr(self.trajectory_config, 'sine_accel_omega0') else 0.0
+            sa_kappa = self.trajectory_config.sine_accel_kappa if hasattr(self.trajectory_config, 'sine_accel_kappa') else 3.0
+            sa_noise_sd = self.trajectory_config.sine_accel_noise_std if hasattr(self.trajectory_config, 'sine_accel_noise_std') else 0.1
+            
+            # Apply non-linear sine acceleration model: θ_{k+1} = θ_k + (ω0 + κ sin θ_k)T + η_k
+            # Convert to radians for trigonometric functions
+            theta_prev_rad = self.last_true_angles * (np.pi / 180.0)
+            
+            # Calculate acceleration term (ω0 + κ sin θ_k)
+            delta = (sa_omega0 + sa_kappa * np.sin(theta_prev_rad)) * 1.0  # T = 1 s
+            
+            # Add noise
+            noise = np.random.normal(0, sa_noise_sd, size=self.current_M)
+            
+            # Update angle
+            next_angles = self.last_true_angles + delta + noise
+            
+            # Ensure angles stay within bounds
+            self.last_true_angles = np.clip(next_angles, self.angle_min, self.angle_max)
+        elif self.trajectory_config.trajectory_type == TrajectoryType.MULT_NOISE_NONLINEAR:
+            # Get parameters for multiplicative noise model
+            mn_omega0 = self.trajectory_config.mult_noise_omega0 if hasattr(self.trajectory_config, 'mult_noise_omega0') else 0.0
+            mn_amp = self.trajectory_config.mult_noise_amp if hasattr(self.trajectory_config, 'mult_noise_amp') else 0.5
+            mn_base_sd = self.trajectory_config.mult_noise_base_std if hasattr(self.trajectory_config, 'mult_noise_base_std') else 0.1
+            
+            # Apply multiplicative noise model: θ_{k+1} = θ_k + ω0 T + σ(θ_k) η_k
+            # Convert to radians for trigonometric functions
+            theta_prev_rad = self.last_true_angles * (np.pi / 180.0)
+            
+            # Deterministic part
+            deterministic = mn_omega0 * 1.0  # T = 1 s
+            
+            # State-dependent noise standard deviation
+            std = mn_base_sd * (1.0 + mn_amp * np.sin(theta_prev_rad)**2)
+            
+            # Generate noise
+            noise = np.random.normal(0, std, size=self.current_M)
+            
+            # Update angle
+            next_angles = self.last_true_angles + deterministic + noise
+            
+            # Ensure angles stay within bounds
+            self.last_true_angles = np.clip(next_angles, self.angle_min, self.angle_max)
         else: # Default to RANDOM if not specified or other types not implemented here yet
             self.last_true_angles = np.random.uniform(self.angle_min, self.angle_max, size=self.current_M)
             

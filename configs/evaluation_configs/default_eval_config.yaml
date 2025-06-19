@@ -1,0 +1,89 @@
+system_model:
+  N: 8  # number of antennas
+  M: 3   # number of sources
+  T: 200  # number of snapshots
+  snr: 10  # signal-to-noise ratio in dB
+  field_type: "far"  # "near" or "far"
+  signal_nature: "non-coherent"  # "non-coherent" or "coherent"
+  signal_type: "narrowband"  # "narrowband" only supported currently
+  wavelength: 1  # carrier wavelength in meters
+  eta: 0.0  # steering vector uniform error variance
+  bias: 0  # steering vector bias error
+  sv_noise_var: 0.0  # steering vector additive gaussian error noise variance
+  doa_range: 60  # range of DOA values [-doa_range, doa_range]
+  doa_resolution: 1  # resolution of DOA values in degrees
+  max_range_ratio_to_limit: 0.5  # ratio of maximum range to Fraunhofer distance
+  range_resolution: 1  # resolution of range values in meters
+  nominal: true  # If true, no calibration errors are applied in the steering vectors
+
+dataset:
+  samples_size: 1500  # Test dataset size - increased for more thorough evaluation
+  test_validation_train_split: [1.0, 0.0, 0.0]  # For evaluation, we use 100% test
+  create_data: true  # Create new data for evaluation
+  save_dataset: false  # Don't save the dataset
+  true_doa_test: null  # predefined angles for testing (null for random)
+  true_range_test: null  # predefined ranges for testing (null for random)
+
+model:
+  type: "SubspaceNet"  # SubspaceNet, DCD-MUSIC
+  params:
+    diff_method: "esprit"  # esprit, music_1D, music_2D, beamformer
+    train_loss_type: "rmspe"  # music_spectrum, rmspe
+    tau: 8  # number of autocorrelation lags
+    field_type: "Far"  # Far, Near
+    regularization: "null"  # aic, mdl, threshold, null
+    variant: "small"  # big, small
+    norm_layer: false
+    batch_norm: false
+
+training:
+  enabled: false  # Disable training for evaluation
+  batch_size: 1500  # Batch size used for evaluation dataloader
+  optimizer: "Adam"
+  scheduler: "ReduceLROnPlateau"
+  learning_rate: 0.001
+  weight_decay: 1e-9
+  step_size: 50
+  gamma: 0.5
+  training_objective: "angle"
+  use_wandb: false
+  simulation_name: evaluating_sine_accel_base_10_steps_trajectory
+
+simulation:
+  train_model: false  # No training in evaluation mode
+  evaluate_model: true  # Enable evaluation
+  load_model: true  # Load a trained model for evaluation
+  save_model: false  # No need to save model in evaluation mode
+  plot_results: true  # Plot evaluation results
+  save_plots: true  # Save plots
+  model_path:  "experiments/results/nonlinear_tracking_sineaccel_base_model/checkpoints/final_SubspaceNet_20250613_184942.pt"
+  subspace_methods:  # Classic methods to compare against
+    - "ESPRIT"
+
+
+evaluation:
+  save_results: true  # Save evaluation results to file
+  results_format: "json"  # Format for saving results
+  detailed_metrics: true  # Include detailed metrics in results
+  kalman_filter: true  # Use Kalman filter for trajectory evaluation
+
+trajectory:
+  enabled: true  # Enable trajectory-based evaluation
+  trajectory_type: "sine_accel_nonlinear"  # Type of trajectory to evaluate
+  trajectory_length: 10  # Length of trajectory for evaluation
+  save_trajectory: false  # Don't save trajectory data
+  # Sine acceleration non-linear model parameters
+  sine_accel_omega0: 0 #0.05         # Base angular velocity (rad/s) - reduced to be more stable
+  sine_accel_kappa: 0 #1.0           # Sine acceleration coefficient (rad/s²) - reduced to be more stable
+  sine_accel_noise_std: 0.001 #0.1       # Noise standard deviation (rad) - reduced to be more stable
+  
+  # Multiplicative noise non-linear model parameters (not used with sine_accel_nonlinear type)
+  mult_noise_omega0: 0.2          # Base angular velocity (rad/s)
+  mult_noise_amp: 0.8             # Amplitude of multiplicative term
+  mult_noise_base_std: 0.2        # Base noise standard deviation (rad)
+  
+kalman_filter:
+  filter_type: "extended"         # Type of Kalman filter: "standard" or "extended"
+  process_noise_std_dev: null     # Use trajectory random walk std dev
+  measurement_noise_std_dev: 0.5  # Measurement noise standard deviation (degrees)
+  initial_covariance: 1.0         # Initial state covariance 

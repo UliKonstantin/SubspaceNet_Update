@@ -18,6 +18,7 @@ system_model:
   doa_resolution: 1  # resolution of DOA values in degrees
   max_range_ratio_to_limit: 0.5  # ratio of maximum range to Fraunhofer distance
   range_resolution: 1  # resolution of range values in meters
+  nominal: false  # If false, apply calibration errors according to eta; if true, no calibration errors
 
 model:
   type: "SubspaceNet"  # SubspaceNet, DCD-MUSIC
@@ -34,7 +35,7 @@ model:
 training:
   enabled: False  # whether training is enabled
   epochs: 30
-  batch_size: 256
+  batch_size: 1
   optimizer: "Adam"  # Adam, SGD
   scheduler: "ReduceLROnPlateau"  # StepLR, ReduceLROnPlateau
   learning_rate: 0.001
@@ -53,15 +54,24 @@ simulation:
   save_model: true
   plot_results: true
   save_plots: true
-  model_path: "experiments/results/checkpoints/saved_SubspaceNet_20250517_140017.pt" # Path to a trained model file (.pt)
+
+  model_path: "experiments/results/nonlinear_trajectory_train_model/checkpoints/final_SubspaceNet_20250607_230704.pt" # Path to a trained model file (.pt)
   subspace_methods:
     - "ESPRIT"
-
+dataset:
+  samples_size: 2  # overall dataset size (kept small for testing)
+  test_validation_train_split: [0.2, 0.2, 0.6]  # proportions for [test, validation, train] datasets
+  create_data: true  # whether to create new data or use existing data
+  save_dataset: false  # whether to save the dataset
+  true_doa_train: null  # predefined angles for training (null for random)
+  true_range_train: null  # predefined ranges for training (null for random)
+  true_doa_test: null  # predefined angles for testing (null for random)
+  true_range_test: null  # predefined ranges for testing (null for random) 
 # Trajectory configuration
 trajectory:
   enabled: true                   # Enable trajectory generation
   trajectory_type: "sine_accel_nonlinear"  # Type of trajectory
-  trajectory_length: 20          # Length of trajectory (increased from 50)
+  trajectory_length: 1024          # Length of trajectory (increased from 50)
   save_trajectory: true           # Save trajectory data
   
   # Sine acceleration non-linear model parameters
@@ -83,23 +93,15 @@ kalman_filter:
 # Online learning configuration
 online_learning:
   enabled: true          # Enable online learning
-  window_size: 10        # Window size for online learning (increased)
-  stride: 2              # Stride between consecutive windows
+  window_size: 512        # Window size for online learning (increased)
+  stride: 512              # Stride between consecutive windows
   loss_threshold: 0.5    # Threshold for model drift detection
   max_iterations: 3      # Maximum iterations per window
   learning_rate: 0.0001  # Learning rate for online updates
-  trajectory_length: 20  # Total trajectory length for online learning (increased)
+  trajectory_length: 1024  # Total trajectory length for online learning (increased)
   eta_update_interval_windows: 2  # Update eta every 2 windows
-  eta_increment: 3      # Amount to increment eta at each update (increased)
+  eta_increment: 0.02      # Amount to increment eta at each update (increased)
   min_eta: 0.0           # Minimum eta value
-  max_eta: 8.0           # Maximum eta value (increased to 8.0)
+  max_eta: 0.1           # Maximum eta value (increased to 8.0)
+  use_nominal: false     # Apply calibration errors according to eta value
 
-dataset:
-  samples_size: 512  # overall dataset size (increased from 256)
-  train_test_ratio: 1  # ratio between train and test datasets
-  create_data: true  # whether to create new data or use existing data
-  save_dataset: false  # whether to save the dataset
-  true_doa_train: null  # predefined angles for training (null for random)
-  true_range_train: null  # predefined ranges for training (null for random)
-  true_doa_test: null  # predefined angles for testing (null for random)
-  true_range_test: null  # predefined ranges for testing (null for random) 
