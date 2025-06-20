@@ -73,9 +73,9 @@ trajectory:
   trajectory_length: 10  # Length of trajectory for evaluation
   save_trajectory: false  # Don't save trajectory data
   # Sine acceleration non-linear model parameters
-  sine_accel_omega0: 0 #0.05         # Base angular velocity (rad/s) - reduced to be more stable
-  sine_accel_kappa: 0 #1.0           # Sine acceleration coefficient (rad/s²) - reduced to be more stable
-  sine_accel_noise_std: 0.001 #0.1       # Noise standard deviation (rad) - reduced to be more stable
+  sine_accel_omega0: 0.05         # Base angular velocity (rad/s) - reduced to be more stable
+  sine_accel_kappa: 0.2           # Sine acceleration coefficient (rad/s²) - reduced to be more stable
+  sine_accel_noise_std: 0.001        # Noise standard deviation (rad) - reduced to be more stable
   
   # Multiplicative noise non-linear model parameters (not used with sine_accel_nonlinear type)
   mult_noise_omega0: 0.2          # Base angular velocity (rad/s)
@@ -84,6 +84,6 @@ trajectory:
   
 kalman_filter:
   filter_type: "extended"         # Type of Kalman filter: "standard" or "extended"
-  process_noise_std_dev: null     # Use trajectory random walk std dev
-  measurement_noise_std_dev: 0.5  # Measurement noise standard deviation (degrees)
+  process_noise_std_dev: 0.001     # Use trajectory random walk std dev
+  measurement_noise_std_dev: 0.001  # Measurement noise standard deviation (degrees)
   initial_covariance: 1.0         # Initial state covariance 

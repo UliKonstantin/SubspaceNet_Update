@@ -651,6 +651,7 @@ class Simulation:
                     # Initialize storage for batch results
                     batch_dnn_preds = [[] for _ in range(batch_size)]
                     batch_dnn_kf_preds = [[] for _ in range(batch_size)]
+                    batch_kf_covariances = [[] for _ in range(batch_size)]  # Initialize covariance tracking
                     
                     # Find maximum number of sources in batch for efficient batch processing
                     max_sources = torch.max(sources_num).item()
@@ -677,8 +678,7 @@ class Simulation:
                         step_mask = torch.arange(max_sources, device=device).expand(batch_size, -1) < step_sources[:, None]
                         
                         # Evaluate DNN model and update Kalman filters for this time step
-                        ###model_preds, kf_preds, step_loss = self._evaluate_dnn_model_kf_step_batch(
-                        model_preds, step_loss = self._evaluate_dnn_model_kf_step_batch(
+                        model_preds, kf_preds, step_loss, kf_loss, step_covariances = self._evaluate_dnn_model_kf_step_batch(
                             step_data, step_sources, labels[:, step, :max_sources], step_mask, batch_kf, 
                             rmspe_criterion, is_near_field
                         )
@@ -690,7 +690,9 @@ class Simulation:
                         # Store predictions for this time step
                         for i in range(batch_size):
                             batch_dnn_preds[i].append(model_preds[i])
-                            ###batch_dnn_kf_preds[i].append(kf_preds[i])
+                            batch_dnn_kf_preds[i].append(kf_preds[i])
+                            # Store covariances
+                            batch_kf_covariances[i].append(step_covariances[i])
                         
                         # Evaluate classic methods if enabled
                         if classic_methods:
@@ -721,7 +723,8 @@ class Simulation:
                         
                         dnn_trajectory_results.append({
                             'model_predictions': batch_dnn_preds[i],
-                            'kf_predictions': 0, ###batch_dnn_kf_preds[i],
+                            'kf_predictions': batch_dnn_kf_preds[i],
+                            'kf_covariances': batch_kf_covariances[i],  # Add KF covariances
                             'ground_truth': gt_trajectory,
                             'sources': num_sources_array
                         })
@@ -776,7 +779,7 @@ class Simulation:
         # Collect model predictions per trajectory
         batch_angles_pred_list = []
         total_loss = 0.0
-
+        #TODO: replace with batch processing
         # Loop through batch because the model (or underlying method) doesn't support batch source counts
         for i in range(batch_size):
             # Extract data for a single trajectory
@@ -824,26 +827,40 @@ class Simulation:
                 padded_angles_pred[i, :num_sources] = pred
 
         # Apply the Kalman filter to the predicted angles (using the padded batch tensor)
-        # First, get predictions (before update) for output
-        ###kf_predictions_before_update = batch_kf.predict().cpu().numpy()
+        # Get predictions before update (current state)
+        kf_predictions_before_update = batch_kf.predict().cpu().numpy()
 
-        # Then update with new measurements (model predictions)
-        ###batch_kf.update(padded_angles_pred, step_mask)
+        # Then update with new measurements (model predictions) and get updated states
+        kf_predictions_after_update, kf_covariances = batch_kf.update(padded_angles_pred, step_mask)
+        kf_predictions_after_update = kf_predictions_after_update.cpu().numpy()
+        kf_covariances = kf_covariances.cpu().numpy()
 
         # Convert predictions to list of numpy arrays with proper dimensions
         model_predictions_list = []
-        ###kf_predictions_list = []
+        kf_predictions_list = []
+        kf_rmspe_list = []  # List to store RMSPE between KF update and truth
+        kf_covariance_list = []  # List to store error covariances
 
         for i in range(batch_size):
             num_sources = step_sources[i].item()
             if num_sources > 0:
                 model_predictions_list.append(padded_angles_pred[i, :num_sources].cpu().numpy())
-        ###        kf_predictions_list.append(kf_predictions_before_update[i, :num_sources])
+                kf_predictions_list.append(kf_predictions_after_update[i, :num_sources])
+                kf_covariance_list.append(kf_covariances[i, :num_sources])
+                
+                # Calculate RMSPE between KF update and truth
+                with torch.no_grad():
+                    kf_pred_tensor = torch.tensor(kf_predictions_after_update[i, :num_sources], device=device).unsqueeze(0)
+                    truth_tensor = step_angles[i, :num_sources].unsqueeze(0)
+                    kf_rmspe = rmspe_criterion(kf_pred_tensor, truth_tensor).item()
+                    kf_rmspe_list.append(kf_rmspe)
             else:
                 model_predictions_list.append(np.array([]))
-        ###        kf_predictions_list.append(np.array([]))
+                kf_predictions_list.append(np.array([]))
+                kf_covariance_list.append(np.array([]))
+                kf_rmspe_list.append(0.0)  # No sources, so RMSPE is 0
 
-        return model_predictions_list, total_loss ###kf_predictions_list, total_loss
+        return model_predictions_list, kf_predictions_list, total_loss, np.sum(kf_rmspe_list), kf_covariance_list
 
     def _log_evaluation_results(
         self,
@@ -1272,6 +1289,8 @@ class Simulation:
             window_covariances = []
             window_update_flags = []
             window_eta_values = []
+            window_ekf_predictions = []
+            window_ekf_covariances = []
             drift_detected_count = 0
             model_updated_count = 0
             
@@ -1321,7 +1340,7 @@ class Simulation:
                 
                 # Calculate loss on the current window (generated with current eta)
                 # _evaluate_window expects: (Tensor[win_size, N, T], List[int], List[np.ndarray])
-                current_window_loss, avg_window_cov = self._evaluate_window(
+                current_window_loss, avg_window_cov, ekf_predictions, ekf_covariances = self._evaluate_window(
                     time_series_single_window, 
                     sources_num_single_window_list, 
                     labels_single_window_list_of_arrays
@@ -1329,6 +1348,8 @@ class Simulation:
                 window_losses.append(current_window_loss)
                 window_covariances.append(avg_window_cov)
                 window_eta_values.append(self.system_model.params.eta)
+                window_ekf_predictions.append(ekf_predictions)
+                window_ekf_covariances.append(ekf_covariances)
                 
                 logger.info(f"Window {window_idx}: Loss = {current_window_loss:.6f}, Cov = {avg_window_cov:.6f} (current eta={self.system_model.params.eta:.4f})")
                 
@@ -1381,7 +1402,9 @@ class Simulation:
                 "window_count": len(self.online_learning_dataloader),
                 "window_size": online_config.window_size,
                 "stride": online_config.stride,
-                "loss_threshold": loss_threshold
+                "loss_threshold": loss_threshold,
+                "ekf_predictions": window_ekf_predictions,
+                "ekf_covariances": window_ekf_covariances
             }
             
             # Plot results
@@ -1408,7 +1431,7 @@ class Simulation:
             window_labels: Labels for window (list of tensors)
             
         Returns:
-            Tuple of (average loss across window, average covariance across window)
+            Tuple of (average loss across window, average covariance across window, ekf_predictions, ekf_covariances)
         """
         # Imports for EKF
         import torch
@@ -1440,7 +1463,7 @@ class Simulation:
         
         if current_window_len == 0:
             logger.error("Window has zero valid steps. Cannot evaluate.")
-            return float('inf'), float('nan')
+            return float('inf'), float('nan'), [], []
         
         total_loss = 0.0
         num_valid_steps_for_loss = 0
@@ -1588,10 +1611,10 @@ class Simulation:
             else:
                 avg_window_cov = float('nan')  # No valid covariance points
             
-            return avg_loss, avg_window_cov
+            return avg_loss, avg_window_cov, ekf_predictions, ekf_covariances
         else:
             logger.warning("No valid steps with sources found in the window for loss calculation.")
-            return float('inf'), float('nan')  # Or 0.0, depending on desired behavior for empty windows
+            return float('inf'), float('nan'), [], []  # Or 0.0, depending on desired behavior for empty windows
 
     def _plot_online_learning_results(self, window_losses, window_covariances, window_eta_values, window_updates):
         """

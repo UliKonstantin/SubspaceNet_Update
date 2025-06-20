@@ -150,7 +150,7 @@ class BatchKalmanFilter1D:
             measurement_mask: Boolean mask indicating valid measurements [batch_size, max_sources]
             
         Returns:
-            Tensor of updated states [batch_size, max_sources]
+            Tuple of (updated states [batch_size, max_sources], error covariances [batch_size, max_sources])
         """
         if measurement_mask is None:
             measurement_mask = self.source_mask
@@ -160,7 +160,7 @@ class BatchKalmanFilter1D:
         
         # Only process valid measurements
         if measurement_mask.sum() == 0:
-            return self.x
+            return self.x, self.P
         
         # Innovation: y = z - x
         y = torch.zeros_like(self.x)
@@ -187,7 +187,7 @@ class BatchKalmanFilter1D:
         self.P = P_new
         
         logger.debug(f"Batch update complete for {measurement_mask.sum().item()} measurements")
-        return self.x
+        return self.x, self.P
     
     def predict_and_update(self, measurements, measurement_mask=None):
         """
@@ -198,7 +198,7 @@ class BatchKalmanFilter1D:
             measurement_mask: Boolean mask indicating valid measurements [batch_size, max_sources]
             
         Returns:
-            Tensor of updated states [batch_size, max_sources]
+            Tuple of (updated states [batch_size, max_sources], error covariances [batch_size, max_sources])
         """
         self.predict()
         return self.update(measurements, measurement_mask) 

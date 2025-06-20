@@ -146,11 +146,20 @@ def evaluate_command(config: str, output: Optional[str], override: List[str],
             for value in values:
                 logger.info(f"Evaluating with {scenario}={value}")
                 
+                # Determine the correct config section for the scenario parameter
+                if scenario.lower() in ['trajectory_length']:
+                    override_path = f"trajectory.{scenario.lower()}={value}"
+                elif scenario.lower() in ['snr', 'm', 'n', 't', 'eta', 'bias', 'sv_noise_var']:
+                    override_path = f"system_model.{scenario.lower()}={value}"
+                else:
+                    # Default to system_model for backward compatibility
+                    override_path = f"system_model.{scenario.lower()}={value}"
+                
                 # Create a modified configuration for this scenario value
                 from config.loader import apply_overrides
                 modified_config = apply_overrides(
                     config_obj,
-                    [f"system_model.{scenario.lower()}={value}"]
+                    [override_path]
                 )
                 
                 # Update components for this sweep value

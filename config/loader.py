@@ -110,7 +110,15 @@ def apply_overrides(config: Config, overrides: List[str]) -> Config:
         elif isinstance(current_value, bool):
             current[final_key] = value.lower() == 'true'
         elif isinstance(current_value, int):
-            current[final_key] = int(value)
+            # Handle float strings that should be converted to int
+            try:
+                current[final_key] = int(value)
+            except ValueError:
+                # Try converting float first, then to int
+                try:
+                    current[final_key] = int(float(value))
+                except ValueError:
+                    raise ValueError(f"Cannot convert '{value}' to int for key '{key}'")
         elif isinstance(current_value, float):
             current[final_key] = float(value)
         elif isinstance(current_value, list):
