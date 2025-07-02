@@ -48,13 +48,14 @@ class SineAccelStateModel(StateEvolutionModel):
             Predicted next angle (degrees)
         """
         # Convert to radians for trigonometric function
-        x_rad = np.radians(x) if isinstance(x, (int, float)) else np.radians(x.copy())
-        
+        #x_rad = np.radians(x) if isinstance(x, (int, float)) else np.radians(x.copy())
+        x_rad = x
         # Calculate acceleration term
         delta = (self.omega0 + self.kappa * np.sin(x_rad)) * self.time_step
         
         # Return in same units as input (degrees)
-        result = x + np.degrees(delta)
+        #result = x + np.radians(delta)
+        result = x + delta
         
         logger.debug(f"SineAccel state transition: {x} -> {result}")
         return result
@@ -70,11 +71,66 @@ class SineAccelStateModel(StateEvolutionModel):
             Derivative of state transition with respect to state
         """
         # Convert to radians for trigonometric function
-        x_rad = np.radians(x) if isinstance(x, (int, float)) else np.radians(x.copy())
-        
+        #x_rad = np.radians(x) if isinstance(x, (int, float)) else np.radians(x.copy())
+        x_rad = x
         # Calculate the derivative
         # Note: need to account for degrees->radians conversion in the derivative
-        jacobian = 1 + self.kappa * np.cos(x_rad) * self.time_step * np.pi/180.0
-        
+        #jacobian = 1 + self.kappa * np.cos(x_rad) * self.time_step * np.pi/180.0
+        jacobian = 1 + self.kappa * np.cos(x_rad) * self.time_step
         logger.debug(f"SineAccel Jacobian at x={x}: {jacobian}")
-        return jacobian 
+        return jacobian
+    
+    def f_batch(self, x_batch):
+        """
+        Batch version of state transition function.
+        
+        Args:
+            x_batch: Array of current angles
+            
+        Returns:
+            Array of predicted next angles
+        """
+        # Convert to numpy array if needed
+        x_array = np.asarray(x_batch)
+        
+        # Apply state transition function element-wise
+        delta = (self.omega0 + self.kappa * np.sin(x_array)) * self.time_step
+        result = x_array + delta
+        
+        logger.debug(f"SineAccel batch state transition for {len(x_array)} states")
+        return result
+    
+    def F_jacobian_batch(self, x_batch):
+        """
+        Batch version of Jacobian computation.
+        
+        Args:
+            x_batch: Array of current angles
+            
+        Returns:
+            Array of Jacobians
+        """
+        # Convert to numpy array if needed
+        x_array = np.asarray(x_batch)
+        
+        # Calculate Jacobians element-wise
+        jacobian = 1 + self.kappa * np.cos(x_array) * self.time_step
+        
+        logger.debug(f"SineAccel batch Jacobian for {len(x_array)} states")
+        return jacobian
+    
+    def noise_variance_batch(self, x_batch):
+        """
+        Batch version of noise variance computation.
+        
+        Args:
+            x_batch: Array of current angles
+            
+        Returns:
+            Array of noise variances (constant for this model)
+        """
+        # Convert to numpy array if needed
+        x_array = np.asarray(x_batch)
+        
+        # Return constant noise variance for all states
+        return np.full_like(x_array, self.base_noise_variance) 

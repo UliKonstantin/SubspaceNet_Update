@@ -11,6 +11,7 @@ import logging
 import numpy as np
 from pathlib import Path
 from typing import List, Optional
+import torch
 
 from config.loader import save_config
 from config_handler import setup_configuration
@@ -25,6 +26,9 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('SubspaceNet')
+
+# Device setup
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 @click.group()
 def cli():
@@ -72,7 +76,7 @@ def run_command(config: str, output: Optional[str], override: List[str], scenari
 @override_option
 @click.option('--model', '-m', type=str, required=True, help='Path to the trained model to evaluate')
 @click.option('--trajectory/--no-trajectory', default=False, help='Enable trajectory-based data')
-@click.option('--scenario', '-s', type=str, help='Parameter to sweep during evaluation (SNR, M, eta, etc.)')
+@click.option('--scenario', '-s', type=str, help='Parameter to sweep during evaluation (SNR, M, eta, kalman_noise, etc.)')
 @click.option('--values', '-v', multiple=True, type=float, help='Values for the scenario parameter (can be used multiple times)')
 def evaluate_command(config: str, output: Optional[str], override: List[str],
                     model: str, trajectory: bool, scenario: Optional[str], values: List[float]):
@@ -130,69 +134,154 @@ def evaluate_command(config: str, output: Optional[str], override: List[str],
                 config_values = [1, 2, 3, 4, 5]
                 logger.info(f"Using default source count (M) values: {config_values}")
                 
+            # If scenario is "kalman_noise", handle measurement and process noise sweep
+            elif not values and not config_values and scenario.lower() == "kalman_noise":
+                # This is a special 2D sweep scenario - values will be handled differently
+                config_values = None
+                logger.info("Using Kalman noise sweep - will use default measurement and process noise ranges")
+                
             # Use config values if available, otherwise use command line values
             if config_values:
                 values = config_values
             
-            # Make sure we have values to sweep over
-            if not values:
-                logger.error(f"Scenario '{scenario}' specified but no values provided. Either use -v option or add sweep_values to config.")
-                sys.exit(1)
+            # Handle special 2D sweep scenario for Kalman noise
+            if scenario.lower() == "kalman_noise":
+                logger.info("Running 2D evaluation sweep on Kalman filter noise parameters")
                 
-            logger.info(f"Running evaluation sweep on {scenario} with values {values}")
-            
-            # For each value, run evaluation
-            scenario_results = {}
-            for value in values:
-                logger.info(f"Evaluating with {scenario}={value}")
+                # Define default ranges for measurement and process noise std dev
+                measurement_noise_values = [0.001, 0.005, 0.01, 0.05, 0.1, 0.2, 0.5] if not values else values[:len(values)//2] if len(values) > 1 else [0.001, 0.01, 0.1]
+                process_noise_values = [0.001, 0.005, 0.01, 0.05, 0.1, 0.2, 0.5] if not values else values[len(values)//2:] if len(values) > 1 else [0.001, 0.01, 0.1]
                 
-                # Determine the correct config section for the scenario parameter
-                if scenario.lower() in ['trajectory_length']:
-                    override_path = f"trajectory.{scenario.lower()}={value}"
-                elif scenario.lower() in ['snr', 'm', 'n', 't', 'eta', 'bias', 'sv_noise_var']:
-                    override_path = f"system_model.{scenario.lower()}={value}"
-                else:
-                    # Default to system_model for backward compatibility
-                    override_path = f"system_model.{scenario.lower()}={value}"
+                logger.info(f"Measurement noise std dev values: {measurement_noise_values}")
+                logger.info(f"Process noise std dev values: {process_noise_values}")
                 
-                # Create a modified configuration for this scenario value
-                from config.loader import apply_overrides
-                modified_config = apply_overrides(
-                    config_obj,
-                    [override_path]
-                )
+                # 2D sweep over all combinations
+                scenario_results = {}
+                total_combinations = len(measurement_noise_values) * len(process_noise_values)
+                combination_count = 0
                 
-                # Update components for this sweep value
-                from config_handler import update_components_for_sweep
-                updated_components = update_components_for_sweep(
-                    components=components,
-                    config=modified_config,
-                    sweep_param=scenario,
-                    sweep_value=value
-                )
+                for meas_noise in measurement_noise_values:
+                    scenario_results[meas_noise] = {}
+                    for proc_noise in process_noise_values:
+                        combination_count += 1
+                        logger.info(f"Evaluating combination {combination_count}/{total_combinations}: measurement_noise={meas_noise}, process_noise={proc_noise}")
+                        
+                        # Create overrides for both noise parameters
+                        overrides = [
+                            f"kalman_filter.measurement_noise_std_dev={meas_noise}",
+                            f"kalman_filter.process_noise_std_dev={proc_noise}"
+                        ]
+                        
+                        # Create a modified configuration for this parameter combination
+                        from config.loader import apply_overrides
+                        modified_config = apply_overrides(config_obj, overrides)
+                        
+                        # Update components for this sweep combination
+                        from config_handler import update_components_for_sweep
+                        updated_components = update_components_for_sweep(
+                            components=components,
+                            config=modified_config,
+                            sweep_param="kalman_noise",
+                            sweep_value=(meas_noise, proc_noise)
+                        )
+                        
+                        # Create a new simulation with the modified config and updated components
+                        scenario_sim = Simulation(
+                            config=modified_config,
+                            components=updated_components,
+                            output_dir=output_dir / f"kalman_noise_m{meas_noise}_p{proc_noise}"
+                        )
+                        
+                        # Run evaluation with this configuration
+                        result = scenario_sim.run_evaluation()
+                        scenario_results[meas_noise][proc_noise] = result
+                        
+                        logger.info(f"Completed combination {combination_count}/{total_combinations}")
                 
-                # Create a new simulation with the modified config and updated components
-                scenario_sim = Simulation(
-                    config=modified_config,
-                    components=updated_components,
-                    output_dir=output_dir / f"{scenario}_{value}"
-                )
+            else:
+                # Make sure we have values to sweep over for single parameter scenarios
+                if not values:
+                    logger.error(f"Scenario '{scenario}' specified but no values provided. Either use -v option or add sweep_values to config.")
+                    sys.exit(1)
+                    
+                logger.info(f"Running evaluation sweep on {scenario} with values {values}")
                 
-                # Run evaluation with this configuration
-                result = scenario_sim.run_evaluation()
-                scenario_results[value] = result
+                # For each value, run evaluation
+                scenario_results = {}
+                for value in values:
+                    logger.info(f"Evaluating with {scenario}={value}")
+                    
+                    # Determine the correct config section for the scenario parameter
+                    if scenario.lower() in ['trajectory_length']:
+                        override_path = f"trajectory.{scenario.lower()}={value}"
+                    elif scenario.lower() in ['snr', 'm', 'n', 't', 'eta', 'bias', 'sv_noise_var']:
+                        override_path = f"system_model.{scenario.lower()}={value}"
+                    else:
+                        # Default to system_model for backward compatibility
+                        override_path = f"system_model.{scenario.lower()}={value}"
+                    
+                    # Create a modified configuration for this scenario value
+                    from config.loader import apply_overrides
+                    modified_config = apply_overrides(
+                        config_obj,
+                        [override_path]
+                    )
+                    
+                    # Update components for this sweep value
+                    from config_handler import update_components_for_sweep
+                    updated_components = update_components_for_sweep(
+                        components=components,
+                        config=modified_config,
+                        sweep_param=scenario,
+                        sweep_value=value
+                    )
+                    
+                    # Create a new simulation with the modified config and updated components
+                    scenario_sim = Simulation(
+                        config=modified_config,
+                        components=updated_components,
+                        output_dir=output_dir / f"{scenario}_{value}"
+                    )
+                    
+                    # Run evaluation with this configuration
+                    result = scenario_sim.run_evaluation()
+                    scenario_results[value] = result
             
             # Store and log results
             sim.results[scenario] = scenario_results
-            logger.info(f"Evaluation sweep completed with {len(scenario_results)} results")
+            
+            if scenario.lower() == "kalman_noise":
+                total_results = sum(len(inner_dict) for inner_dict in scenario_results.values())
+                logger.info(f"Kalman noise sweep completed with {total_results} combinations across {len(scenario_results)} measurement noise values")
+                
+                # Log summary of results
+                logger.info("=== KALMAN NOISE SWEEP RESULTS SUMMARY ===")
+                for meas_noise in sorted(scenario_results.keys()):
+                    for proc_noise in sorted(scenario_results[meas_noise].keys()):
+                        result = scenario_results[meas_noise][proc_noise]
+                        if 'dnn_loss' in result:
+                            logger.info(f"  meas_noise={meas_noise:6.3f}, proc_noise={proc_noise:6.3f} => DNN Loss: {result['dnn_loss']:.6f}")
+                        else:
+                            logger.info(f"  meas_noise={meas_noise:6.3f}, proc_noise={proc_noise:6.3f} => No DNN loss recorded")
+                
+                # --- Plotting 2D heatmap for Kalman noise sweep ---
+                try:
+                    from utils.plotting import plot_2d_kalman_noise_sweep
+                    plot_path = plot_2d_kalman_noise_sweep(scenario_results, output_dir)
+                    logger.info(f"Saved 2D Kalman noise heatmap to {plot_path}")
+                except Exception as e:
+                    logger.warning(f"Could not plot 2D Kalman noise heatmap: {e}")
+                    
+            else:
+                logger.info(f"Evaluation sweep completed with {len(scenario_results)} results")
 
-            # --- Plotting loss vs. swept parameter ---
-            try:
-                from utils.plotting import plot_loss_vs_scenario
-                plot_path = plot_loss_vs_scenario(scenario_results, scenario, output_dir)
-                logger.info(f"Saved loss plot to {plot_path}")
-            except Exception as e:
-                logger.warning(f"Could not plot loss vs. {scenario}: {e}")
+                # --- Plotting loss vs. swept parameter ---
+                try:
+                    from utils.plotting import plot_loss_vs_scenario
+                    plot_path = plot_loss_vs_scenario(scenario_results, scenario, output_dir)
+                    logger.info(f"Saved loss plot to {plot_path}")
+                except Exception as e:
+                    logger.warning(f"Could not plot loss vs. {scenario}: {e}")
             
         else:
             # Run standard evaluation
@@ -215,8 +304,8 @@ def evaluate_command(config: str, output: Optional[str], override: List[str],
 @click.option('--scenario', '-s', type=str, help='Run scenario (SNR, T, M, eta, etc.)')
 @click.option('--values', '-v', multiple=True, type=float, help='Values to test in scenario (can be used multiple times)')
 @click.option('--trajectory/--no-trajectory', default=False, help='Enable trajectory-based data')
-@click.option('--mode', type=click.Choice(['training', 'full']), default='training',
-              help='Simulation mode: training only or full pipeline (training, evaluation, online_learning)')
+@click.option('--mode', type=click.Choice(['training', 'full', 'online_learning']), default='training',
+              help='Simulation mode: training only, full pipeline (training, evaluation, online_learning), or online_learning only')
 def simulate_command(config: str, output: Optional[str], override: List[str], 
                     scenario: Optional[str], values: List[float], trajectory: bool,
                     mode: str):
@@ -252,6 +341,9 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
             if mode == 'full':
                 logger.info("Running full simulation (training, evaluation, and online learning)")
                 results = sim.run()
+            elif mode == 'online_learning':
+                logger.info("Running online learning simulation")
+                results = sim.run_online_learning()
             else:
                 logger.info("Running training-only simulation")
                 results = sim.run_training()
@@ -269,20 +361,21 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
 def online_learning_command(config: str, output: Optional[str], override: List[str], model: str):
     """Run online learning with a pre-trained model."""
     try:
-        # Add required overrides
-        override = list(override) + [
+        # Use config_handler to set up configuration and components
+        config_obj, components, output_dir = setup_configuration(config, output, override)
+        
+        # Apply required overrides for online learning
+        from config.loader import apply_overrides
+        online_learning_overrides = [
             "simulation.train_model=false",
             "simulation.load_model=true",
             f"simulation.model_path={model}",
             "online_learning.enabled=true"
         ]
         
-        # Use config_handler to set up configuration and components
-        config_obj, components, output_dir = setup_configuration(config, output, override)
-        
-        # Create simulation
-        logger.info(f"Running online learning with model: {model}")
-        sim = Simulation(config_obj, components, output_dir)
+        modified_config = apply_overrides(config_obj, online_learning_overrides)
+            # Create simulation without loading model
+        sim = Simulation(modified_config, components, output_dir)
         
         # Run online learning scenario
         results = sim.run_online_learning()

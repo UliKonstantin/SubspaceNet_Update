@@ -10,6 +10,7 @@ from config.schema import TrajectoryType
 from simulation.kalman_filter.base import KalmanFilter1D
 from simulation.kalman_filter.extended import ExtendedKalmanFilter1D
 from simulation.kalman_filter.batch import BatchKalmanFilter1D
+from simulation.kalman_filter.batch_extended import BatchExtendedKalmanFilter1D
 
 logger = logging.getLogger("SubspaceNet.kalman_filter")
 
@@ -57,9 +58,45 @@ def get_kalman_filter(config, trajectory_type=None):
         # Use the original KalmanFilter1D for simple models
         return KalmanFilter1D.create_from_config(config)
 
+def get_batch_extended_kalman_filter(config, batch_size, max_sources, device=None, trajectory_type=None):
+    """
+    Get BatchExtendedKalmanFilter1D from configuration.
+    
+    Args:
+        config: Configuration object containing kalman_filter and trajectory settings
+        batch_size: Number of trajectories in the batch
+        max_sources: Maximum number of sources
+        device: PyTorch device
+        trajectory_type: Type of trajectory to model (defaults to config value)
+        
+    Returns:
+        BatchExtendedKalmanFilter1D instance
+    """
+    return BatchExtendedKalmanFilter1D.from_config(config, batch_size, max_sources, device, trajectory_type)
+
+
+def get_batch_kalman_filter(config, batch_size, max_sources, device=None):
+    """
+    Get BatchKalmanFilter1D from configuration.
+    
+    Args:
+        config: Configuration object
+        batch_size: Number of trajectories in the batch
+        max_sources: Maximum number of sources per trajectory
+        device: PyTorch device
+        
+    Returns:
+        BatchKalmanFilter1D instance
+    """
+    return BatchKalmanFilter1D.from_config(config, batch_size, max_sources, device)
+
+
 __all__ = [
     'KalmanFilter1D',
     'BatchKalmanFilter1D',
     'ExtendedKalmanFilter1D',
-    'get_kalman_filter'
+    'BatchExtendedKalmanFilter1D',
+    'get_kalman_filter',
+    'get_batch_kalman_filter',
+    'get_batch_extended_kalman_filter'
 ] 

@@ -22,7 +22,7 @@ from config.schema import Config
 from .runners.data import TrajectoryDataHandler
 from .runners.training import Trainer, TrainingConfig, TrajectoryTrainer
 from .runners.evaluation import Evaluator
-from simulation.kalman_filter import KalmanFilter1D, BatchKalmanFilter1D
+from simulation.kalman_filter import KalmanFilter1D, BatchKalmanFilter1D, BatchExtendedKalmanFilter1D
 from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
 from DCD_MUSIC.src.signal_creation import Samples
 from DCD_MUSIC.src.evaluation import get_model_based_method, evaluate_model_based
@@ -238,6 +238,19 @@ class Simulation:
         logger.info("Starting online learning pipeline")
         
         try:
+                        # Load model from path if configured
+            if self.config.simulation.load_model:
+                if hasattr(self.config.simulation, 'model_path') and self.config.simulation.model_path:
+                    model_path = Path(self.config.simulation.model_path)
+                    logger.info(f"Loading model from path: {model_path}")
+                    success, message = self._load_and_apply_weights(model_path, device)
+                    if not success:
+                        logger.error(f"Failed to load model: {message}")
+                        return {"status": "error", "message": message}
+                else:
+                    logger.error("Model loading requested but no model_path provided in config")
+                    return {"status": "error", "message": "No model_path provided"}
+            
             # Check if model is available for online learning
             if self.trained_model is None:
                 if self.model is not None:
@@ -247,7 +260,7 @@ class Simulation:
                     logger.error("No model available for online learning")
                     return {"status": "error", "message": "No model available for online learning"}
             
-            # Run the online learning pipeline
+            # Run online learning pipeline over multiple trajectories and average results.
             self._run_online_learning()
             
             # Save results
@@ -258,7 +271,7 @@ class Simulation:
         except Exception as e:
             logger.exception(f"Error running online learning: {e}")
             return {"status": "error", "message": str(e), "exception": type(e).__name__}
-    
+
     def _run_data_pipeline(self, scenario: str = "training") -> None:
         """
         Execute the data preparation pipeline.
@@ -614,8 +627,16 @@ class Simulation:
                 self.results["evaluation_error"] = error_msg
                 return
             
-            # Get Kalman filter parameters from config
-            kf_Q, kf_R, kf_P0 = KalmanFilter1D.from_config(self.config)
+            # Check filter type configuration
+            filter_type = getattr(self.config.kalman_filter, "filter_type", "standard").lower()
+            logger.info(f"Using Kalman filter type: {filter_type}")
+            
+            # Get Kalman filter parameters from config (for backward compatibility)
+            if filter_type == "standard":
+                kf_Q, kf_R, kf_P0 = KalmanFilter1D.from_config(self.config)
+            else:
+                # For extended filter, we'll get parameters during batch filter creation
+                kf_Q, kf_R, kf_P0 = None, None, None
             
             # Instantiate RMSPELoss criterion
             rmspe_criterion = RMSPELoss().to(device)
@@ -625,6 +646,7 @@ class Simulation:
             
             # Overall metrics
             dnn_total_loss = 0.0
+            ekf_total_loss = 0.0  # Track EKF loss separately
             dnn_total_samples = 0
             classic_methods_losses = {}  # Dictionary to store losses for each classic method
             
@@ -656,13 +678,24 @@ class Simulation:
                     # Find maximum number of sources in batch for efficient batch processing
                     max_sources = torch.max(sources_num).item()
                     
-                    # Initialize the batch Kalman filter
-                    batch_kf = BatchKalmanFilter1D.from_config(
-                        self.config,
-                        batch_size=batch_size,
-                        max_sources=max_sources,
-                        device=device
-                    )
+                    # Initialize the appropriate batch Kalman filter based on filter type
+                    if filter_type == "extended":
+                        logger.info(f"Creating BatchExtendedKalmanFilter1D for batch_size={batch_size}, max_sources={max_sources}")
+                        batch_kf = BatchExtendedKalmanFilter1D.from_config(
+                            self.config,
+                            batch_size=batch_size,
+                            max_sources=max_sources,
+                            device=device,
+                            trajectory_type=self.config.trajectory.trajectory_type
+                        )
+                    else:
+                        logger.info(f"Creating BatchKalmanFilter1D for batch_size={batch_size}, max_sources={max_sources}")
+                        batch_kf = BatchKalmanFilter1D.from_config(
+                            self.config,
+                            batch_size=batch_size,
+                            max_sources=max_sources,
+                            device=device
+                        )
                     
                     # Initialize states directly from first step ground truth
                     # Each trajectory might have different number of sources
@@ -685,6 +718,7 @@ class Simulation:
                         
                         # Accumulate loss and store predictions
                         dnn_total_loss += step_loss
+                        ekf_total_loss += kf_loss  # Accumulate EKF loss
                         dnn_total_samples += batch_size
                         
                         # Store predictions for this time step
@@ -704,15 +738,6 @@ class Simulation:
                             for method, results in classic_results.items():
                                 classic_methods_losses[method]["total_loss"] += results["total_loss"]
                                 classic_methods_losses[method]["total_samples"] += results["count"]
-                            if step ==5:
-                                print("classic_results: ", results["total_loss"]/results["count"])
-                                print("eta: ", self.system_model.eta)
-                            if step == 50: 
-                                print("classic_results: ", results["total_loss"]/results["count"])
-                                print("eta: ", self.system_model.eta)
-                            if step == 98:
-                                print("classic_results: ", results["total_loss"]/results["count"])
-                                print("eta: ", self.system_model.eta)
                     # Store complete trajectory results
                     for i in range(batch_size):
                         num_sources_array = sources_num[i].cpu().numpy()
@@ -732,6 +757,7 @@ class Simulation:
                 # Log evaluation results
                 self._log_evaluation_results(
                     dnn_total_loss, 
+                    ekf_total_loss,  # Pass EKF total loss
                     dnn_total_samples,
                     classic_methods_losses,
                     dnn_trajectory_results,
@@ -865,50 +891,80 @@ class Simulation:
     def _log_evaluation_results(
         self,
         dnn_total_loss: float,
+        ekf_total_loss: float,
         dnn_total_samples: int,
         classic_methods_losses: Dict[str, Dict[str, float]],
         dnn_trajectory_results: List[Dict[str, Any]],
         classic_trajectory_results: List[Dict[str, Any]]
     ) -> None:
         """
-        Log the evaluation results for both DNN and classic methods.
+        Log the evaluation results for DNN, EKF, and classic methods.
         
         Args:
             dnn_total_loss: Accumulated loss for DNN model
+            ekf_total_loss: Accumulated loss for EKF model
             dnn_total_samples: Total samples evaluated for DNN
             classic_methods_losses: Dictionary of losses for classic methods
             dnn_trajectory_results: List of trajectory results for DNN
             classic_trajectory_results: List of trajectory results for classic methods
         """
-        # Calculate average loss for DNN model
+        # Calculate average losses for DNN and EKF models
         dnn_avg_loss = dnn_total_loss / max(dnn_total_samples, 1)
+        ekf_avg_loss = ekf_total_loss / max(dnn_total_samples, 1)
+        dnn_avg_loss_in_degrees = dnn_avg_loss * 180 / np.pi
+        ekf_avg_loss_in_degrees = ekf_avg_loss * 180 / np.pi
         
-        # Log DNN results
-        logger.info(f"DNN Model - Average loss: {dnn_avg_loss:.6f}")
+        # Log DNN and EKF results
+        logger.info(f"DNN Model - Average loss: {dnn_avg_loss:.6f} in degrees: {dnn_avg_loss_in_degrees:.6f}")
+        logger.info(f"EKF Model - Average loss: {ekf_avg_loss:.6f} in degrees: {ekf_avg_loss_in_degrees:.6f}")
         
         # Calculate and log average losses for classic methods
         classic_methods_avg_losses = {}
+        classic_methods_avg_losses_in_degrees = {}
         for method, loss_data in classic_methods_losses.items():
             if loss_data["total_samples"] > 0:
                 avg_loss = loss_data["total_loss"] / loss_data["total_samples"]
                 classic_methods_avg_losses[method] = avg_loss
-                logger.info(f"Classic Method {method} - Average loss: {avg_loss:.6f}")
+                classic_methods_avg_losses_in_degrees[method] = avg_loss * 180 / np.pi
+                logger.info(f"Classic Method {method} - Average loss: {avg_loss:.6f} in degrees: {classic_methods_avg_losses_in_degrees[method]:.6f}")
         
         # Store metrics in results
         self.results["dnn_test_loss"] = dnn_avg_loss
+        self.results["ekf_test_loss"] = ekf_avg_loss  # Store EKF loss
         self.results["classic_methods_test_losses"] = classic_methods_avg_losses
+        
+        # Compare DNN vs EKF
+        dnn_ekf_diff = dnn_avg_loss - ekf_avg_loss
+        dnn_ekf_relative_diff = dnn_ekf_diff / ekf_avg_loss * 100 if ekf_avg_loss != 0 else float('inf')
+        
+        logger.info("DNN vs EKF Comparison:")
+        if dnn_ekf_diff < 0:
+            logger.info(f"DNN outperforms EKF by {abs(dnn_ekf_diff):.6f} ({abs(dnn_ekf_relative_diff):.2f}%) in degrees: {abs(dnn_ekf_diff * 180 / np.pi):.6f}")
+        else:
+            logger.info(f"EKF outperforms DNN by {dnn_ekf_diff:.6f} ({dnn_ekf_relative_diff:.2f}%) in degrees: {dnn_ekf_diff * 180 / np.pi:.6f}")
         
         # Compare DNN vs classic methods if both are available
         if classic_methods_avg_losses:
-            logger.info("Comparative Results:")
+            logger.info("DNN vs Classic Methods Comparison:")
             for method, avg_loss in classic_methods_avg_losses.items():
                 diff = dnn_avg_loss - avg_loss
                 relative_diff = diff / avg_loss * 100 if avg_loss != 0 else float('inf')
                 
                 if diff < 0:
-                    logger.info(f"DNN outperforms {method} by {abs(diff):.6f} ({abs(relative_diff):.2f}%)")
+                    logger.info(f"DNN outperforms {method} by {abs(diff):.6f} ({abs(relative_diff):.2f}%) in degrees: {abs(diff * 180 / np.pi):.6f}")
                 else:
-                    logger.info(f"{method} outperforms DNN by {diff:.6f} ({relative_diff:.2f}%)")
+                    logger.info(f"{method} outperforms DNN by {diff:.6f} ({relative_diff:.2f}%) in degrees: {diff * 180 / np.pi:.6f}")
+            
+            # Compare EKF vs classic methods
+            logger.info("EKF vs Classic Methods Comparison:")
+            for method, avg_loss in classic_methods_avg_losses.items():
+                diff = ekf_avg_loss - avg_loss
+                relative_diff = diff / avg_loss * 100 if avg_loss != 0 else float('inf')
+                
+                if diff < 0:
+                    logger.info(f"EKF outperforms {method} by {abs(diff):.6f} ({abs(relative_diff):.2f}%) in degrees: {abs(diff * 180 / np.pi):.6f}")
+                else:
+                    logger.info(f"{method} outperforms EKF by {diff:.6f} ({relative_diff:.2f}%) in degrees: {diff * 180 / np.pi:.6f}")
         
         # Log total number of trajectories evaluated
         logger.info(f"Evaluated {len(dnn_trajectory_results)} trajectories with DNN model")
@@ -920,23 +976,38 @@ class Simulation:
         print(f"{'EVALUATION RESULTS':^80}")
         print("="*80)
         
-        # Print DNN results
-        print(f"\n{'DNN MODEL WITH KALMAN FILTER':^80}")
-        print("-"*80)
-        print(f"Average Loss: {dnn_avg_loss:.6f}")
-        print(f"Total Samples: {dnn_total_samples}")
-        print(f"Trajectories Evaluated: {len(dnn_trajectory_results)}")
+        # Print DNN and EKF results
+        print(f"\n{'DNN AND EKF MODELS WITH KALMAN FILTER':^100}")
+        print("-"*100)
+        print(f"{'Method':<20} {'Average Loss':<20} {'Average Loss (degrees)':<25} {'Additional Info':<30}")
+        print("-"*100)
+        dnn_avg_loss_degrees = dnn_avg_loss * 180 / np.pi
+        ekf_avg_loss_degrees = ekf_avg_loss * 180 / np.pi
+        additional_info = f"Samples: {dnn_total_samples}, Traj: {len(dnn_trajectory_results)}"
+        print(f"{'DNN+Kalman':<20} {dnn_avg_loss:<20.6f} {dnn_avg_loss_degrees:<25.6f} {additional_info:<30}")
+        print(f"{'EKF':<20} {ekf_avg_loss:<20.6f} {ekf_avg_loss_degrees:<25.6f} {additional_info:<30}")
+        
+        # Add comparison row
+        dnn_ekf_diff_degrees = dnn_ekf_diff * 180 / np.pi
+        if dnn_ekf_diff < 0:
+            comparison_text = f"DNN better by {abs(dnn_ekf_diff_degrees):.6f}° ({abs(dnn_ekf_relative_diff):.2f}%)"
+        else:
+            comparison_text = f"EKF better by {dnn_ekf_diff_degrees:.6f}° ({dnn_ekf_relative_diff:.2f}%)"
+        print(f"{'DNN vs EKF':<20} {'Comparison':<20} {comparison_text:<25} {'Performance Gap':<30}")
         
         # Print classic methods results if available
         if classic_methods_avg_losses:
-            print(f"\n{'CLASSIC SUBSPACE METHODS':^80}")
-            print("-"*80)
-            print(f"{'Method':<20} {'Average Loss':<20} {'Comparison with DNN':<30}")
-            print("-"*80)
+            print(f"\n{'CLASSIC SUBSPACE METHODS':^100}")
+            print("-"*100)
+            print(f"{'Method':<20} {'Average Loss':<20} {'Average Loss (degrees)':<25} {'Comparison with DNN':<30}")
+            print("-"*100)
             
             for method, avg_loss in classic_methods_avg_losses.items():
                 diff = dnn_avg_loss - avg_loss
                 relative_diff = diff / avg_loss * 100 if avg_loss != 0 else float('inf')
+                
+                # Convert loss to degrees (assuming loss might be in radians)
+                avg_loss_degrees = avg_loss * (180.0 / 3.14159265359)
                 
                 if diff < 0:
                     comparison = f"DNN better by {abs(diff):.6f} ({abs(relative_diff):.2f}%)"
@@ -945,7 +1016,7 @@ class Simulation:
                 else:
                     comparison = "Equal performance"
                     
-                print(f"{method:<20} {avg_loss:<20.6f} {comparison:<30}")
+                print(f"{method:<20} {avg_loss:<20.6f} {avg_loss_degrees:<25.6f} {comparison:<30}")
         
         print("\n" + "="*80)
         
@@ -1223,14 +1294,17 @@ class Simulation:
             logger.error(f"Failed to save model: {e}")
             return None
 
-    def _run_online_learning(self) -> None:
+    def _run_single_trajectory_online_learning(self, trajectory_idx: int = 0) -> Dict[str, Any]:
         """
-        Run online learning pipeline.
+        Run online learning pipeline for a single trajectory.
         
-        This method sets up and runs the online learning process, which:
+        This method sets up and runs the online learning process for one trajectory, which:
         1. Creates an on-demand dataset that generates data in windows
         2. Evaluates the model on each window to detect drift
         3. Updates the model if drift is detected and training improves loss
+        
+        Returns:
+            Dict containing online learning results for this trajectory
         """
         try:
             # Access online learning configuration
@@ -1239,7 +1313,7 @@ class Simulation:
             # Check if model is available for online learning
             if self.trained_model is None:
                 logger.error("No model available for online learning")
-                return
+                return {"status": "error", "message": "No model available for online learning"}
             
             # Get online learning parameters
             window_size = getattr(online_config, 'window_size', 10)
@@ -1261,6 +1335,11 @@ class Simulation:
                 window_size=window_size,
                 stride=stride
             )
+            
+            # Ensure the dataset generator uses the current (reset) eta value
+            current_eta = system_model_params.eta
+            online_learning_dataset.update_eta(current_eta)
+            logger.info(f"Initialized trajectory with eta = {current_eta:.4f}")
             
             # Create dataloader from on-demand dataset
             from torch.utils.data import DataLoader
@@ -1291,15 +1370,21 @@ class Simulation:
             window_eta_values = []
             window_ekf_predictions = []
             window_ekf_covariances = []
+            window_pre_ekf_losses = []
+            window_labels = []  # Store labels for each window
             drift_detected_count = 0
             model_updated_count = 0
-            
+            test_int=0
             # Process each window of online data
             for window_idx, (time_series_batch, sources_num_batch, labels_batch) in enumerate(tqdm(self.online_learning_dataloader, desc="Online Learning")):
                 # --- Dynamic Eta Update Logic ---
                 if online_config.eta_update_interval_windows and online_config.eta_update_interval_windows > 0 and \
                    window_idx > 0 and window_idx % online_config.eta_update_interval_windows == 0:
                     
+                    # if test_int<4:
+                    #     test_int+=1
+                    #     new_eta = current_eta
+                    # else:
                     current_eta = self.system_model.params.eta # Get current eta from the shared SystemModelParams
                     eta_increment = online_config.eta_increment if online_config.eta_increment is not None else 0.01
                     new_eta = current_eta + eta_increment
@@ -1339,11 +1424,13 @@ class Simulation:
                     labels_single_window_list_of_arrays = [arr[0].cpu().numpy() if isinstance(arr, torch.Tensor) else arr[0] for arr in labels_batch]
                 
                 # Calculate loss on the current window (generated with current eta)
-                # _evaluate_window expects: (Tensor[win_size, N, T], List[int], List[np.ndarray])
-                current_window_loss, avg_window_cov, ekf_predictions, ekf_covariances = self._evaluate_window(
+                # _evaluate_window expects: (Tensor[win_size, N, T], List[int], List[np.ndarray], int, int)
+                current_window_loss, avg_window_cov, ekf_predictions, ekf_covariances, pre_ekf_loss = self._evaluate_window(
                     time_series_single_window, 
                     sources_num_single_window_list, 
-                    labels_single_window_list_of_arrays
+                    labels_single_window_list_of_arrays,
+                    trajectory_idx,
+                    window_idx
                 )
                 window_losses.append(current_window_loss)
                 window_covariances.append(avg_window_cov)
@@ -1351,34 +1438,44 @@ class Simulation:
                 window_ekf_predictions.append(ekf_predictions)
                 window_ekf_covariances.append(ekf_covariances)
                 
+                # Add pre-EKF loss tracking
+                window_pre_ekf_losses.append(pre_ekf_loss)
+                
+                # Store labels for this window
+                window_labels.append(labels_single_window_list_of_arrays)
+                
                 logger.info(f"Window {window_idx}: Loss = {current_window_loss:.6f}, Cov = {avg_window_cov:.6f} (current eta={self.system_model.params.eta:.4f})")
+                
+                # Log both pre-EKF and EKF losses for comparison
+                logger.info(f"Window {window_idx}: Pre-EKF Loss = {pre_ekf_loss:.6f}, EKF Loss = {current_window_loss:.6f}, Cov = {avg_window_cov:.6f} (eta={self.system_model.params.eta:.4f})")
                 
                 # Check if loss exceeds threshold (drift detected)
                 if current_window_loss > loss_threshold:
-                    logger.info(f"Drift detected in window {window_idx} (loss: {current_window_loss:.6f} > threshold: {loss_threshold:.6f})")
-                    drift_detected_count += 1
+                    print(f"Drift detected in window {window_idx} (loss: {current_window_loss:.6f} > threshold: {loss_threshold:.6f})")
+                    # logger.info(f"Drift detected in window {window_idx} (loss: {current_window_loss:.6f} > threshold: {loss_threshold:.6f})")
+                    # drift_detected_count += 1
                     
-                    # Re-enable gradients for training
-                    # Pass the window data in the format expected by train_on_window
-                    # train_on_window expects (time_series_tensor, sources_num_list_or_tensor, labels_list_of_lists)
-                    # labels_single_window_list_of_arrays are the ground truth, used if loss needs them, ignored by unsupervised.
-                    training_window_data = (time_series_single_window, sources_num_single_window_list, labels_single_window_list_of_arrays)
+                    # # Re-enable gradients for training
+                    # # Pass the window data in the format expected by train_on_window
+                    # # train_on_window expects (time_series_tensor, sources_num_list_or_tensor, labels_list_of_lists)
+                    # # labels_single_window_list_of_arrays are the ground truth, used if loss needs them, ignored by unsupervised.
+                    # training_window_data = (time_series_single_window, sources_num_single_window_list, labels_single_window_list_of_arrays)
 
-                    with torch.enable_grad(): 
-                        updated_model, updated_loss = online_trainer.train_on_window(
-                            training_window_data,
-                            max_iterations=max_iterations
-                        )
+                    # with torch.enable_grad(): 
+                    #     updated_model, updated_loss = online_trainer.train_on_window(
+                    #         training_window_data,
+                    #         max_iterations=max_iterations
+                    #     )
                         
-                        # Update model if training improved performance
-                        if updated_loss < current_window_loss:
-                            logger.info(f"Model updated: Loss improved from {current_window_loss:.6f} to {updated_loss:.6f}")
-                            self.trained_model = updated_model # This updates the model instance used by online_trainer too
-                            model_updated_count += 1
-                            window_update_flags.append(True)
-                        else:
-                            logger.info(f"Model update rejected: Loss did not improve ({updated_loss:.6f} >= {current_window_loss:.6f})")
-                            window_update_flags.append(False)
+                    #     # Update model if training improved performance
+                    #     if updated_loss < current_window_loss:
+                    #         logger.info(f"Model updated: Loss improved from {current_window_loss:.6f} to {updated_loss:.6f}")
+                    #         self.trained_model = updated_model # This updates the model instance used by online_trainer too
+                    #         model_updated_count += 1
+                    #         window_update_flags.append(True)
+                    #     else:
+                    #         logger.info(f"Model update rejected: Loss did not improve ({updated_loss:.6f} >= {current_window_loss:.6f})")
+                    #         window_update_flags.append(False)
                 else:
                     logger.info(f"No drift detected in window {window_idx} (loss: {current_window_loss:.6f} <= threshold: {loss_threshold:.6f})")
                     window_update_flags.append(False)
@@ -1392,36 +1489,102 @@ class Simulation:
                 logger.info(f"Saved final online-updated model to {model_save_path}")
             
             # Store results
-            self.results["online_learning"] = {
-                "window_losses": window_losses,
-                "window_covariances": window_covariances,
-                "window_eta_values": window_eta_values,
-                "window_updates": window_update_flags,
-                "drift_detected_count": drift_detected_count,
-                "model_updated_count": model_updated_count,
-                "window_count": len(self.online_learning_dataloader),
-                "window_size": online_config.window_size,
-                "stride": online_config.stride,
-                "loss_threshold": loss_threshold,
-                "ekf_predictions": window_ekf_predictions,
-                "ekf_covariances": window_ekf_covariances
+            return {
+                "status": "success",
+                "online_learning_results": {
+                    "window_losses": window_losses,
+                    "window_covariances": window_covariances,
+                    "window_eta_values": window_eta_values,
+                    "window_updates": window_update_flags,
+                    "drift_detected_count": drift_detected_count,
+                    "model_updated_count": model_updated_count,
+                    "window_count": len(self.online_learning_dataloader),
+                    "window_size": online_config.window_size,
+                    "stride": online_config.stride,
+                    "loss_threshold": loss_threshold,
+                    "ekf_predictions": window_ekf_predictions,
+                    "ekf_covariances": window_ekf_covariances,
+                    "pre_ekf_losses": window_pre_ekf_losses,
+                    "window_labels": window_labels
+                }
             }
-            
-            # Plot results
-            self._plot_online_learning_results(
-                window_losses=window_losses,
-                window_covariances=window_covariances,
-                window_eta_values=window_eta_values,
-                window_updates=window_update_flags
-            )
-            
-            logger.info(f"Online learning completed: {drift_detected_count} drifts detected, {model_updated_count} model updates")
             
         except Exception as e:
             logger.exception(f"Error during online learning: {e}")
+            return {"status": "error", "message": str(e), "exception": type(e).__name__}
+
+    def _run_online_learning(self) -> None:
+        """
+        Run online learning pipeline over multiple trajectories and average results.
+        
+        This method runs the online learning process over a dataset of trajectories and
+        averages the results for more robust analysis.
+        """
+        try:
+            # Get dataset size from config
+            online_config = self.config.online_learning
+            dataset_size = getattr(online_config, 'dataset_size', 1)
+            
+            logger.info(f"Starting online learning over {dataset_size} trajectories")
+            
+            all_results = []
+            
+            # Run online learning for each trajectory
+            for trajectory_idx in range(dataset_size):
+                logger.info(f"Processing trajectory {trajectory_idx + 1}/{dataset_size}")
+                
+                # Reset eta to initial value for each new trajectory
+                initial_eta = 0
+                logger.info(f"Resetting eta to initial value {initial_eta:.4f} for trajectory {trajectory_idx + 1}")
+                self.system_model.params.eta = initial_eta
+                
+                # Reset the system model's distance noise and eta scaling
+                self.system_model.eta = self.system_model._SystemModel__set_eta()
+                if not getattr(self.system_model.params, 'nominal', True):
+                    self.system_model.location_noise = self.system_model.get_distance_noise(True)
+                
+                # Run single trajectory online learning
+                trajectory_result = self._run_single_trajectory_online_learning(trajectory_idx)
+                
+                if trajectory_result.get("status") == "error":
+                    logger.error(f"Error in trajectory {trajectory_idx + 1}: {trajectory_result.get('message')}")
+                    continue
+                    
+                all_results.append(trajectory_result["online_learning_results"])
+            
+            if not all_results:
+                logger.error("No successful trajectory results")
+                self.results["online_learning_error"] = "No successful trajectory results"
+                return
+                
+            # Average results across all trajectories
+            averaged_results = self._average_online_learning_results(all_results)
+            
+            # Store averaged results
+            self.results["online_learning"] = averaged_results
+            
+            # Plot averaged results
+            frobenius_norms = self._calculate_frobenius_norm_per_window(averaged_results["ekf_covariances"])
+            self._plot_online_learning_results(
+                window_losses=averaged_results["window_losses"],
+                window_covariances=averaged_results["window_covariances"],
+                window_eta_values=averaged_results["window_eta_values"],
+                window_updates=averaged_results["window_updates"],
+                window_pre_ekf_losses=averaged_results["pre_ekf_losses"],
+                window_labels=averaged_results["window_labels"],
+                ekf_covariances=averaged_results["ekf_covariances"],
+                frobenius_norms=frobenius_norms
+            )
+            
+            logger.info(f"Online learning completed over {dataset_size} trajectories: "
+                       f"{averaged_results['drift_detected_count']:.1f} avg drifts detected, "
+                       f"{averaged_results['model_updated_count']:.1f} avg model updates")
+            
+        except Exception as e:
+            logger.exception(f"Error during multi-trajectory online learning: {e}")
             self.results["online_learning_error"] = str(e)
 
-    def _evaluate_window(self, window_time_series, window_sources_num, window_labels):
+    def _evaluate_window(self, window_time_series, window_sources_num, window_labels, trajectory_idx: int = 0, window_idx: int = 0):
         """
         Calculate loss on a window of trajectory data using Extended Kalman Filter.
         
@@ -1429,9 +1592,12 @@ class Simulation:
             window_time_series: Time series data for window [batch, window_size, N, T]
             window_sources_num: Source counts for window [batch, window_size]
             window_labels: Labels for window (list of tensors)
+            trajectory_idx: Index of the current trajectory
+            window_idx: Index of the current window within the trajectory
             
         Returns:
-            Tuple of (average loss across window, average covariance across window, ekf_predictions, ekf_covariances)
+            Tuple of (average EKF-filtered loss across window, average covariance across window, 
+                     ekf_predictions, ekf_covariances, average pre-EKF loss across window)
         """
         # Imports for EKF
         import torch
@@ -1463,10 +1629,14 @@ class Simulation:
         
         if current_window_len == 0:
             logger.error("Window has zero valid steps. Cannot evaluate.")
-            return float('inf'), float('nan'), [], []
+            return float('inf'), float('nan'), [], [], float('inf')  # Include pre-EKF loss in return
         
         total_loss = 0.0
         num_valid_steps_for_loss = 0
+        
+        # Add pre-EKF loss tracking for far-field case
+        pre_ekf_total_loss = 0.0
+        pre_ekf_num_valid_steps = 0
         
         # Check if we're dealing with far-field or near-field
         is_near_field = hasattr(self.trained_model, 'field_type') and self.trained_model.field_type.lower() == "near"
@@ -1481,7 +1651,10 @@ class Simulation:
         
         # Create EKF instances
         for i in range(max_sources):
-            ekf_filter = ExtendedKalmanFilter1D.create_from_config(self.config)
+            ekf_filter = ExtendedKalmanFilter1D.create_from_config(
+                self.config, 
+                trajectory_type=self.config.trajectory.trajectory_type
+            )
             ekf_filters.append(ekf_filter)
         
         # Get current eta value from system model
@@ -1519,6 +1692,14 @@ class Simulation:
                         # Convert predictions to numpy for EKF processing
                         angles_pred_np = angles_pred.cpu().numpy().flatten()[:num_sources_this_step]
                         
+                        # Calculate pre-EKF loss (raw model predictions)
+                        pre_ekf_angles_pred = angles_pred.view(1, -1)[:, :num_sources_this_step]
+                        true_angles_tensor = torch.tensor(true_angles_this_step, device=device).unsqueeze(0)
+                        pre_ekf_loss = rmspe_criterion(pre_ekf_angles_pred, true_angles_tensor)
+
+                        pre_ekf_total_loss += pre_ekf_loss.item()
+                        pre_ekf_num_valid_steps += 1
+                        
                         # Initialize EKF state if this is the first step
                         if step_idx == 0:
                             for i in range(num_sources_this_step):
@@ -1549,30 +1730,13 @@ class Simulation:
                         # Calculate loss using EKF predictions
                         loss = rmspe_criterion(ekf_angles_pred, true_angles_tensor)
                     else:
-                        # Near-field case
-                        angles_pred, ranges_pred, _, _ = self.trained_model(step_data_tensor, num_sources_this_step)
-                        
-                        # Get ground truth labels (assuming format matches: angles then ranges)
-                        true_labels_this_step = torch.tensor(labels_per_step_list[step_idx], device=device).unsqueeze(0)
-                        angles_gt = true_labels_this_step[:, :num_sources_this_step]
-                        ranges_gt = true_labels_this_step[:, num_sources_this_step:num_sources_this_step*2]
-                        
-                        # Calculate loss (combined angle and range)
-                        angle_loss = rmspe_criterion(angles_pred, angles_gt)
-                        range_loss = rmspe_criterion(ranges_pred, ranges_gt)
-                        loss = angle_loss + range_loss
-                        
-                        # For near-field, just add empty entries for EKF tracking
-                        ekf_predictions.append([])
-                        ekf_covariances.append([])
+                        # Near-field case - not supported
+                        error_msg = "Near-field processing is not supported in this project. Please use far-field models only."
+                        logger.error(error_msg)
+                        raise NotImplementedError(error_msg)
                 
                 total_loss += loss.item()
                 num_valid_steps_for_loss += 1
-                
-                # Print EKF covariances for this step
-                if not is_near_field and num_sources_this_step > 0:
-                    covariance_str = ", ".join([f"{cov:.6f}" for cov in step_covariances])
-                    logger.info(f"Step {step_idx} - EKF Covariances: [{covariance_str}] (eta={current_eta:.4f})")
             except Exception as e:
                 logger.warning(f"Error processing step {step_idx}: {e}")
                 # Skip this step on error
@@ -1582,28 +1746,26 @@ class Simulation:
         if num_valid_steps_for_loss > 0:
             avg_loss = total_loss / num_valid_steps_for_loss
             
+            # Calculate pre-EKF average loss for far-field case
+            avg_pre_ekf_loss = 0.0
+            if not is_near_field and pre_ekf_num_valid_steps > 0:
+                avg_pre_ekf_loss = pre_ekf_total_loss / pre_ekf_num_valid_steps
+            elif is_near_field:
+                # Near-field case - not supported
+                error_msg = "Near-field processing is not supported in this project. Please use far-field models only."
+                logger.error(error_msg)
+                raise NotImplementedError(error_msg)
+            
             # Calculate average covariance across all sources and steps
             avg_window_cov = 0.0
             total_cov_points = 0
             
-            # Print a summary of the EKF covariances across all steps
             if len(ekf_covariances) > 0 and any(len(step_covs) > 0 for step_covs in ekf_covariances):
-                # Calculate average covariance for each source across all steps
-                avg_covs = []
-                for src_idx in range(max_sources):
-                    # Get covariances for this source from all steps that have this source
-                    src_covs = [step_covs[src_idx] for step_covs in ekf_covariances 
-                               if src_idx < len(step_covs)]
-                    
-                    if src_covs:
-                        avg_cov = sum(src_covs) / len(src_covs)
-                        avg_covs.append(avg_cov)
-                        avg_window_cov += sum(src_covs)
-                        total_cov_points += len(src_covs)
-                
-                if avg_covs:
-                    avg_cov_str = ", ".join([f"{cov:.6f}" for cov in avg_covs])
-                    logger.info(f"Window Average EKF Covariances: [{avg_cov_str}] (eta={current_eta:.4f})")
+                # Calculate overall average covariance across all sources and steps
+                for step_covs in ekf_covariances:
+                    if len(step_covs) > 0:
+                        avg_window_cov += sum(step_covs)
+                        total_cov_points += len(step_covs)
             
             # Calculate the overall average covariance across all sources and steps
             if total_cov_points > 0:
@@ -1611,12 +1773,79 @@ class Simulation:
             else:
                 avg_window_cov = float('nan')  # No valid covariance points
             
-            return avg_loss, avg_window_cov, ekf_predictions, ekf_covariances
+            # Log window summary with columnar format
+            self._log_window_summary(avg_pre_ekf_loss, avg_loss, avg_window_cov, current_eta, is_near_field, trajectory_idx, window_idx)
+            
+            return avg_loss, avg_window_cov, ekf_predictions, ekf_covariances, avg_pre_ekf_loss
         else:
             logger.warning("No valid steps with sources found in the window for loss calculation.")
-            return float('inf'), float('nan'), [], []  # Or 0.0, depending on desired behavior for empty windows
+            return float('inf'), float('nan'), [], [], float('inf')  # Include pre-EKF loss in return
 
-    def _plot_online_learning_results(self, window_losses, window_covariances, window_eta_values, window_updates):
+    def _log_window_summary(
+        self,
+        avg_pre_ekf_loss: float,
+        avg_loss: float,
+        avg_window_cov: float,
+        current_eta: float,
+        is_near_field: bool,
+        trajectory_idx: int = 0,
+        window_idx: int = 0
+    ) -> None:
+        """
+        Log window summary results in a columnar format similar to evaluation results.
+        
+        Args:
+            avg_pre_ekf_loss: Average pre-EKF loss for the window
+            avg_loss: Average EKF loss for the window
+            avg_window_cov: Average covariance for the window
+            current_eta: Current eta value
+            is_near_field: Whether this is near field scenario
+            trajectory_idx: Index of the current trajectory
+            window_idx: Index of the current window within the trajectory
+        """
+        print(f"\n{'WINDOW SUMMARY - WINDOW ' + str(window_idx) + ' TRAJECTORY ' + str(trajectory_idx):^100}")
+        print("-"*100)
+        print(f"{'Metric':<20} {'Loss Value':<20} {'Loss (degrees)':<25} {'Additional Info':<30}")
+        print("-"*100)
+        
+        if not is_near_field:
+            # Convert losses to degrees
+            pre_ekf_loss_degrees = avg_pre_ekf_loss * 180 / np.pi
+            ekf_loss_degrees = avg_loss * 180 / np.pi
+            loss_difference_degrees = ekf_loss_degrees - pre_ekf_loss_degrees  # Negative = EKF better
+            
+            # Determine performance status
+            ekf_improved = loss_difference_degrees < 0
+            abs_difference = abs(loss_difference_degrees)
+            improvement_percent = abs_difference / pre_ekf_loss_degrees * 100
+            best_method = "EKF" if ekf_improved else "SubspaceNet"
+            best_loss_degrees = min(pre_ekf_loss_degrees, ekf_loss_degrees)
+            
+            # Display individual losses
+            print(f"{'SubspaceNet Loss':<20} {avg_pre_ekf_loss:<20.6f} {pre_ekf_loss_degrees:<25.6f} {f'eta: {current_eta:.4f}, w: {window_idx}, t: {trajectory_idx}':<30}")
+            print(f"{'EKF Loss':<20} {avg_loss:<20.6f} {ekf_loss_degrees:<25.6f} {f'Avg Cov: {avg_window_cov:.2e}, w: {window_idx}, t: {trajectory_idx}':<30}")
+            
+            # Display comparison result
+            if ekf_improved:
+                status_icon = "✓"
+                status_text = "EKF OVERCOMES SubspaceNet"
+                change_text = f"↓ {abs_difference:.4f}° ({improvement_percent:.1f}% better)"
+            else:
+                status_icon = "✗"
+                status_text = "SubspaceNet BETTER than EKF"
+                change_text = f"↑ {abs_difference:.4f}° ({improvement_percent:.1f}% worse)"
+            
+            print(f"{'WINNER':<20} {best_method:<20} {best_loss_degrees:<25.6f} {status_icon + ' ' + status_text:<30}")
+            print(f"{'Performance':<20} {change_text:<45} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
+            print("-" * 100)
+        else:
+            # Near field - only EKF loss (no SubspaceNet comparison available)
+            ekf_loss_degrees = avg_loss * 180 / np.pi
+            print(f"{'EKF Loss':<20} {avg_loss:<20.6f} {ekf_loss_degrees:<25.6f} {f'eta: {current_eta:.4f}, w: {window_idx}, t: {trajectory_idx}':<30}")
+            print(f"{'Mode':<20} {'NEAR FIELD':<20} {'(No SubspaceNet comparison)':<25} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
+            print("-" * 100)
+
+    def _plot_online_learning_results(self, window_losses, window_covariances, window_eta_values, window_updates, window_pre_ekf_losses, window_labels, ekf_covariances, frobenius_norms):
         """
         Plot online learning results including plots as a function of eta.
         
@@ -1625,77 +1854,118 @@ class Simulation:
             window_covariances: List of average covariance values per window
             window_eta_values: List of eta values per window
             window_updates: List of boolean flags indicating model updates
+            window_pre_ekf_losses: List of pre-EKF loss values per window
+            window_labels: List of labels for each window
+            ekf_covariances: List of EKF covariances per window
+            frobenius_norms: List of Frobenius norms per window
         """
         try:
             import matplotlib.pyplot as plt
             import numpy as np
             
-            # Create figure with multiple subplots
-            fig = plt.figure(figsize=(18, 12))
+            # Create figure with multiple subplots (3x2 layout for 6 plots)
+            fig = plt.figure(figsize=(20, 15))
             
-            # 1. Plot loss vs window index
-            ax1 = fig.add_subplot(2, 2, 1)
+            # 1. Plot both Pre-EKF and EKF loss vs window index (combined)
+            ax1 = fig.add_subplot(3, 2, 1)
             x = np.arange(len(window_losses))
-            ax1.plot(x, window_losses, 'b-', marker='o', label='Window Loss')
+            
+            # Plot both losses with distinct colors and markers
+            ax1.plot(x, window_pre_ekf_losses, 'r-', marker='s', linewidth=2, markersize=6, label='SubspaceNet Loss', alpha=0.8)
+            ax1.plot(x, window_losses, 'b-', marker='o', linewidth=2, markersize=6, label='EKF Loss', alpha=0.8)
             
             # Highlight windows where model was updated
             update_indices = [i for i, updated in enumerate(window_updates) if updated]
             if update_indices:
-                update_losses = [window_losses[i] for i in update_indices]
-                ax1.scatter(update_indices, update_losses, color='r', s=80, marker='o', label='Model Updated')
+                update_pre_ekf_losses = [window_pre_ekf_losses[i] for i in update_indices]
+                update_ekf_losses = [window_losses[i] for i in update_indices]
+                ax1.scatter(update_indices, update_pre_ekf_losses, color='darkred', s=100, marker='X', label='SubspaceNet Updated', zorder=5)
+                ax1.scatter(update_indices, update_ekf_losses, color='darkblue', s=100, marker='X', label='EKF Updated', zorder=5)
             
             # Add threshold line if configured
             if hasattr(self.config.online_learning, 'loss_threshold'):
                 threshold = self.config.online_learning.loss_threshold
-                ax1.axhline(y=threshold, color='g', linestyle='--', label=f'Threshold ({threshold})')
+                ax1.axhline(y=threshold, color='g', linestyle='--', linewidth=2, label=f'Threshold ({threshold})')
             
             # Add labels and title
             ax1.set_xlabel('Window Index')
             ax1.set_ylabel('Loss')
-            ax1.set_title('Loss vs Window Index')
+            ax1.set_title('SubspaceNet vs EKF Loss - Window Index')
             ax1.legend()
             ax1.grid(True, alpha=0.3)
             
-            # 2. Plot covariance vs window index
-            ax2 = fig.add_subplot(2, 2, 2)
-            ax2.plot(x, window_covariances, 'g-', marker='o', label='Average Covariance')
+            # 2. Plot loss difference (EKF - Pre-EKF) vs window index
+            ax2 = fig.add_subplot(3, 2, 2)
+            loss_difference = np.array(window_losses) - np.array(window_pre_ekf_losses)
+            ax2.plot(x, loss_difference, 'purple', marker='d', linewidth=2, markersize=6, label='EKF - SubspaceNet Loss', alpha=0.8)
+            ax2.axhline(y=0, color='k', linestyle='-', alpha=0.5, linewidth=1)
+            
+            # Highlight windows where model was updated
+            if update_indices:
+                update_diff = [loss_difference[i] for i in update_indices]
+                ax2.scatter(update_indices, update_diff, color='darkmagenta', s=100, marker='X', label='Model Updated', zorder=5)
+            
+            # Add labels and title
+            ax2.set_xlabel('Window Index')
+            ax2.set_ylabel('Loss Difference')
+            ax2.set_title('EKF Improvement (EKF - SubspaceNet Loss)')
+            ax2.legend()
+            ax2.grid(True, alpha=0.3)
+            
+            # 3. Plot covariance vs window index
+            ax3 = fig.add_subplot(3, 2, 3)
+            ax3.plot(x, window_covariances, 'g-', marker='o', label='Average Covariance')
             
             # Highlight windows where model was updated
             if update_indices:
                 update_covs = [window_covariances[i] for i in update_indices]
-                ax2.scatter(update_indices, update_covs, color='r', s=80, marker='o', label='Model Updated')
+                ax3.scatter(update_indices, update_covs, color='r', s=80, marker='o', label='Model Updated')
             
             # Add labels and title
-            ax2.set_xlabel('Window Index')
-            ax2.set_ylabel('Average Covariance')
-            ax2.set_title('Covariance vs Window Index')
-            ax2.legend()
-            ax2.grid(True, alpha=0.3)
-            
-            # 3. Plot loss vs eta
-            ax3 = fig.add_subplot(2, 2, 3)
-            ax3.plot(window_eta_values, window_losses, 'b-', marker='o', label='Loss')
-            
-            # Add labels and title
-            ax3.set_xlabel('Eta Value')
-            ax3.set_ylabel('Loss')
-            ax3.set_title('Loss vs Eta')
+            ax3.set_xlabel('Window Index')
+            ax3.set_ylabel('Average Covariance')
+            ax3.set_title('Covariance vs Window Index')
             ax3.legend()
             ax3.grid(True, alpha=0.3)
             
-            # 4. Plot covariance vs eta
-            ax4 = fig.add_subplot(2, 2, 4)
-            ax4.plot(window_eta_values, window_covariances, 'g-', marker='o', label='Covariance')
+            # 4. Plot both Pre-EKF and EKF loss vs eta (combined)
+            ax4 = fig.add_subplot(3, 2, 4)
+            ax4.plot(window_eta_values, window_pre_ekf_losses, 'r-', marker='s', linewidth=2, markersize=6, label='SubspaceNet Loss', alpha=0.8)
+            ax4.plot(window_eta_values, window_losses, 'b-', marker='o', linewidth=2, markersize=6, label='EKF Loss', alpha=0.8)
             
             # Add labels and title
             ax4.set_xlabel('Eta Value')
-            ax4.set_ylabel('Covariance')
-            ax4.set_title('Covariance vs Eta')
+            ax4.set_ylabel('Loss')
+            ax4.set_title('SubspaceNet vs EKF Loss - Eta Value')
             ax4.legend()
             ax4.grid(True, alpha=0.3)
             
+            # 5. Plot loss difference (EKF - Pre-EKF) vs eta
+            ax5 = fig.add_subplot(3, 2, 5)
+            eta_loss_difference = np.array(window_losses) - np.array(window_pre_ekf_losses)
+            ax5.plot(window_eta_values, eta_loss_difference, 'purple', marker='d', linewidth=2, markersize=6, label='EKF - SubspaceNet Loss', alpha=0.8)
+            ax5.axhline(y=0, color='k', linestyle='-', alpha=0.5, linewidth=1)
+            
+            # Add labels and title
+            ax5.set_xlabel('Eta Value')
+            ax5.set_ylabel('Loss Difference')
+            ax5.set_title('EKF Improvement vs Eta')
+            ax5.legend()
+            ax5.grid(True, alpha=0.3)
+            
+            # 6. Plot covariance vs eta
+            ax6 = fig.add_subplot(3, 2, 6)
+            ax6.plot(window_eta_values, window_covariances, 'g-', marker='o', label='Covariance')
+            
+            # Add labels and title
+            ax6.set_xlabel('Eta Value')
+            ax6.set_ylabel('Covariance')
+            ax6.set_title('Covariance vs Eta')
+            ax6.legend()
+            ax6.grid(True, alpha=0.3)
+            
             # Add overall title
-            plt.suptitle('Online Learning Results with EKF Covariance Analysis', fontsize=16)
+            plt.suptitle('Online Learning Results: SubspaceNet vs EKF Loss Comparison', fontsize=16)
             plt.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust for suptitle
             
             # Save plot
@@ -1706,28 +1976,29 @@ class Simulation:
             plt.savefig(plot_path)
             
             # Save additional combined plot with loss and covariance vs eta
-            fig2, ax_combined = plt.subplots(figsize=(12, 8))
+            fig2, ax_combined = plt.subplots(figsize=(15, 10))
             
-            # Plot both metrics on the same axes with different scales
+            # Plot all three metrics on the same axes with different scales
             color1 = 'tab:blue'
             ax_combined.set_xlabel('Eta Value')
             ax_combined.set_ylabel('Loss', color=color1)
-            line1 = ax_combined.plot(window_eta_values, window_losses, color=color1, marker='o', linestyle='-', label='Loss')
+            line1 = ax_combined.plot(window_eta_values, window_losses, color=color1, marker='o', linestyle='-', label='EKF Loss')
+            line2 = ax_combined.plot(window_eta_values, window_pre_ekf_losses, color='tab:red', marker='s', linestyle='-', label='SubspaceNet Loss')
             ax_combined.tick_params(axis='y', labelcolor=color1)
             
             # Create second y-axis for covariance
             ax_cov = ax_combined.twinx()
             color2 = 'tab:green'
             ax_cov.set_ylabel('Average Covariance', color=color2)
-            line2 = ax_cov.plot(window_eta_values, window_covariances, color=color2, marker='s', linestyle='-', label='Covariance')
+            line3 = ax_cov.plot(window_eta_values, window_covariances, color=color2, marker='^', linestyle='-', label='Covariance')
             ax_cov.tick_params(axis='y', labelcolor=color2)
             
             # Add grid and title
             ax_combined.grid(True, alpha=0.3)
-            plt.title('Loss and Covariance vs Eta')
+            plt.title('SubspaceNet Loss, EKF Loss, and Covariance vs Eta')
             
             # Add combined legend
-            lines = line1 + line2
+            lines = line1 + line2 + line3
             labels = [l.get_label() for l in lines]
             ax_combined.legend(lines, labels, loc='best')
             
@@ -1743,7 +2014,318 @@ class Simulation:
             logger.info(f"  - Main results plot: {main_plot_filename}")
             logger.info(f"  - Combined eta plot: {combined_plot_filename}")
             
+            # Plot full trajectory across all windows
+            self._plot_online_learning_trajectory(window_labels, plot_dir, timestamp)
+            
+            # Plot Frobenius norms
+            self._plot_frobenius_norms(frobenius_norms, window_eta_values, plot_dir, timestamp)
+            
         except ImportError:
             logger.warning("matplotlib not available for plotting online learning results")
         except Exception as e:
-            logger.error(f"Error plotting online learning results: {e}") 
+            logger.error(f"Error plotting online learning results: {e}")
+    
+    def _plot_online_learning_trajectory(self, window_labels, plot_dir, timestamp):
+        """
+        Plot the full trajectory across all windows for online learning.
+        
+        Args:
+            window_labels: List of labels for each window, where each window contains a list of numpy arrays
+            plot_dir: Directory to save the plots
+            timestamp: Timestamp for the plot filename
+        """
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            # Flatten all labels across all windows to get the complete trajectory
+            all_angles = []
+            all_distances = []
+            window_indices = []  # Track which window each step belongs to
+            
+            for window_idx, window_label_list in enumerate(window_labels):
+                for step_idx, step_labels in enumerate(window_label_list):
+                    # step_labels is a numpy array containing [angle1, angle2, ..., angleM] (in radians)
+                    # For far-field, we assume distances are constant (e.g., 30m)
+                    # For near-field, distances would be included in the labels
+                    
+                    # Convert radians to degrees for plotting
+                    angles_deg = step_labels * (180.0 / np.pi)
+                    all_angles.append(angles_deg)
+                    
+                    # Use the same range increment mechanism as in generate_trajectories
+                    # Start at 20m and increment by 1m each step
+                    global_step = len(all_angles) - 1  # Current global step index
+                    base_distance = 20.0 + global_step * 1.0  # Increment by 1m each step
+                    
+                    num_sources = len(step_labels)
+                    distances = np.full(num_sources, base_distance)
+                    all_distances.append(distances)
+                    
+                    # Track window index
+                    window_indices.append(window_idx)
+            
+            if not all_angles:
+                logger.warning("No trajectory data available for plotting")
+                return
+            
+            # Find the maximum number of sources across all steps
+            max_sources = max(len(angles) for angles in all_angles)
+            total_steps = len(all_angles)
+            
+            # Pad arrays to have consistent dimensions
+            padded_angles = np.full((total_steps, max_sources), np.nan)
+            padded_distances = np.full((total_steps, max_sources), np.nan)
+            
+            for step_idx, (angles, distances) in enumerate(zip(all_angles, all_distances)):
+                num_sources = len(angles)
+                padded_angles[step_idx, :num_sources] = angles
+                padded_distances[step_idx, :num_sources] = distances
+            
+            # Create the trajectory plot
+            plt.figure(figsize=(12, 10))
+            
+            # Plot each source trajectory
+            for s in range(max_sources):
+                # Get valid data for this source (some steps might have fewer sources)
+                valid_mask = ~np.isnan(padded_angles[:, s])
+                if np.any(valid_mask):
+                    angles_rad = padded_angles[valid_mask, s] * (np.pi / 180.0)  # Convert back to radians for plotting
+                    distances = padded_distances[valid_mask, s]
+                    
+                    # Convert from polar to Cartesian coordinates
+                    x = distances * np.cos(angles_rad)
+                    y = distances * np.sin(angles_rad)
+                    
+                    # Plot trajectory
+                    plt.plot(x, y, '-o', markersize=4, label=f'Source {s+1}')
+                    
+                    # Mark start and end points
+                    if len(x) > 0:
+                        plt.plot(x[0], y[0], 'go', markersize=8)  # Green for start
+                        plt.plot(x[-1], y[-1], 'ro', markersize=8)  # Red for end
+            
+            # Plot radar location
+            plt.plot(0, 0, 'bD', markersize=12, label='Radar')
+            
+            # Add distance circles
+            for d in [20, 30, 40, 50]:
+                circle = plt.Circle((0, 0), d, fill=False, linestyle='--', alpha=0.3)
+                plt.gca().add_patch(circle)
+                plt.text(0, d, f'{d}m', va='bottom', ha='center')
+            
+            # Add angle lines
+            for a in range(-90, 91, 30):
+                a_rad = a * (np.pi/180)
+                plt.plot([0, 60*np.cos(a_rad)], [0, 60*np.sin(a_rad)], 'k:', alpha=0.2)
+                plt.text(55*np.cos(a_rad), 55*np.sin(a_rad), f'{a}°', 
+                        va='center', ha='center', bbox=dict(facecolor='white', alpha=0.5))
+            
+            plt.grid(True, alpha=0.3)
+            plt.axis('equal')
+            plt.xlabel('X (meters)')
+            plt.ylabel('Y (meters)')
+            plt.title(f'Online Learning Full Trajectory (T={total_steps}, Sources={max_sources}, Windows={len(window_labels)})')
+            plt.legend()
+            
+            # Add window boundary markers if there are multiple windows
+            if len(window_labels) > 1:
+                # Find window boundaries
+                window_boundaries = []
+                current_window = window_indices[0]
+                for i, window_idx in enumerate(window_indices):
+                    if window_idx != current_window:
+                        window_boundaries.append(i)
+                        current_window = window_idx
+                
+                # Add vertical lines for window boundaries
+                for boundary_idx in window_boundaries:
+                    if boundary_idx < len(all_angles):
+                        # Get the position at the boundary
+                        angles_at_boundary = all_angles[boundary_idx]
+                        distances_at_boundary = all_distances[boundary_idx]
+                        
+                        # Plot boundary markers for each source
+                        for s in range(len(angles_at_boundary)):
+                            if not np.isnan(angles_at_boundary[s]):
+                                angle_rad = angles_at_boundary[s] * (np.pi / 180.0)
+                                distance = distances_at_boundary[s]
+                                x = distance * np.cos(angle_rad)
+                                y = distance * np.sin(angle_rad)
+                                plt.plot(x, y, 'ks', markersize=10, markerfacecolor='none', markeredgewidth=2)
+            
+            # Save the plot
+            plot_path = plot_dir / f"online_learning_trajectory_{timestamp}.png"
+            plt.savefig(plot_path)
+            logger.info(f"Online learning trajectory plot saved to {plot_dir}:")
+            logger.info(f"  - Trajectory plot: {plot_path.name}")
+            
+        except ImportError:
+            logger.warning("matplotlib not available for plotting online learning trajectory")
+        except Exception as e:
+            logger.error(f"Error plotting online learning trajectory: {e}")
+    
+    def _calculate_frobenius_norm_per_window(self, window_ekf_covariances):
+        """
+        Calculate the Frobenius norm of covariance matrices per window.
+        
+        Args:
+            window_ekf_covariances: List of covariances per window
+                                   Shape: [num_windows][num_steps_in_window][num_sources]
+                                   Each covariance is a scalar or matrix
+        
+        Returns:
+            numpy.ndarray: Frobenius norms per window, shape [num_windows, 1]
+        """
+        try:
+            import numpy as np
+            
+            frobenius_norms = []
+            
+            for window_idx, window_covs in enumerate(window_ekf_covariances):
+                window_frobenius_sum = 0.0
+                valid_steps = 0
+                
+                for step_idx, step_covs in enumerate(window_covs):
+                    if len(step_covs) > 0:  # Check if there are covariances for this step
+                        for source_idx, cov in enumerate(step_covs):
+                            if isinstance(cov, (float, int)):
+                                # Scalar covariance - treat as 1x1 matrix
+                                window_frobenius_sum += abs(cov) ** 2
+                            else:
+                                # Matrix covariance - calculate Frobenius norm
+                                if hasattr(cov, 'shape'):
+                                    window_frobenius_sum += np.sum(np.abs(cov) ** 2)
+                                else:
+                                    window_frobenius_sum += abs(cov) ** 2
+                        valid_steps += 1
+                
+                # Calculate average Frobenius norm for this window
+                if valid_steps > 0:
+                    avg_frobenius = np.sqrt(window_frobenius_sum / valid_steps)
+                else:
+                    avg_frobenius = 0.0
+                
+                frobenius_norms.append([avg_frobenius])
+            
+            return np.array(frobenius_norms)  # Shape: [num_windows, 1]
+            
+        except Exception as e:
+            logger.error(f"Error calculating Frobenius norm per window: {e}")
+            # Return zeros if calculation fails
+            num_windows = len(window_ekf_covariances)
+            return np.zeros((num_windows, 1))
+
+    def _plot_frobenius_norms(self, frobenius_norms, window_eta_values, plot_dir, timestamp):
+        """
+        Plot Frobenius norms of covariance matrices per window.
+        
+        Args:
+            frobenius_norms: Array of Frobenius norms per window, shape [num_windows, 1]
+            window_eta_values: List of eta values per window
+            plot_dir: Directory to save the plots
+            timestamp: Timestamp for the plot filename
+        """
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            # Flatten frobenius_norms for plotting
+            frobenius_flat = frobenius_norms.flatten()
+            
+            # Create figure with subplots (1x2 layout for 2 plots)
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+            
+            # 1. Plot Frobenius norm vs window index
+            x = np.arange(len(frobenius_flat))
+            ax1.plot(x, frobenius_flat, 'b-', marker='o', linewidth=2, markersize=6, label='Frobenius Norm')
+            
+            # Add labels and title
+            ax1.set_xlabel('Window Index')
+            ax1.set_ylabel('Frobenius Norm')
+            ax1.set_title('Frobenius Norm vs Window Index')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            
+            # 2. Plot Frobenius norm vs eta
+            ax2.plot(window_eta_values, frobenius_flat, 'r-', marker='s', linewidth=2, markersize=6, label='Frobenius Norm')
+            
+            # Add labels and title
+            ax2.set_xlabel('Eta Value')
+            ax2.set_ylabel('Frobenius Norm')
+            ax2.set_title('Frobenius Norm vs Eta')
+            ax2.legend()
+            ax2.grid(True, alpha=0.3)
+            
+            # Add overall title
+            plt.suptitle('EKF Covariance Frobenius Norms Analysis', fontsize=16)
+            plt.tight_layout(rect=[0, 0, 1, 0.94])  # Adjust for suptitle
+            
+            # Save plot
+            plot_path = plot_dir / f"frobenius_norms_{timestamp}.png"
+            plt.savefig(plot_path)
+            logger.info(f"Frobenius norms plot saved to {plot_dir}:")
+            logger.info(f"  - Frobenius norms plot: {plot_path.name}")
+            
+        except ImportError:
+            logger.warning("matplotlib not available for plotting Frobenius norms")
+        except Exception as e:
+            logger.error(f"Error plotting Frobenius norms: {e}")
+
+    def _average_online_learning_results(self, results_list):
+        """
+        Average online learning results across multiple trajectories.
+        
+        Args:
+            results_list: List of online learning results dictionaries
+        
+        Returns:
+            Averaged results dictionary
+        """
+        try:
+            import numpy as np
+            
+            if not results_list:
+                return {}
+                
+            num_trajectories = len(results_list)
+            num_windows = len(results_list[0]["window_losses"])
+            
+            # Initialize averaged results
+            averaged_results = {}
+            
+            # Average numerical lists element-wise
+            for key in ["window_losses", "window_covariances", "window_eta_values", "pre_ekf_losses"]:
+                values_matrix = np.array([result[key] for result in results_list])  # Shape: [num_trajectories, num_windows]
+                averaged_results[key] = np.mean(values_matrix, axis=0).tolist()
+            
+            # Average boolean updates (percentage of updates)
+            update_matrix = np.array([result["window_updates"] for result in results_list])  # Shape: [num_trajectories, num_windows]
+            averaged_results["window_updates"] = (np.mean(update_matrix.astype(float), axis=0) > 0.5).tolist()  # Majority vote
+            
+            # Average scalar counts
+            averaged_results["drift_detected_count"] = np.mean([result["drift_detected_count"] for result in results_list])
+            averaged_results["model_updated_count"] = np.mean([result["model_updated_count"] for result in results_list])
+            
+            # Use representative values from first trajectory
+            averaged_results["window_count"] = results_list[0]["window_count"]
+            averaged_results["window_size"] = results_list[0]["window_size"]
+            averaged_results["stride"] = results_list[0]["stride"]
+            averaged_results["loss_threshold"] = results_list[0]["loss_threshold"]
+            
+            # Use labels from first trajectory (representative)
+            averaged_results["window_labels"] = results_list[0]["window_labels"]
+            
+            # Average EKF predictions and covariances (more complex structure)
+            # For now, use first trajectory's structure but could be enhanced
+            averaged_results["ekf_predictions"] = results_list[0]["ekf_predictions"]
+            averaged_results["ekf_covariances"] = results_list[0]["ekf_covariances"]
+            
+            logger.info(f"Averaged results from {num_trajectories} trajectories with {num_windows} windows each")
+            
+            return averaged_results
+            
+        except Exception as e:
+            logger.error(f"Error averaging online learning results: {e}")
+            # Return first trajectory results as fallback
+            return results_list[0] if results_list else {}

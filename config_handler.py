@@ -200,7 +200,7 @@ def update_components_for_sweep(
         'eta': ['system_model'],  # eta affects system model and trajectory handler
         'snr': ['system_model'],  # snr affects system model and trajectory handler
         'M': ['system_model'],    # M affects system model and trajectory handler
-        # Add more mappings as needed
+
     }
     
     # Get components that need to be updated for this parameter
@@ -227,12 +227,5 @@ def update_components_for_sweep(
                 from config.factory import create_model
                 updated_components['model'] = create_model(config, updated_components['system_model'])
             
-            # If trajectory handler exists, recreate it with new system model
-            if 'trajectory_handler' in components:
-                from config.factory import create_trajectory_data_handler
-                updated_components['trajectory_handler'] = create_trajectory_data_handler(
-                    config, 
-                    updated_components['system_model']
-                )
     
     return updated_components 

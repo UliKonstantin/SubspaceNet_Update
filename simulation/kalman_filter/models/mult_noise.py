@@ -92,4 +92,67 @@ class MultNoiseStateModel(StateEvolutionModel):
         variance = std**2
         
         logger.debug(f"MultNoise variance at x={x}: {variance}")
+        return variance
+    
+    def f_batch(self, x_batch):
+        """
+        Batch version of state transition function.
+        
+        Args:
+            x_batch: Array of current angles
+            
+        Returns:
+            Array of predicted next angles
+        """
+        # Convert to numpy array if needed
+        x_array = np.asarray(x_batch)
+        
+        # Apply deterministic state transition element-wise
+        result = x_array + np.degrees(self.omega0 * self.time_step)
+        
+        logger.debug(f"MultNoise batch state transition for {len(x_array)} states")
+        return result
+    
+    def F_jacobian_batch(self, x_batch):
+        """
+        Batch version of Jacobian computation.
+        
+        Args:
+            x_batch: Array of current angles
+            
+        Returns:
+            Array of Jacobians (all ones for this model)
+        """
+        # Convert to numpy array if needed
+        x_array = np.asarray(x_batch)
+        
+        # Return array of ones (constant velocity model has Jacobian = 1)
+        jacobian = np.ones_like(x_array)
+        
+        logger.debug(f"MultNoise batch Jacobian for {len(x_array)} states")
+        return jacobian
+    
+    def noise_variance_batch(self, x_batch):
+        """
+        Batch version of noise variance computation.
+        
+        Args:
+            x_batch: Array of current angles
+            
+        Returns:
+            Array of state-dependent noise variances
+        """
+        # Convert to numpy array if needed
+        x_array = np.asarray(x_batch)
+        
+        # Convert to radians for trigonometric functions
+        x_rad = np.radians(x_array)
+        
+        # Calculate state-dependent standard deviations
+        std = self.base_std * (1.0 + self.amp * np.sin(x_rad)**2)
+        
+        # Return variances
+        variance = std**2
+        
+        logger.debug(f"MultNoise batch variance for {len(x_array)} states")
         return variance 

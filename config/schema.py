@@ -163,6 +163,9 @@ class OnlineLearningConfig(BaseModel):
     
     # Calibration error control
     use_nominal: bool = Field(default=True, description="If True (default), nominal array configuration (no calibration errors) is used for sample generation. If False, calibration errors are applied based on eta.")
+    
+    # Multi-trajectory parameters
+    dataset_size: int = Field(default=1, description="Number of trajectories to run and average results over. Default is 1 for backward compatibility.")
 
 
 class ScenarioSystemModelOverride(BaseModel):

@@ -64,12 +64,27 @@ class ExtendedKalmanFilter1D:
         if trajectory_type is None:
             trajectory_type = config.trajectory.trajectory_type
         
+        # Get process noise from Kalman filter config (prioritize KF config over trajectory config)
+        if hasattr(config.kalman_filter, 'process_noise_std_dev') and config.kalman_filter.process_noise_std_dev is not None:
+            kf_process_noise_std = config.kalman_filter.process_noise_std_dev
+            logger.info(f"Using Kalman filter process noise: {kf_process_noise_std}")
+        else:
+            # Fallback to trajectory-specific noise if KF process noise not specified
+            if trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
+                kf_process_noise_std = config.trajectory.sine_accel_noise_std
+            elif trajectory_type == TrajectoryType.MULT_NOISE_NONLINEAR:
+                kf_process_noise_std = config.trajectory.mult_noise_base_std
+            else:
+                kf_process_noise_std = config.trajectory.random_walk_std_dev
+            logger.info(f"Using trajectory-based process noise as fallback: {kf_process_noise_std}")
+        
         # Create appropriate state evolution model based on trajectory type
         if trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
             # Get sine acceleration model parameters
             omega0 = config.trajectory.sine_accel_omega0
             kappa = config.trajectory.sine_accel_kappa
-            noise_std = config.trajectory.sine_accel_noise_std
+            # Use KF process noise instead of trajectory noise
+            noise_std = kf_process_noise_std
             
             state_model = SineAccelStateModel(omega0, kappa, noise_std)
             logger.info(f"Using sine acceleration model with ω₀={omega0}, κ={kappa}, σ={noise_std}")
@@ -78,14 +93,16 @@ class ExtendedKalmanFilter1D:
             # Get multiplicative noise model parameters
             omega0 = config.trajectory.mult_noise_omega0
             amp = config.trajectory.mult_noise_amp
-            base_std = config.trajectory.mult_noise_base_std
+            # Use KF process noise instead of trajectory noise
+            base_std = kf_process_noise_std
             
             state_model = MultNoiseStateModel(omega0, amp, base_std)
             logger.info(f"Using multiplicative noise model with ω₀={omega0}, amp={amp}, σ={base_std}")
             
         else:
             # Default to random walk model for other types
-            noise_std = config.trajectory.random_walk_std_dev
+            # Use KF process noise instead of trajectory noise
+            noise_std = kf_process_noise_std
             state_model = SineAccelStateModel(0.0, 0.0, noise_std)
             logger.info(f"Using random walk model with σ={noise_std}")
         
@@ -223,7 +240,6 @@ class ExtendedKalmanFilter1D:
         if z is None:
             z = self.simulate_measurement()
             logger.debug(f"Using simulated measurement: {z}")
-        
         # Measurement model is linear (H=1) for our problem
         # Innovation / measurement residual (y = z - H * x̂_k|k-1)
         y = z - self.x

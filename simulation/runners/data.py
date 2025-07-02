@@ -223,7 +223,7 @@ class TrajectoryDataHandler:
             if trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
                 # Start with random angles
                 angle_trajectories[i, 0, :num_sources] = torch.FloatTensor(
-                    np.random.uniform(angle_min, angle_max, size=num_sources)
+                    np.random.uniform(-30, 30, size=num_sources)
                 )
                 
                 # Apply non-linear sine acceleration model: θ_{k+1} = θ_k + (ω0 + κ sin θ_k)T + η_k
@@ -885,7 +885,7 @@ class OnlineLearningTrajectoryGenerator:
         if isinstance(num_sources, tuple):
             self.min_M, self.max_M = num_sources
             self.M_is_variable = True
-            self.current_M = np.random.randint(self.min_M, self.max_M + 1)
+            self.current_M = torch.randint(self.min_M, self.max_M + 1, (1,)).item()
         else:
             self.current_M = num_sources
             self.M_is_variable = False
@@ -894,7 +894,7 @@ class OnlineLearningTrajectoryGenerator:
         self.angle_max = self.system_model_params.doa_range / 2
         
         # State for the true underlying trajectory
-        self.last_true_angles = np.random.uniform(self.angle_min, self.angle_max, size=self.current_M)
+        self.last_true_angles = (torch.rand(self.current_M) * 60 - 30).numpy()  # Uniform in [-30, 30]
         # TODO: Add self.last_true_ranges for near-field if needed and make it dynamic based on field_type
 
         self.current_step_in_session = 0
@@ -904,16 +904,22 @@ class OnlineLearningTrajectoryGenerator:
         """Updates the eta value in the shared SystemModelParams."""
         old_eta = self.system_model_params.eta
         self.system_model_params.eta = new_eta
-        logger.info(f"Generator eta updated from {old_eta:.4f} to {self.system_model_params.eta:.4f} for future samples.")
+        
+        # Regenerate distance noise with new eta value
+        self.samples_model.eta = self.samples_model._SystemModel__set_eta()
+        #if not getattr(self.system_model_params, 'nominal', True):
+        self.samples_model.location_noise = self.samples_model.get_distance_noise(True)
+        
+        logger.info(f"Generator eta updated from {old_eta:.4f} to {self.system_model_params.eta:.4f} with new distance noise pattern.")
 
     def _generate_next_true_step(self) -> Tuple[np.ndarray, int]:
         """Generates the next set of true angles (and potentially ranges) and the number of sources for this step."""
         if self.M_is_variable: # Potentially change M at each step if configured
              # Simple heuristic: 10% chance to change M
-            if np.random.rand() < 0.1:
-                self.current_M = np.random.randint(self.min_M, self.max_M + 1)
+            if torch.rand(1).item() < 0.1:
+                self.current_M = torch.randint(self.min_M, self.max_M + 1, (1,)).item()
                 # If M changes, re-initialize angles for the new number of sources
-                self.last_true_angles = np.random.uniform(self.angle_min, self.angle_max, size=self.current_M)
+                self.last_true_angles = (torch.rand(self.current_M) * (self.angle_max - self.angle_min) + self.angle_min).numpy()
 
 
         # Trajectory generation logic (e.g., random walk)
@@ -923,7 +929,7 @@ class OnlineLearningTrajectoryGenerator:
         # Simplified Random Walk for now:
         if self.trajectory_config.trajectory_type == TrajectoryType.RANDOM_WALK:
             std_dev = self.trajectory_config.random_walk_std_dev if self.trajectory_config.random_walk_std_dev is not None else 1.0
-            noise = np.random.normal(0, std_dev, size=self.current_M)
+            noise = (torch.randn(self.current_M) * std_dev).numpy()
             next_angles = self.last_true_angles + noise
             self.last_true_angles = np.clip(next_angles, self.angle_min, self.angle_max)
         elif self.trajectory_config.trajectory_type == TrajectoryType.STATIC:
@@ -936,16 +942,16 @@ class OnlineLearningTrajectoryGenerator:
             sa_noise_sd = self.trajectory_config.sine_accel_noise_std if hasattr(self.trajectory_config, 'sine_accel_noise_std') else 0.1
             
             # Apply non-linear sine acceleration model: θ_{k+1} = θ_k + (ω0 + κ sin θ_k)T + η_k
-            # Convert to radians for trigonometric functions
+            # Convert to radians for trigonometric functions only
             theta_prev_rad = self.last_true_angles * (np.pi / 180.0)
             
-            # Calculate acceleration term (ω0 + κ sin θ_k)
+            # Calculate acceleration term (ω0 + κ sin θ_k) - ω0 and κ in degrees, result in degrees
             delta = (sa_omega0 + sa_kappa * np.sin(theta_prev_rad)) * 1.0  # T = 1 s
             
-            # Add noise
-            noise = np.random.normal(0, sa_noise_sd, size=self.current_M)
+            # Add noise (in degrees)
+            noise = (torch.randn(self.current_M) * sa_noise_sd).numpy()
             
-            # Update angle
+            # Update angle (all in degrees)
             next_angles = self.last_true_angles + delta + noise
             
             # Ensure angles stay within bounds
@@ -957,25 +963,25 @@ class OnlineLearningTrajectoryGenerator:
             mn_base_sd = self.trajectory_config.mult_noise_base_std if hasattr(self.trajectory_config, 'mult_noise_base_std') else 0.1
             
             # Apply multiplicative noise model: θ_{k+1} = θ_k + ω0 T + σ(θ_k) η_k
-            # Convert to radians for trigonometric functions
+            # Convert to radians for trigonometric functions only
             theta_prev_rad = self.last_true_angles * (np.pi / 180.0)
             
-            # Deterministic part
+            # Deterministic part (in degrees)
             deterministic = mn_omega0 * 1.0  # T = 1 s
             
             # State-dependent noise standard deviation
             std = mn_base_sd * (1.0 + mn_amp * np.sin(theta_prev_rad)**2)
             
-            # Generate noise
-            noise = np.random.normal(0, std, size=self.current_M)
+            # Generate noise (in degrees)
+            noise = (torch.randn(self.current_M) * std).numpy()
             
-            # Update angle
+            # Update angle (all in degrees)
             next_angles = self.last_true_angles + deterministic + noise
             
             # Ensure angles stay within bounds
             self.last_true_angles = np.clip(next_angles, self.angle_min, self.angle_max)
         else: # Default to RANDOM if not specified or other types not implemented here yet
-            self.last_true_angles = np.random.uniform(self.angle_min, self.angle_max, size=self.current_M)
+            self.last_true_angles = (torch.rand(self.current_M) * (self.angle_max - self.angle_min) + self.angle_min).numpy()
             
         # TODO: Implement other trajectory types (LINEAR, CIRCULAR etc.) if needed for online generation
         # TODO: Handle near-field ranges generation based on self.system_model_params.field_type
@@ -1018,9 +1024,9 @@ class OnlineLearningTrajectoryGenerator:
             window_observations_list.append(torch.as_tensor(observation_matrix, dtype=torch.complex64))
             window_sources_nums_list.append(num_sources_for_step)
             
-            # Store ground truth for this step (angles and potentially ranges)
-            # For now, just angles. If near-field, this should include ranges.
-            true_label_for_step = current_true_angles.copy() 
+            # Store ground truth for this step using the actual labels from samples_model (in radians)
+            # This ensures consistency with the units used by the model
+            true_label_for_step = self.samples_model.get_labels().cpu().numpy()
             window_true_labels_list.append(true_label_for_step)
 
             self.current_step_in_session +=1
