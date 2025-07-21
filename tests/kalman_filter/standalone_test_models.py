@@ -59,7 +59,7 @@ class SineAccelStateModel(StateEvolutionModel):
         delta = (self.omega0 + self.kappa * np.sin(x_rad)) * self.time_step
         
         # Return in same units as input
-        return x + np.degrees(delta)
+        return 0.99*x + np.degrees(delta)
     
     def F_jacobian(self, x):
         """

@@ -76,12 +76,12 @@ evaluation:
 trajectory:
   enabled: true  # Enable trajectory-based evaluation
   trajectory_type: "sine_accel_nonlinear"  # Type of trajectory to evaluate
-  trajectory_length: 50  # Length of trajectory for evaluation
+  trajectory_length: 100  # Length of trajectory for evaluation
   save_trajectory: false  # Don't save trajectory data
   # Sine acceleration non-linear model parameters
-  sine_accel_omega0: 0.2       # Base angular velocity (rad/s) - reduced to be more stable
-  sine_accel_kappa: 0.3           # Sine acceleration coefficient (rad/s²) - reduced to be more stable
-  sine_accel_noise_std:  0.1        # Noise standard deviation (rad) - reduced to be more stable
+  sine_accel_omega0: 0.3       # Base angular velocity (rad/s) - reduced to be more stable
+  sine_accel_kappa: 0.5           # Sine acceleration coefficient (rad/s²) - reduced to be more stable
+  sine_accel_noise_std:  0.5       # Noise standard deviation (rad) - reduced to be more stable
   
   # Multiplicative noise non-linear model parameters (not used with sine_accel_nonlinear type)
   #mult_noise_omega0: 0.2          # Base angular velocity (rad/s)

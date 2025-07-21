@@ -9,8 +9,39 @@ import numpy as np
 import logging
 from config.schema import TrajectoryType
 from simulation.kalman_filter.models import SineAccelStateModel, MultNoiseStateModel
+from pathlib import Path
+import datetime
 
 logger = logging.getLogger("SubspaceNet.kalman_filter.extended")
+
+# Add file handler for debug logs
+def setup_debug_file_logging():
+    """Setup file logging for EKF debug messages."""
+    # Create debug logs directory
+    debug_dir = Path("experiments/debug_logs")
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create timestamped log file
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = debug_dir / f"ekf_debug_{timestamp}.txt"
+    
+    # Create file handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    
+    # Create formatter
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    
+    # Add handler to logger
+    logger.addHandler(file_handler)
+    logger.setLevel(logging.DEBUG)  # Ensure this logger accepts DEBUG messages
+    
+    return log_file
+
+# Setup debug logging on module import
+debug_log_file = setup_debug_file_logging()
+logger.info(f"EKF debug logging enabled. Logs will be saved to: {debug_log_file}")
 
 class ExtendedKalmanFilter1D:
     """
@@ -231,7 +262,7 @@ class ExtendedKalmanFilter1D:
                based on the current state estimate.
             
         Returns:
-            Updated state estimate (scalar)
+            Tuple of (updated state estimate (scalar), innovation (scalar))
         """
         if self.x is None:
             raise ValueError("State must be initialized before update")
@@ -242,6 +273,7 @@ class ExtendedKalmanFilter1D:
             logger.debug(f"Using simulated measurement: {z}")
         # Measurement model is linear (H=1) for our problem
         # Innovation / measurement residual (y = z - H * x̂_k|k-1)
+        print(f"z- the model estimation: {z}, self.x- the predict step output: {self.x}")
         y = z - self.x
         
         # Innovation covariance (S = H * P_k|k-1 * H^T + R)
@@ -256,12 +288,15 @@ class ExtendedKalmanFilter1D:
         # Covariance update (P_k|k = (I - K * H) * P_k|k-1)
         P_new = (1 - K) * self.P
         
+        # Calculate y*(S^-1)*y (innovation covariance metric)
+        y_s_inv_y = y * (1 / S) * y
+        
         # Update state and covariance
         self.x = x_new
         self.P = P_new
         
-        logger.debug(f"Update with z={z}: y={y}, K={K}, x={x_new}, P={P_new}")
-        return x_new
+        logger.debug(f"Update with z={z}: y={y}, K={K}, x={x_new}, P={P_new}, y*(S^-1)*y={y_s_inv_y}")
+        return x_new, y, K, K * y, y_s_inv_y
 
     def predict_and_update(self, true_state=None):
         """
@@ -286,6 +321,6 @@ class ExtendedKalmanFilter1D:
         measurement = self.simulate_measurement(true_state=true_state if true_state is not None else predicted_state)
         
         # Perform update step with generated measurement
-        updated_state = self.update(z=measurement)
+        updated_state, innovation = self.update(z=measurement)
         
         return predicted_state, measurement, updated_state, self.P 

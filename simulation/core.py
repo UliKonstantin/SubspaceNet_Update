@@ -17,6 +17,8 @@ from matplotlib.figure import Figure
 import time
 import copy
 import yaml
+from itertools import permutations
+import itertools
 
 from config.schema import Config
 from .runners.data import TrajectoryDataHandler
@@ -836,13 +838,17 @@ class Simulation:
 
             # Ensure prediction tensor has correct shape [1, num_sources]
             angles_pred_single = angles_pred_single.view(1, -1)[:, :num_sources_item]
-            batch_angles_pred_list.append(angles_pred_single.squeeze(0))
 
-            # Calculate loss for this trajectory
+            # Calculate loss for this trajectory and get best permutation
             with torch.no_grad():
                 truth = step_angles[i, :num_sources_item].unsqueeze(0)
-                loss = rmspe_criterion(angles_pred_single, truth)
+                angles_pred_single = angles_pred_single.view(1, -1)[:, :num_sources_item]
+                loss, best_perm = rmspe_criterion(angles_pred_single, truth, return_best_perm=True)
                 total_loss += loss.item()
+                
+                # Apply best permutation to predictions before appending
+                angles_pred_optimal = angles_pred_single.squeeze(0)[best_perm.squeeze(0)]
+                batch_angles_pred_list.append(angles_pred_optimal)
 
         # Combine predictions into a batch tensor for KF update
         # Need padding if source counts vary
@@ -1297,14 +1303,6 @@ class Simulation:
     def _run_single_trajectory_online_learning(self, trajectory_idx: int = 0) -> Dict[str, Any]:
         """
         Run online learning pipeline for a single trajectory.
-        
-        This method sets up and runs the online learning process for one trajectory, which:
-        1. Creates an on-demand dataset that generates data in windows
-        2. Evaluates the model on each window to detect drift
-        3. Updates the model if drift is detected and training improves loss
-        
-        Returns:
-            Dict containing online learning results for this trajectory
         """
         try:
             # Access online learning configuration
@@ -1370,21 +1368,22 @@ class Simulation:
             window_eta_values = []
             window_ekf_predictions = []
             window_ekf_covariances = []
+            window_ekf_innovations = []  # New list to track innovations
+            window_ekf_kalman_gains = []  # New list to track Kalman gains
+            window_ekf_kalman_gain_times_innovation = []  # New list to track K*y
+            window_ekf_y_s_inv_y = []  # New list to track y*(S^-1)*y
             window_pre_ekf_losses = []
             window_labels = []  # Store labels for each window
             drift_detected_count = 0
             model_updated_count = 0
-            test_int=0
+            last_ekf_predictions = None  # Track last window's EKF predictions
+            last_ekf_covariances = None  # Track last window's EKF covariances
+            
             # Process each window of online data
             for window_idx, (time_series_batch, sources_num_batch, labels_batch) in enumerate(tqdm(self.online_learning_dataloader, desc="Online Learning")):
                 # --- Dynamic Eta Update Logic ---
                 if online_config.eta_update_interval_windows and online_config.eta_update_interval_windows > 0 and \
                    window_idx > 0 and window_idx % online_config.eta_update_interval_windows == 0:
-                    
-                    # if test_int<4:
-                    #     test_int+=1
-                    #     new_eta = current_eta
-                    # else:
                     current_eta = self.system_model.params.eta # Get current eta from the shared SystemModelParams
                     eta_increment = online_config.eta_increment if online_config.eta_increment is not None else 0.01
                     new_eta = current_eta + eta_increment
@@ -1400,7 +1399,6 @@ class Simulation:
                         logger.info(f"Online Learning: Dynamically updating eta at window {window_idx}. From {current_eta:.4f} to {new_eta:.4f}")
                         # The dataset holds the generator, which updates the shared self.system_model.params.eta
                         self.online_learning_dataloader.dataset.update_eta(new_eta)
-                        # After this call, self.system_model.params.eta is updated, and the generator will use it.
                 # --- End Dynamic Eta Update Logic ---
                 
                 # Unpack batch data
@@ -1424,25 +1422,33 @@ class Simulation:
                     labels_single_window_list_of_arrays = [arr[0].cpu().numpy() if isinstance(arr, torch.Tensor) else arr[0] for arr in labels_batch]
                 
                 # Calculate loss on the current window (generated with current eta)
-                # _evaluate_window expects: (Tensor[win_size, N, T], List[int], List[np.ndarray], int, int)
-                current_window_loss, avg_window_cov, ekf_predictions, ekf_covariances, pre_ekf_loss = self._evaluate_window(
+                current_window_loss, avg_window_cov, ekf_predictions, ekf_covariances, pre_ekf_loss, ekf_innovations, ekf_kalman_gains, ekf_kalman_gain_times_innovation, ekf_y_s_inv_y = self._evaluate_window(
                     time_series_single_window, 
                     sources_num_single_window_list, 
                     labels_single_window_list_of_arrays,
                     trajectory_idx,
-                    window_idx
+                    window_idx,
+                    is_first_window=(window_idx == 0),
+                    last_ekf_predictions=last_ekf_predictions,
+                    last_ekf_covariances=last_ekf_covariances
                 )
+               
+                # Update tracking variables
                 window_losses.append(current_window_loss)
                 window_covariances.append(avg_window_cov)
                 window_eta_values.append(self.system_model.params.eta)
                 window_ekf_predictions.append(ekf_predictions)
                 window_ekf_covariances.append(ekf_covariances)
-                
-                # Add pre-EKF loss tracking
+                window_ekf_innovations.append(ekf_innovations)  # Store innovations
+                window_ekf_kalman_gains.append(ekf_kalman_gains)
+                window_ekf_kalman_gain_times_innovation.append(ekf_kalman_gain_times_innovation)
+                window_ekf_y_s_inv_y.append(ekf_y_s_inv_y)  # Store y*(S^-1)*y
                 window_pre_ekf_losses.append(pre_ekf_loss)
-                
-                # Store labels for this window
                 window_labels.append(labels_single_window_list_of_arrays)
+                
+                # Update last predictions and covariances for next window
+                last_ekf_predictions = ekf_predictions
+                last_ekf_covariances = ekf_covariances
                 
                 logger.info(f"Window {window_idx}: Loss = {current_window_loss:.6f}, Cov = {avg_window_cov:.6f} (current eta={self.system_model.params.eta:.4f})")
                 
@@ -1451,31 +1457,8 @@ class Simulation:
                 
                 # Check if loss exceeds threshold (drift detected)
                 if current_window_loss > loss_threshold:
-                    print(f"Drift detected in window {window_idx} (loss: {current_window_loss:.6f} > threshold: {loss_threshold:.6f})")
-                    # logger.info(f"Drift detected in window {window_idx} (loss: {current_window_loss:.6f} > threshold: {loss_threshold:.6f})")
-                    # drift_detected_count += 1
-                    
-                    # # Re-enable gradients for training
-                    # # Pass the window data in the format expected by train_on_window
-                    # # train_on_window expects (time_series_tensor, sources_num_list_or_tensor, labels_list_of_lists)
-                    # # labels_single_window_list_of_arrays are the ground truth, used if loss needs them, ignored by unsupervised.
-                    # training_window_data = (time_series_single_window, sources_num_single_window_list, labels_single_window_list_of_arrays)
-
-                    # with torch.enable_grad(): 
-                    #     updated_model, updated_loss = online_trainer.train_on_window(
-                    #         training_window_data,
-                    #         max_iterations=max_iterations
-                    #     )
-                        
-                    #     # Update model if training improved performance
-                    #     if updated_loss < current_window_loss:
-                    #         logger.info(f"Model updated: Loss improved from {current_window_loss:.6f} to {updated_loss:.6f}")
-                    #         self.trained_model = updated_model # This updates the model instance used by online_trainer too
-                    #         model_updated_count += 1
-                    #         window_update_flags.append(True)
-                    #     else:
-                    #         logger.info(f"Model update rejected: Loss did not improve ({updated_loss:.6f} >= {current_window_loss:.6f})")
-                    #         window_update_flags.append(False)
+                    logger.info(f"Drift detected in window {window_idx} (loss: {current_window_loss:.6f} > threshold: {loss_threshold:.6f})")
+                    window_update_flags.append(False)
                 else:
                     logger.info(f"No drift detected in window {window_idx} (loss: {current_window_loss:.6f} <= threshold: {loss_threshold:.6f})")
                     window_update_flags.append(False)
@@ -1488,7 +1471,7 @@ class Simulation:
                 )
                 logger.info(f"Saved final online-updated model to {model_save_path}")
             
-            # Store results
+            # Return results
             return {
                 "status": "success",
                 "online_learning_results": {
@@ -1504,6 +1487,10 @@ class Simulation:
                     "loss_threshold": loss_threshold,
                     "ekf_predictions": window_ekf_predictions,
                     "ekf_covariances": window_ekf_covariances,
+                    "ekf_innovations": window_ekf_innovations,  # Add innovations to results
+                    "ekf_kalman_gains": window_ekf_kalman_gains,
+                    "ekf_kalman_gain_times_innovation": window_ekf_kalman_gain_times_innovation,
+                    "ekf_y_s_inv_y": window_ekf_y_s_inv_y,  # Add y*(S^-1)*y to results
                     "pre_ekf_losses": window_pre_ekf_losses,
                     "window_labels": window_labels
                 }
@@ -1546,6 +1533,10 @@ class Simulation:
                 # Run single trajectory online learning
                 trajectory_result = self._run_single_trajectory_online_learning(trajectory_idx)
                 
+                # Plot single trajectory results
+                if trajectory_result.get("status") != "error":
+                    self._plot_single_trajectory_results(trajectory_result["online_learning_results"], trajectory_idx)
+                
                 if trajectory_result.get("status") == "error":
                     logger.error(f"Error in trajectory {trajectory_idx + 1}: {trajectory_result.get('message')}")
                     continue
@@ -1573,7 +1564,10 @@ class Simulation:
                 window_pre_ekf_losses=averaged_results["pre_ekf_losses"],
                 window_labels=averaged_results["window_labels"],
                 ekf_covariances=averaged_results["ekf_covariances"],
-                frobenius_norms=frobenius_norms
+                frobenius_norms=frobenius_norms,
+                ekf_kalman_gains=averaged_results["ekf_kalman_gains"],
+                ekf_kalman_gain_times_innovation=averaged_results["ekf_kalman_gain_times_innovation"],
+                ekf_y_s_inv_y=averaged_results["ekf_y_s_inv_y"]
             )
             
             logger.info(f"Online learning completed over {dataset_size} trajectories: "
@@ -1584,7 +1578,43 @@ class Simulation:
             logger.exception(f"Error during multi-trajectory online learning: {e}")
             self.results["online_learning_error"] = str(e)
 
-    def _evaluate_window(self, window_time_series, window_sources_num, window_labels, trajectory_idx: int = 0, window_idx: int = 0):
+    def _get_optimal_permutation(self, predictions: np.ndarray, true_angles: np.ndarray) -> np.ndarray:
+        """
+        Calculate optimal permutation between predictions and true angles using RMSPE.
+        
+        Args:
+            predictions: Array of predicted angles [num_sources]
+            true_angles: Array of true angles [num_sources]
+            
+        Returns:
+            optimal_perm: Array containing the optimal permutation indices
+        """
+        import torch
+        from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
+        from itertools import permutations
+        
+        # Convert inputs to tensors and reshape
+        pred_tensor = torch.tensor(predictions, device=device).view(1, -1)
+        true_tensor = torch.tensor(true_angles, device=device).view(1, -1)
+        
+        num_sources = pred_tensor.shape[1]
+        perm = list(permutations(range(num_sources), num_sources))
+        num_of_perm = len(perm)
+        
+        # Calculate errors for all permutations
+        err_angle = (pred_tensor[:, perm] - torch.tile(true_tensor[:, None, :], (1, num_of_perm, 1)).to(torch.float32))
+        err_angle += torch.pi / 2
+        err_angle %= torch.pi
+        err_angle -= torch.pi / 2
+        rmspe_angle_all_permutations = np.sqrt(1 / num_sources) * torch.linalg.norm(err_angle, dim=-1)
+        _, min_idx = torch.min(rmspe_angle_all_permutations, dim=-1)
+        
+        # Get optimal permutation
+        optimal_perm = torch.tensor(perm, dtype=torch.long, device=device)[min_idx]
+        return optimal_perm.cpu().numpy()
+
+    def _evaluate_window(self, window_time_series, window_sources_num, window_labels, trajectory_idx: int = 0, window_idx: int = 0, 
+                         is_first_window: bool = True, last_ekf_predictions: List = None, last_ekf_covariances: List = None):
         """
         Calculate loss on a window of trajectory data using Extended Kalman Filter.
         
@@ -1594,10 +1624,13 @@ class Simulation:
             window_labels: Labels for window (list of tensors)
             trajectory_idx: Index of the current trajectory
             window_idx: Index of the current window within the trajectory
+            is_first_window: Flag indicating if this is the first window evaluation
+            last_ekf_predictions: List of last EKF predictions from previous window
+            last_ekf_covariances: List of last EKF covariances from previous window
             
         Returns:
             Tuple of (average EKF-filtered loss across window, average covariance across window, 
-                     ekf_predictions, ekf_covariances, average pre-EKF loss across window)
+                     ekf_predictions, ekf_covariances, average pre-EKF loss across window, ekf_innovations)
         """
         # Imports for EKF
         import torch
@@ -1629,7 +1662,7 @@ class Simulation:
         
         if current_window_len == 0:
             logger.error("Window has zero valid steps. Cannot evaluate.")
-            return float('inf'), float('nan'), [], [], float('inf')  # Include pre-EKF loss in return
+            return float('inf'), float('nan'), [], [], float('inf'), []  # Include pre-EKF loss in return
         
         total_loss = 0.0
         num_valid_steps_for_loss = 0
@@ -1662,25 +1695,33 @@ class Simulation:
         
         logger.info(f"Initialized {max_sources} EKF instances for window evaluation (eta={current_eta:.4f})")
         
-        # Track the EKF predictions and covariances for each step and source
+        # Track the EKF predictions, covariances and innovations for each step and source
         ekf_predictions = []
         ekf_covariances = []
+        ekf_innovations = []  # New list to track innovations
+        ekf_kalman_gains = []  # New list to track Kalman gains
+        ekf_kalman_gain_times_innovation = []  # New list to track K*y
+        ekf_y_s_inv_y = []  # New list to track y*(S^-1)*y
         
         # Process each step in window
-        for step_idx in range(current_window_len):
+        for step in range(current_window_len):
             try:
                 # Extract data for this step
-                step_data_tensor = time_series_steps[step_idx:step_idx+1].to(device)  # Shape: [1, N, T] (add batch dim for model)
-                num_sources_this_step = sources_num_per_step[step_idx]
+                step_data_tensor = time_series_steps[step:step+1].to(device)  # Shape: [1, N, T] (add batch dim for model)
+                num_sources_this_step = sources_num_per_step[step]
                 
                 # Skip if no sources
                 if num_sources_this_step <= 0:
                     ekf_predictions.append([])
                     ekf_covariances.append([])
+                    ekf_innovations.append([])
+                    ekf_kalman_gains.append([])
+                    ekf_kalman_gain_times_innovation.append([])
+                    ekf_y_s_inv_y.append([])
                     continue
                 
                 # Get ground truth labels for this step
-                true_angles_this_step = labels_per_step_list[step_idx][:num_sources_this_step]
+                true_angles_this_step = labels_per_step_list[step][:num_sources_this_step]
                 
                 # Forward pass through model
                 self.trained_model.eval() # Ensure model is in eval mode for this evaluation part
@@ -1695,33 +1736,74 @@ class Simulation:
                         # Calculate pre-EKF loss (raw model predictions)
                         pre_ekf_angles_pred = angles_pred.view(1, -1)[:, :num_sources_this_step]
                         true_angles_tensor = torch.tensor(true_angles_this_step, device=device).unsqueeze(0)
+                        
+                        # Get optimal permutation for model predictions
+                        model_perm = self._get_optimal_permutation(angles_pred_np, true_angles_this_step)
+                        angles_pred_np = angles_pred_np[model_perm]
+                        pre_ekf_angles_pred = pre_ekf_angles_pred[:, model_perm]
+                        
+                        # Calculate pre-EKF loss with reordered predictions
                         pre_ekf_loss = rmspe_criterion(pre_ekf_angles_pred, true_angles_tensor)
-
                         pre_ekf_total_loss += pre_ekf_loss.item()
                         pre_ekf_num_valid_steps += 1
                         
                         # Initialize EKF state if this is the first step
-                        if step_idx == 0:
+                        if step == 0:
+                            if is_first_window:
+                                # Initialize with true angles for first window
+                                for i in range(num_sources_this_step):
+                                    ekf_filters[i].initialize_state(true_angles_this_step[i])
+                            else:
+                                # Initialize with last predictions from previous window
+                                if last_ekf_predictions and len(last_ekf_predictions[-1]) >= num_sources_this_step and \
+                                   len(last_ekf_covariances) > 0 and len(last_ekf_covariances[-1]) >= num_sources_this_step:
+                                    # Get the last predictions and calculate their optimal permutation
+                                    last_predictions_pre_perm = np.array(last_ekf_predictions[-1])[:num_sources_this_step]
+                                    last_perm = self._get_optimal_permutation(last_predictions_pre_perm, true_angles_this_step)
+                                    last_predictions = last_predictions_pre_perm[last_perm]
+                                    
+                                    # Get the last covariances and apply the same permutation
+                                    last_covariances_pre_perm = np.array(last_ekf_covariances[-1])[:num_sources_this_step]
+                                    last_covariances = last_covariances_pre_perm[last_perm]
+                                    
+                                    for i in range(num_sources_this_step):
+                                        ekf_filters[i].initialize_state(last_predictions.flatten()[:num_sources_this_step][i])
+                                        ekf_filters[i].P = last_covariances.flatten()[:num_sources_this_step][i]  # Update the covariance matrix
+                                else:
+                                    # Fallback to true angles if no valid last predictions
+                                    logger.warning("No valid last predictions or covariances available, falling back to true angles")
                             for i in range(num_sources_this_step):
-                                ekf_filters[i].initialize_state(angles_pred_np[i])
+                                ekf_filters[i].initialize_state(true_angles_this_step[i])
                         
                         # EKF update for each source
                         step_predictions = []
                         step_covariances = []
+                        step_innovations = []  # New list for this step's innovations
+                        step_kalman_gains = []  # New list for this step's Kalman gains
+                        step_kalman_gain_times_innovation = []  # New list for this step's K*y
+                        step_y_s_inv_y = []  # New list for this step's y*(S^-1)*y
                         for i in range(num_sources_this_step):
                             # Predict
                             predicted_angle = ekf_filters[i].predict()
                             
                             # Update with measurement
-                            updated_angle = ekf_filters[i].update(angles_pred_np[i])
+                            updated_angle, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y = ekf_filters[i].update(angles_pred_np.flatten()[:num_sources_this_step][i])
                             
-                            # Store prediction and covariance
+                            # Store prediction, covariance and innovation
                             step_predictions.append(updated_angle)
                             step_covariances.append(ekf_filters[i].P)
+                            step_innovations.append(innovation)
+                            step_kalman_gains.append(kalman_gain)
+                            step_kalman_gain_times_innovation.append(kalman_gain_times_innovation)
+                            step_y_s_inv_y.append(y_s_inv_y)
                         
-                        # Store predictions and covariances for this step
+                        # Store predictions, covariances and innovations for this step
                         ekf_predictions.append(step_predictions)
                         ekf_covariances.append(step_covariances)
+                        ekf_innovations.append(step_innovations)
+                        ekf_kalman_gains.append(step_kalman_gains)
+                        ekf_kalman_gain_times_innovation.append(step_kalman_gain_times_innovation)
+                        ekf_y_s_inv_y.append(step_y_s_inv_y)
                         
                         # Create tensor from EKF predictions for loss calculation
                         ekf_angles_pred = torch.tensor(step_predictions, device=device).unsqueeze(0)
@@ -1738,7 +1820,7 @@ class Simulation:
                 total_loss += loss.item()
                 num_valid_steps_for_loss += 1
             except Exception as e:
-                logger.warning(f"Error processing step {step_idx}: {e}")
+                logger.warning(f"Error processing step {step}: {e}")
                 # Skip this step on error
                 continue
         
@@ -1776,10 +1858,10 @@ class Simulation:
             # Log window summary with columnar format
             self._log_window_summary(avg_pre_ekf_loss, avg_loss, avg_window_cov, current_eta, is_near_field, trajectory_idx, window_idx)
             
-            return avg_loss, avg_window_cov, ekf_predictions, ekf_covariances, avg_pre_ekf_loss
+            return avg_loss, avg_window_cov, ekf_predictions, ekf_covariances, avg_pre_ekf_loss, ekf_innovations, ekf_kalman_gains, ekf_kalman_gain_times_innovation, ekf_y_s_inv_y
         else:
             logger.warning("No valid steps with sources found in the window for loss calculation.")
-            return float('inf'), float('nan'), [], [], float('inf')  # Include pre-EKF loss in return
+            return float('inf'), float('nan'), [], [], float('inf'), [], [], [], []  # Include pre-EKF loss in return
 
     def _log_window_summary(
         self,
@@ -1845,185 +1927,355 @@ class Simulation:
             print(f"{'Mode':<20} {'NEAR FIELD':<20} {'(No SubspaceNet comparison)':<25} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
             print("-" * 100)
 
-    def _plot_online_learning_results(self, window_losses, window_covariances, window_eta_values, window_updates, window_pre_ekf_losses, window_labels, ekf_covariances, frobenius_norms):
+    def _plot_online_learning_results(self, window_losses, window_covariances, window_eta_values, window_updates, window_pre_ekf_losses, window_labels, ekf_covariances, frobenius_norms, ekf_kalman_gains=None, ekf_kalman_gain_times_innovation=None, ekf_y_s_inv_y=None):
         """
         Plot online learning results including plots as a function of eta.
-        
-        Args:
-            window_losses: List of loss values per window
-            window_covariances: List of average covariance values per window
-            window_eta_values: List of eta values per window
-            window_updates: List of boolean flags indicating model updates
-            window_pre_ekf_losses: List of pre-EKF loss values per window
-            window_labels: List of labels for each window
-            ekf_covariances: List of EKF covariances per window
-            frobenius_norms: List of Frobenius norms per window
         """
         try:
             import matplotlib.pyplot as plt
             import numpy as np
+            import datetime
             
-            # Create figure with multiple subplots (3x2 layout for 6 plots)
-            fig = plt.figure(figsize=(20, 15))
+            # Create timestamp and plot directory
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            plot_dir = self.output_dir / "plots"
+            plot_dir.mkdir(parents=True, exist_ok=True)
             
-            # 1. Plot both Pre-EKF and EKF loss vs window index (combined)
-            ax1 = fig.add_subplot(3, 2, 1)
-            x = np.arange(len(window_losses))
+            def set_adjusted_ylim(ax, data, padding=0.1):
+                """Helper function to set y limits excluding first point"""
+                if len(data) > 1:
+                    data_without_first = data[1:]
+                    ymin = min(data_without_first)
+                    ymax = max(data_without_first)
+                    range_y = ymax - ymin
+                    ax.set_ylim([ymin - range_y * padding, ymax + range_y * padding])
             
-            # Plot both losses with distinct colors and markers
-            ax1.plot(x, window_pre_ekf_losses, 'r-', marker='s', linewidth=2, markersize=6, label='SubspaceNet Loss', alpha=0.8)
-            ax1.plot(x, window_losses, 'b-', marker='o', linewidth=2, markersize=6, label='EKF Loss', alpha=0.8)
+            # Find indices where eta changes
+            eta_changes = []
+            eta_values = []
+            for i in range(1, len(window_eta_values)):
+                if abs(window_eta_values[i] - window_eta_values[i-1]) > 1e-6:
+                    eta_changes.append(i)
+                    eta_values.append(window_eta_values[i])
             
-            # Highlight windows where model was updated
-            update_indices = [i for i, updated in enumerate(window_updates) if updated]
-            if update_indices:
-                update_pre_ekf_losses = [window_pre_ekf_losses[i] for i in update_indices]
-                update_ekf_losses = [window_losses[i] for i in update_indices]
-                ax1.scatter(update_indices, update_pre_ekf_losses, color='darkred', s=100, marker='X', label='SubspaceNet Updated', zorder=5)
-                ax1.scatter(update_indices, update_ekf_losses, color='darkblue', s=100, marker='X', label='EKF Updated', zorder=5)
+            # Create figure with multiple subplots (4x2 layout for 8 plots)
+            fig = plt.figure(figsize=(20, 20))
             
-            # Add threshold line if configured
-            if hasattr(self.config.online_learning, 'loss_threshold'):
-                threshold = self.config.online_learning.loss_threshold
-                ax1.axhline(y=threshold, color='g', linestyle='--', linewidth=2, label=f'Threshold ({threshold})')
+            # 1. Plot loss vs window index
+            ax1 = fig.add_subplot(4, 2, 1)
+            x = np.arange(len(window_losses))[1:]  # Start from second sample
+            ax1.plot(x, np.array(window_losses)[1:], 'b-', marker='o', label='EKF Loss')
+            ax1.plot(x, np.array(window_pre_ekf_losses)[1:], 'r-', marker='s', label='SubspaceNet Loss')
+            
+            # Set y-axis limit to 0.14 for loss plot only
+            ax1.set_ylim([None, 0.14])
+            
+            # Add eta change markers (adjusted for starting from second sample)
+            for idx, eta in zip(eta_changes, eta_values):
+                if idx >= 1:  # Only show markers from second sample onwards
+                    ax1.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                    ax1.text(idx, 0.13, f'η={eta:.3f}', rotation=90, verticalalignment='top')
             
             # Add labels and title
             ax1.set_xlabel('Window Index')
             ax1.set_ylabel('Loss')
-            ax1.set_title('SubspaceNet vs EKF Loss - Window Index')
+            ax1.set_title('Loss vs Window Index (Starting from Window 1)\nRMSPE = √(1/N * Σ(θ_pred - θ_true)²)')
             ax1.legend()
             ax1.grid(True, alpha=0.3)
             
-            # 2. Plot loss difference (EKF - Pre-EKF) vs window index
-            ax2 = fig.add_subplot(3, 2, 2)
-            loss_difference = np.array(window_losses) - np.array(window_pre_ekf_losses)
-            ax2.plot(x, loss_difference, 'purple', marker='d', linewidth=2, markersize=6, label='EKF - SubspaceNet Loss', alpha=0.8)
-            ax2.axhline(y=0, color='k', linestyle='-', alpha=0.5, linewidth=1)
+            # 2. Plot EKF improvement vs window index (reversed: SubspaceNet - EKF)
+            ax2 = fig.add_subplot(4, 2, 2)
+            x = np.arange(len(window_losses))[1:]  # Start from second sample
+            improvement = np.array(window_pre_ekf_losses)[1:] - np.array(window_losses)[1:]  # Reversed calculation, starting from second sample
+            ax2.plot(x, improvement, 'g-', marker='o')
             
-            # Highlight windows where model was updated
-            if update_indices:
-                update_diff = [loss_difference[i] for i in update_indices]
-                ax2.scatter(update_indices, update_diff, color='darkmagenta', s=100, marker='X', label='Model Updated', zorder=5)
+            # Add eta change markers (adjusted for starting from second sample)
+            for idx, eta in zip(eta_changes, eta_values):
+                if idx >= 1:  # Only show markers from second sample onwards
+                    ax2.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                    ax2.text(idx, ax2.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
             
             # Add labels and title
             ax2.set_xlabel('Window Index')
             ax2.set_ylabel('Loss Difference')
-            ax2.set_title('EKF Improvement (EKF - SubspaceNet Loss)')
-            ax2.legend()
+            ax2.set_title('SubspaceNet Loss - EKF Loss vs Window Index (Starting from Window 1)\nImprovement = L_SubspaceNet - L_EKF')
             ax2.grid(True, alpha=0.3)
             
             # 3. Plot covariance vs window index
-            ax3 = fig.add_subplot(3, 2, 3)
-            ax3.plot(x, window_covariances, 'g-', marker='o', label='Average Covariance')
+            ax3 = fig.add_subplot(4, 2, 3)
+            x = np.arange(len(window_covariances))[1:]  # Start from second sample
+            ax3.plot(x, np.array(window_covariances)[1:], 'g-', marker='o', label='Average Covariance')
             
-            # Highlight windows where model was updated
-            if update_indices:
+            # Add eta change markers (adjusted for starting from second sample)
+            for idx, eta in zip(eta_changes, eta_values):
+                if idx >= 1:  # Only show markers from second sample onwards
+                    ax3.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                    ax3.text(idx, max(np.array(window_covariances)[1:]), f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            # Highlight windows where model was updated (adjusted for starting from second sample)
+            if window_updates:
+                update_indices = [i for i, updated in enumerate(window_updates) if updated and i >= 1]
                 update_covs = [window_covariances[i] for i in update_indices]
                 ax3.scatter(update_indices, update_covs, color='r', s=80, marker='o', label='Model Updated')
             
             # Add labels and title
             ax3.set_xlabel('Window Index')
             ax3.set_ylabel('Average Covariance')
-            ax3.set_title('Covariance vs Window Index')
+            ax3.set_title('Covariance vs Window Index (Starting from Window 1)\nP_k|k = (I - K_k H) P_k|k-1')
             ax3.legend()
             ax3.grid(True, alpha=0.3)
             
-            # 4. Plot both Pre-EKF and EKF loss vs eta (combined)
-            ax4 = fig.add_subplot(3, 2, 4)
-            ax4.plot(window_eta_values, window_pre_ekf_losses, 'r-', marker='s', linewidth=2, markersize=6, label='SubspaceNet Loss', alpha=0.8)
-            ax4.plot(window_eta_values, window_losses, 'b-', marker='o', linewidth=2, markersize=6, label='EKF Loss', alpha=0.8)
+            # 4. Plot average innovation magnitude vs window index
+            ax4 = fig.add_subplot(4, 2, 4)
+            x = np.arange(len(window_losses))[1:]  # Start from second sample
+            
+            # Calculate average innovation magnitude per window from the results
+            avg_innovations = []
+            if "ekf_innovations" in self.results.get("online_learning", {}):
+                ekf_innovations = self.results["online_learning"]["ekf_innovations"]
+                for window_innovations in ekf_innovations:
+                    window_avg = []
+                    for step_innovations in window_innovations:
+                        if step_innovations:  # Check if there are any innovations in this step
+                            window_avg.extend([abs(inn) for inn in step_innovations])  # Use absolute values
+                    if window_avg:
+                        avg_innovations.append(np.mean(window_avg))
+                    else:
+                        avg_innovations.append(0)
+            else:
+                # Fallback: create zeros if no innovation data available
+                avg_innovations = [0] * len(window_losses)
+            
+            # Ensure we have the right number of points and start from second sample
+            if len(avg_innovations) != len(window_losses):
+                avg_innovations = avg_innovations[:len(window_losses)] if len(avg_innovations) > len(window_losses) else avg_innovations + [0] * (len(window_losses) - len(avg_innovations))
+            
+            ax4.plot(x, np.array(avg_innovations)[1:], 'b-', marker='o', linewidth=2, markersize=6, label='Average Innovation Magnitude')
+            
+            # Add eta change markers (adjusted for starting from second sample)
+            for idx, eta in zip(eta_changes, eta_values):
+                if idx >= 1:  # Only show markers from second sample onwards
+                    ax4.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                    ax4.text(idx, ax4.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
             
             # Add labels and title
-            ax4.set_xlabel('Eta Value')
-            ax4.set_ylabel('Loss')
-            ax4.set_title('SubspaceNet vs EKF Loss - Eta Value')
+            ax4.set_xlabel('Window Index')
+            ax4.set_ylabel('Average Innovation Magnitude')
+            ax4.set_title('EKF Innovation Magnitude vs Window Index (Starting from Window 1)\nInnovation = |z_k - H x̂_k|k-1| = |measurement - prediction|')
             ax4.legend()
             ax4.grid(True, alpha=0.3)
             
-            # 5. Plot loss difference (EKF - Pre-EKF) vs eta
-            ax5 = fig.add_subplot(3, 2, 5)
-            eta_loss_difference = np.array(window_losses) - np.array(window_pre_ekf_losses)
-            ax5.plot(window_eta_values, eta_loss_difference, 'purple', marker='d', linewidth=2, markersize=6, label='EKF - SubspaceNet Loss', alpha=0.8)
-            ax5.axhline(y=0, color='k', linestyle='-', alpha=0.5, linewidth=1)
+            # 5. Plot average Kalman gain vs window index
+            if ekf_kalman_gains is not None:
+                ax5 = fig.add_subplot(4, 2, 5)
+                # Calculate average Kalman gain per window
+                avg_kalman_gains = []
+                for window_gains in ekf_kalman_gains:
+                    window_avg = []
+                    for step_gains in window_gains:
+                        if step_gains:  # Check if there are any gains in this step
+                            window_avg.extend(step_gains)
+                    if window_avg:
+                        avg_kalman_gains.append(np.mean(window_avg))
+                    else:
+                        avg_kalman_gains.append(0)
+                
+                x = np.arange(len(avg_kalman_gains))[1:]  # Start from second sample
+                ax5.plot(x, np.array(avg_kalman_gains)[1:], 'purple', marker='d', label='Average Kalman Gain')
+                
+                # Add eta change markers (adjusted for starting from second sample)
+                for idx, eta in zip(eta_changes, eta_values):
+                    if idx >= 1:  # Only show markers from second sample onwards
+                        ax5.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                        ax5.text(idx, ax5.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
             
             # Add labels and title
-            ax5.set_xlabel('Eta Value')
-            ax5.set_ylabel('Loss Difference')
-            ax5.set_title('EKF Improvement vs Eta')
+                ax5.set_xlabel('Window Index')
+                ax5.set_ylabel('Average Kalman Gain')
+                ax5.set_title('Average Kalman Gain vs Window Index (Starting from Window 1)\nK_k = P_k|k-1 H^T (H P_k|k-1 H^T + R)^-1')
             ax5.legend()
             ax5.grid(True, alpha=0.3)
             
-            # 6. Plot covariance vs eta
-            ax6 = fig.add_subplot(3, 2, 6)
-            ax6.plot(window_eta_values, window_covariances, 'g-', marker='o', label='Covariance')
+            # 6. Plot average K*y vs window index
+            if ekf_kalman_gain_times_innovation is not None:
+                ax6 = fig.add_subplot(4, 2, 6)
+                # Calculate average K*y per window
+                avg_k_times_y = []
+                for window_k_times_y in ekf_kalman_gain_times_innovation:
+                    window_avg = []
+                    for step_k_times_y in window_k_times_y:
+                        if step_k_times_y:  # Check if there are any values in this step
+                            window_avg.extend(step_k_times_y)
+                    if window_avg:
+                        avg_k_times_y.append(np.mean(window_avg))
+                    else:
+                        avg_k_times_y.append(0)
+                
+                x = np.arange(len(avg_k_times_y))[1:]  # Start from second sample
+                ax6.plot(x, np.array(avg_k_times_y)[1:], 'orange', marker='v', label='Average K*Innovation')
+                
+                # Add eta change markers (adjusted for starting from second sample)
+                for idx, eta in zip(eta_changes, eta_values):
+                    if idx >= 1:  # Only show markers from second sample onwards
+                        ax6.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                        ax6.text(idx, ax6.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
             
             # Add labels and title
-            ax6.set_xlabel('Eta Value')
-            ax6.set_ylabel('Covariance')
-            ax6.set_title('Covariance vs Eta')
+                ax6.set_xlabel('Window Index')
+                ax6.set_ylabel('Average K*Innovation')
+                ax6.set_title('Average Kalman Gain × Innovation vs Window Index (Starting from Window 1)\nK_k × ν_k = K_k × (z_k - H x̂_k|k-1)')
             ax6.legend()
             ax6.grid(True, alpha=0.3)
             
-            # Add overall title
-            plt.suptitle('Online Learning Results: SubspaceNet vs EKF Loss Comparison', fontsize=16)
-            plt.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust for suptitle
-            
-            # Save plot
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            plot_dir = self.output_dir / "plots"
-            plot_dir.mkdir(parents=True, exist_ok=True)
-            plot_path = plot_dir / f"online_learning_results_{timestamp}.png"
-            plt.savefig(plot_path)
-            
-            # Save additional combined plot with loss and covariance vs eta
-            fig2, ax_combined = plt.subplots(figsize=(15, 10))
-            
-            # Plot all three metrics on the same axes with different scales
-            color1 = 'tab:blue'
-            ax_combined.set_xlabel('Eta Value')
-            ax_combined.set_ylabel('Loss', color=color1)
-            line1 = ax_combined.plot(window_eta_values, window_losses, color=color1, marker='o', linestyle='-', label='EKF Loss')
-            line2 = ax_combined.plot(window_eta_values, window_pre_ekf_losses, color='tab:red', marker='s', linestyle='-', label='SubspaceNet Loss')
-            ax_combined.tick_params(axis='y', labelcolor=color1)
-            
-            # Create second y-axis for covariance
-            ax_cov = ax_combined.twinx()
-            color2 = 'tab:green'
-            ax_cov.set_ylabel('Average Covariance', color=color2)
-            line3 = ax_cov.plot(window_eta_values, window_covariances, color=color2, marker='^', linestyle='-', label='Covariance')
-            ax_cov.tick_params(axis='y', labelcolor=color2)
-            
-            # Add grid and title
-            ax_combined.grid(True, alpha=0.3)
-            plt.title('SubspaceNet Loss, EKF Loss, and Covariance vs Eta')
-            
-            # Add combined legend
-            lines = line1 + line2 + line3
-            labels = [l.get_label() for l in lines]
-            ax_combined.legend(lines, labels, loc='best')
+            # 7. Plot average y*(S^-1)*y vs window index
+            if ekf_y_s_inv_y is not None:
+                ax7 = fig.add_subplot(4, 2, 7)
+                # Calculate average y*(S^-1)*y per window
+                avg_y_s_inv_y = []
+                for window_y_s_inv_y in ekf_y_s_inv_y:
+                    window_avg = []
+                    for step_y_s_inv_y in window_y_s_inv_y:
+                        if step_y_s_inv_y:  # Check if there are any values in this step
+                            window_avg.extend(step_y_s_inv_y)
+                    if window_avg:
+                        avg_y_s_inv_y.append(np.mean(window_avg))
+                    else:
+                        avg_y_s_inv_y.append(0)
+                
+                x = np.arange(len(avg_y_s_inv_y))[1:]  # Start from second sample
+                ax7.plot(x, np.array(avg_y_s_inv_y)[1:], 'red', marker='^', label='Average y*(S^-1)*y')
+                
+                # Add eta change markers (adjusted for starting from second sample)
+                for idx, eta in zip(eta_changes, eta_values):
+                    if idx >= 1:  # Only show markers from second sample onwards
+                        ax7.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                        ax7.text(idx, ax7.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+                
+                # Add labels and title
+                ax7.set_xlabel('Window Index')
+                ax7.set_ylabel('Average y*(S^-1)*y')
+                ax7.set_title('Average Innovation Covariance Metric vs Window Index (Starting from Window 1)\ny*(S^-1)*y = ν^T S^-1 ν')
+                ax7.legend()
+                ax7.grid(True, alpha=0.3)
             
             # Adjust layout and save
             plt.tight_layout()
-            combined_plot_path = plot_dir / f"online_learning_eta_combined_{timestamp}.png"
-            plt.savefig(combined_plot_path)
+            plot_path = plot_dir / f"online_learning_results_{timestamp}.png"
+            plt.savefig(plot_path)
+            plt.close()
             
-            # Log with filenames
-            main_plot_filename = plot_path.name
-            combined_plot_filename = combined_plot_path.name
-            logger.info(f"Online learning results plots saved to {plot_dir}:")
-            logger.info(f"  - Main results plot: {main_plot_filename}")
-            logger.info(f"  - Combined eta plot: {combined_plot_filename}")
+            # Plot Frobenius norms with adjusted y-axis
+            self._plot_frobenius_norms(frobenius_norms, window_eta_values, plot_dir, timestamp, exclude_first=True)
             
-            # Plot full trajectory across all windows
+            # Plot online learning trajectory
             self._plot_online_learning_trajectory(window_labels, plot_dir, timestamp)
             
-            # Plot Frobenius norms
-            self._plot_frobenius_norms(frobenius_norms, window_eta_values, plot_dir, timestamp)
-            
         except ImportError:
-            logger.warning("matplotlib not available for plotting online learning results")
+            logger.warning("matplotlib not available for plotting")
         except Exception as e:
             logger.error(f"Error plotting online learning results: {e}")
+            logger.debug("Error details:", exc_info=True)
+    
+    def _plot_single_trajectory_results(self, trajectory_results, trajectory_idx):
+        """
+        Plot results for a single trajectory including loss difference and innovation.
+        
+        Args:
+            trajectory_results: Dictionary containing single trajectory results
+            trajectory_idx: Index of the trajectory being plotted
+        """
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            import datetime
+            
+            # Create timestamp and plot directory
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            plot_dir = self.output_dir / "plots" / "single_trajectories"
+            plot_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Extract data from trajectory results
+            pre_ekf_losses = np.array(trajectory_results['pre_ekf_losses'])  # Shape: (30,)
+            window_losses = np.array(trajectory_results['window_losses'])    # Shape: (30,) - post EKF losses
+            ekf_innovations = np.array(trajectory_results['ekf_innovations']) # Shape: (30, 5, 3)
+            window_eta_values = trajectory_results['window_eta_values']
+            
+            # Calculate loss difference: pre_ekf_loss - post_ekf_loss (positive means EKF improved)
+            loss_difference = pre_ekf_losses - window_losses
+            
+            # Calculate average innovation magnitude per window
+            # Aggregate across steps (5) and sources (3) to get one value per window (30)
+            avg_innovations_per_window = []
+            for window_idx in range(ekf_innovations.shape[0]):  # 30 windows
+                window_innovations = []
+                for step_idx in range(ekf_innovations.shape[1]):  # 5 steps
+                    for source_idx in range(ekf_innovations.shape[2]):  # 3 sources
+                        innovation_val = ekf_innovations[window_idx, step_idx, source_idx]
+                        window_innovations.append(abs(innovation_val))  # Use absolute value
+                
+                if window_innovations:
+                    avg_innovations_per_window.append(np.mean(window_innovations))
+                else:
+                    avg_innovations_per_window.append(0)
+            
+            avg_innovations_per_window = np.array(avg_innovations_per_window)
+            
+            # Find indices where eta changes
+            eta_changes = []
+            eta_values = []
+            for i in range(1, len(window_eta_values)):
+                if abs(window_eta_values[i] - window_eta_values[i-1]) > 1e-6:
+                    eta_changes.append(i)
+                    eta_values.append(window_eta_values[i])
+            
+            # Create figure with 2 subplots
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+            
+            # Window indices
+            window_indices = np.arange(len(window_losses))
+            
+            # Plot 1: Loss difference (Pre-EKF Loss - Post-EKF Loss)
+            ax1.plot(window_indices, loss_difference, 'g-', marker='o', linewidth=2, markersize=6, label='Pre-EKF Loss - Post-EKF Loss')
+            ax1.axhline(y=0, color='black', linestyle='--', alpha=0.5, label='No Improvement Line')
+            
+            # Add eta change markers
+            for idx, eta in zip(eta_changes, eta_values):
+                ax1.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                ax1.text(idx, ax1.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            ax1.set_xlabel('Window Index')
+            ax1.set_ylabel('Loss Difference')
+            ax1.set_title(f'Trajectory {trajectory_idx}: Pre-EKF Loss - Post-EKF Loss vs Window Index\n(Positive = EKF Improved, Negative = EKF Worse)')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            
+            # Plot 2: Innovation magnitude
+            ax2.plot(window_indices, avg_innovations_per_window, 'b-', marker='s', linewidth=2, markersize=6, label='Average Innovation Magnitude')
+            
+            # Add eta change markers
+            for idx, eta in zip(eta_changes, eta_values):
+                ax2.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                ax2.text(idx, ax2.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            ax2.set_xlabel('Window Index')
+            ax2.set_ylabel('Average Innovation Magnitude')
+            ax2.set_title(f'Trajectory {trajectory_idx}: EKF Innovation Magnitude vs Window Index\n|Innovation| = |z_k - H x̂_k|k-1| = |measurement - prediction|')
+            ax2.legend()
+            ax2.grid(True, alpha=0.3)
+            
+            # Adjust layout and save
+            plt.tight_layout()
+            plot_path = plot_dir / f"single_trajectory_{trajectory_idx}_{timestamp}.png"
+            plt.savefig(plot_path)
+            plt.close()
+            
+            logger.info(f"Single trajectory plot saved: {plot_path}")
+            
+        except ImportError:
+            logger.warning("matplotlib not available for single trajectory plotting")
+        except Exception as e:
+            logger.error(f"Error plotting single trajectory results for trajectory {trajectory_idx}: {e}")
+            logger.debug("Error details:", exc_info=True)
     
     def _plot_online_learning_trajectory(self, window_labels, plot_dir, timestamp):
         """
@@ -2216,56 +2468,89 @@ class Simulation:
             num_windows = len(window_ekf_covariances)
             return np.zeros((num_windows, 1))
 
-    def _plot_frobenius_norms(self, frobenius_norms, window_eta_values, plot_dir, timestamp):
+    def _plot_frobenius_norms(self, frobenius_norms, window_eta_values, plot_dir, timestamp, exclude_first=False):
         """
         Plot Frobenius norms of covariance matrices per window.
         
         Args:
-            frobenius_norms: Array of Frobenius norms per window, shape [num_windows, 1]
+            frobenius_norms: List of Frobenius norms per window
             window_eta_values: List of eta values per window
             plot_dir: Directory to save the plots
             timestamp: Timestamp for the plot filename
+            exclude_first: Whether to exclude the first point from the plot
         """
         try:
             import matplotlib.pyplot as plt
             import numpy as np
             
-            # Flatten frobenius_norms for plotting
-            frobenius_flat = frobenius_norms.flatten()
+            def set_adjusted_ylim(ax, data, padding=0.1):
+                """Helper function to set y limits excluding first point"""
+                if len(data) > 1:
+                    data_without_first = data[1:]
+                    ymin = min(data_without_first)
+                    ymax = max(data_without_first)
+                    range_y = ymax - ymin
+                    ax.set_ylim([ymin - range_y * padding, ymax + range_y * padding])
             
-            # Create figure with subplots (1x2 layout for 2 plots)
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+            # Find indices where eta changes
+            eta_changes = []
+            eta_values = []
+            for i in range(1, len(window_eta_values)):
+                if abs(window_eta_values[i] - window_eta_values[i-1]) > 1e-6:
+                    eta_changes.append(i)
+                    eta_values.append(window_eta_values[i])
             
-            # 1. Plot Frobenius norm vs window index
-            x = np.arange(len(frobenius_flat))
-            ax1.plot(x, frobenius_flat, 'b-', marker='o', linewidth=2, markersize=6, label='Frobenius Norm')
+            # Create figure for Frobenius norms
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+            
+            # Plot Frobenius norm vs window index
+            x = np.arange(len(frobenius_norms))
+            ax1.plot(x, frobenius_norms, 'b-', marker='o', linewidth=2, markersize=6, label='Frobenius Norm')
+            
+            # Add eta change markers
+            for idx, eta in zip(eta_changes, eta_values):
+                ax1.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                ax1.text(idx, max(frobenius_norms[1:]), f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            # Set y-axis limits excluding first point if requested
+            if exclude_first:
+                set_adjusted_ylim(ax1, frobenius_norms)
             
             # Add labels and title
             ax1.set_xlabel('Window Index')
             ax1.set_ylabel('Frobenius Norm')
-            ax1.set_title('Frobenius Norm vs Window Index')
+            ax1.set_title('Covariance Matrix Frobenius Norm vs Window Index' + 
+                         (' (Excluding Initial Value)' if exclude_first else ''))
             ax1.legend()
             ax1.grid(True, alpha=0.3)
             
-            # 2. Plot Frobenius norm vs eta
-            ax2.plot(window_eta_values, frobenius_flat, 'r-', marker='s', linewidth=2, markersize=6, label='Frobenius Norm')
+            # Plot Frobenius norm vs eta
+            ax2.plot(window_eta_values, frobenius_norms, 'b-', marker='o', linewidth=2, markersize=6, label='Frobenius Norm')
+            
+            # Add eta change markers
+            for eta in eta_values:
+                ax2.scatter([eta], [frobenius_norms[window_eta_values.index(eta)]], color='red', marker='*', s=200, zorder=5)
+                ax2.text(eta, max(frobenius_norms[1:]), f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            # Set y-axis limits excluding first point if requested
+            if exclude_first:
+                set_adjusted_ylim(ax2, frobenius_norms)
             
             # Add labels and title
             ax2.set_xlabel('Eta Value')
             ax2.set_ylabel('Frobenius Norm')
-            ax2.set_title('Frobenius Norm vs Eta')
+            ax2.set_title('Covariance Matrix Frobenius Norm vs Eta' + 
+                         (' (Excluding Initial Value)' if exclude_first else ''))
             ax2.legend()
             ax2.grid(True, alpha=0.3)
             
-            # Add overall title
-            plt.suptitle('EKF Covariance Frobenius Norms Analysis', fontsize=16)
-            plt.tight_layout(rect=[0, 0, 1, 0.94])  # Adjust for suptitle
-            
-            # Save plot
+            # Adjust layout and save
+            plt.tight_layout()
             plot_path = plot_dir / f"frobenius_norms_{timestamp}.png"
             plt.savefig(plot_path)
-            logger.info(f"Frobenius norms plot saved to {plot_dir}:")
-            logger.info(f"  - Frobenius norms plot: {plot_path.name}")
+            plt.close()
+            
+            logger.info(f"Frobenius norm plots saved to {plot_path}")
             
         except ImportError:
             logger.warning("matplotlib not available for plotting Frobenius norms")
@@ -2274,58 +2559,131 @@ class Simulation:
 
     def _average_online_learning_results(self, results_list):
         """
-        Average online learning results across multiple trajectories.
+        Average results across multiple trajectories.
         
         Args:
-            results_list: List of online learning results dictionaries
+            results_list: List of dictionaries containing results from each trajectory
         
         Returns:
-            Averaged results dictionary
+            Dictionary with averaged results
         """
-        try:
-            import numpy as np
+        import numpy as np
             
-            if not results_list:
-                return {}
-                
-            num_trajectories = len(results_list)
-            num_windows = len(results_list[0]["window_losses"])
-            
-            # Initialize averaged results
-            averaged_results = {}
-            
-            # Average numerical lists element-wise
-            for key in ["window_losses", "window_covariances", "window_eta_values", "pre_ekf_losses"]:
-                values_matrix = np.array([result[key] for result in results_list])  # Shape: [num_trajectories, num_windows]
-                averaged_results[key] = np.mean(values_matrix, axis=0).tolist()
-            
-            # Average boolean updates (percentage of updates)
-            update_matrix = np.array([result["window_updates"] for result in results_list])  # Shape: [num_trajectories, num_windows]
-            averaged_results["window_updates"] = (np.mean(update_matrix.astype(float), axis=0) > 0.5).tolist()  # Majority vote
-            
-            # Average scalar counts
-            averaged_results["drift_detected_count"] = np.mean([result["drift_detected_count"] for result in results_list])
-            averaged_results["model_updated_count"] = np.mean([result["model_updated_count"] for result in results_list])
-            
-            # Use representative values from first trajectory
-            averaged_results["window_count"] = results_list[0]["window_count"]
-            averaged_results["window_size"] = results_list[0]["window_size"]
-            averaged_results["stride"] = results_list[0]["stride"]
-            averaged_results["loss_threshold"] = results_list[0]["loss_threshold"]
-            
-            # Use labels from first trajectory (representative)
-            averaged_results["window_labels"] = results_list[0]["window_labels"]
-            
-            # Average EKF predictions and covariances (more complex structure)
-            # For now, use first trajectory's structure but could be enhanced
-            averaged_results["ekf_predictions"] = results_list[0]["ekf_predictions"]
-            averaged_results["ekf_covariances"] = results_list[0]["ekf_covariances"]
-            
-            logger.info(f"Averaged results from {num_trajectories} trajectories with {num_windows} windows each")
-            
-            return averaged_results
-            
-        except Exception as e:
-            logger.error(f"Error averaging online learning results: {e}")
-            # Return first trajectory results as fallback
-            return results_list[0] if results_list else {}
+        # Initialize lists to store results from all trajectories
+        all_window_losses = []
+        all_window_covariances = []
+        all_window_eta_values = []
+        all_window_updates = []
+        all_drift_detected = []
+        all_model_updated = []
+        all_window_count = []
+        all_window_size = []
+        all_stride = []
+        all_loss_threshold = []
+        all_ekf_predictions = []
+        all_ekf_covariances = []
+        all_ekf_innovations = []  # New list for innovations
+        all_ekf_kalman_gains = []  # New list for Kalman gains
+        all_ekf_kalman_gain_times_innovation = []  # New list for K*y
+        all_ekf_y_s_inv_y = []  # New list for y*(S^-1)*y
+        all_pre_ekf_losses = []
+        all_window_labels = []
+        
+        # Collect results from each trajectory
+        for result in results_list:
+            all_window_losses.append(result["window_losses"])
+            all_window_covariances.append(result["window_covariances"])
+            all_window_eta_values.append(result["window_eta_values"])
+            all_window_updates.append(result["window_updates"])
+            all_drift_detected.append(result["drift_detected_count"])
+            all_model_updated.append(result["model_updated_count"])
+            all_window_count.append(result["window_count"])
+            all_window_size.append(result["window_size"])
+            all_stride.append(result["stride"])
+            all_loss_threshold.append(result["loss_threshold"])
+            all_ekf_predictions.append(result["ekf_predictions"])
+            all_ekf_covariances.append(result["ekf_covariances"])
+            all_ekf_innovations.append(result["ekf_innovations"])  # Collect innovations
+            all_ekf_kalman_gains.append(result["ekf_kalman_gains"])
+            all_ekf_kalman_gain_times_innovation.append(result["ekf_kalman_gain_times_innovation"])
+            all_ekf_y_s_inv_y.append(result["ekf_y_s_inv_y"])  # Collect y*(S^-1)*y
+            all_pre_ekf_losses.append(result["pre_ekf_losses"])
+            all_window_labels.append(result["window_labels"])
+        
+        # Average numerical results
+        avg_window_losses = np.mean(all_window_losses, axis=0)
+        avg_window_covariances = np.mean(all_window_covariances, axis=0)
+        avg_window_eta_values = all_window_eta_values[0]  # Should be same for all trajectories
+        avg_window_updates = np.mean(all_window_updates, axis=0)
+        avg_drift_detected = np.mean(all_drift_detected)
+        avg_model_updated = np.mean(all_model_updated)
+        avg_pre_ekf_losses = np.mean(all_pre_ekf_losses, axis=0)
+        
+        # Average innovations - handle nested structure
+        avg_ekf_innovations = []
+        for window_idx in range(len(all_ekf_innovations[0])):  # For each window
+            window_innovations = []
+            for step_idx in range(len(all_ekf_innovations[0][window_idx])):  # For each step
+                step_innovations = []
+                for source_idx in range(len(all_ekf_innovations[0][window_idx][step_idx])):  # For each source
+                    innovations = [traj[window_idx][step_idx][source_idx] for traj in all_ekf_innovations]
+                    step_innovations.append(np.mean(innovations))
+                window_innovations.append(step_innovations)
+            avg_ekf_innovations.append(window_innovations)
+        
+        # Average Kalman gains - handle nested structure
+        avg_ekf_kalman_gains = []
+        for window_idx in range(len(all_ekf_kalman_gains[0])):  # For each window
+            window_kalman_gains = []
+            for step_idx in range(len(all_ekf_kalman_gains[0][window_idx])):  # For each step
+                step_kalman_gains = []
+                for source_idx in range(len(all_ekf_kalman_gains[0][window_idx][step_idx])):  # For each source
+                    kalman_gains = [traj[window_idx][step_idx][source_idx] for traj in all_ekf_kalman_gains]
+                    step_kalman_gains.append(np.mean(kalman_gains))
+                window_kalman_gains.append(step_kalman_gains)
+            avg_ekf_kalman_gains.append(window_kalman_gains)
+        
+        # Average K*y - handle nested structure
+        avg_ekf_kalman_gain_times_innovation = []
+        for window_idx in range(len(all_ekf_kalman_gain_times_innovation[0])):  # For each window
+            window_k_times_y = []
+            for step_idx in range(len(all_ekf_kalman_gain_times_innovation[0][window_idx])):  # For each step
+                step_k_times_y = []
+                for source_idx in range(len(all_ekf_kalman_gain_times_innovation[0][window_idx][step_idx])):  # For each source
+                    k_times_y = [traj[window_idx][step_idx][source_idx] for traj in all_ekf_kalman_gain_times_innovation]
+                    step_k_times_y.append(np.mean(k_times_y))
+                window_k_times_y.append(step_k_times_y)
+            avg_ekf_kalman_gain_times_innovation.append(window_k_times_y)
+        
+        # Average y*(S^-1)*y - handle nested structure
+        avg_ekf_y_s_inv_y = []
+        for window_idx in range(len(all_ekf_y_s_inv_y[0])):  # For each window
+            window_y_s_inv_y = []
+            for step_idx in range(len(all_ekf_y_s_inv_y[0][window_idx])):  # For each step
+                step_y_s_inv_y = []
+                for source_idx in range(len(all_ekf_y_s_inv_y[0][window_idx][step_idx])):  # For each source
+                    y_s_inv_y = [traj[window_idx][step_idx][source_idx] for traj in all_ekf_y_s_inv_y]
+                    step_y_s_inv_y.append(np.mean(y_s_inv_y))
+                window_y_s_inv_y.append(step_y_s_inv_y)
+            avg_ekf_y_s_inv_y.append(window_y_s_inv_y)
+        
+        return {
+            "window_losses": avg_window_losses.tolist(),
+            "window_covariances": avg_window_covariances.tolist(),
+            "window_eta_values": avg_window_eta_values,
+            "window_updates": avg_window_updates.tolist(),
+            "drift_detected_count": float(avg_drift_detected),
+            "model_updated_count": float(avg_model_updated),
+            "window_count": all_window_count[0],  # Should be same for all trajectories
+            "window_size": all_window_size[0],    # Should be same for all trajectories
+            "stride": all_stride[0],              # Should be same for all trajectories
+            "loss_threshold": all_loss_threshold[0],  # Should be same for all trajectories
+            "ekf_predictions": all_ekf_predictions[0],  # Take first trajectory's predictions
+            "ekf_covariances": all_ekf_covariances[0],  # Take first trajectory's covariances
+            "ekf_innovations": avg_ekf_innovations,  # Add averaged innovations
+            "ekf_kalman_gains": avg_ekf_kalman_gains,  # Add averaged Kalman gains
+            "ekf_kalman_gain_times_innovation": avg_ekf_kalman_gain_times_innovation,  # Add averaged K*y
+            "ekf_y_s_inv_y": avg_ekf_y_s_inv_y,  # Add averaged y*(S^-1)*y
+            "pre_ekf_losses": avg_pre_ekf_losses.tolist(),
+            "window_labels": all_window_labels[0]  # Take first trajectory's labels
+        }

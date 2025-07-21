@@ -55,7 +55,7 @@ class SineAccelStateModel(StateEvolutionModel):
         
         # Return in same units as input (degrees)
         #result = x + np.radians(delta)
-        result = x + delta
+        result = 0.99*x + delta
         
         logger.debug(f"SineAccel state transition: {x} -> {result}")
         return result

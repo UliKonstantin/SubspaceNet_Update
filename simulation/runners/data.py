@@ -239,7 +239,7 @@ class TrajectoryDataHandler:
                     noise = torch.randn(num_sources) * sa_noise_sd
                     
                     # Update angle
-                    theta_new = theta_prev + delta + noise
+                    theta_new = 0.99*theta_prev + delta + noise
                     
                     # Ensure angles stay within bounds
                     angle_trajectories[i, t, :num_sources] = torch.clamp(
@@ -247,7 +247,6 @@ class TrajectoryDataHandler:
                         min=angle_min, 
                         max=angle_max
                     )
-                    
             elif trajectory_type == TrajectoryType.MULT_NOISE_NONLINEAR:
                 # Start with random angles
                 angle_trajectories[i, 0, :num_sources] = torch.FloatTensor(
@@ -952,7 +951,7 @@ class OnlineLearningTrajectoryGenerator:
             noise = (torch.randn(self.current_M) * sa_noise_sd).numpy()
             
             # Update angle (all in degrees)
-            next_angles = self.last_true_angles + delta + noise
+            next_angles = 0.99*self.last_true_angles + delta + noise
             
             # Ensure angles stay within bounds
             self.last_true_angles = np.clip(next_angles, self.angle_min, self.angle_max)
