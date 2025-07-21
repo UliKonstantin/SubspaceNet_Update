@@ -1,4 +1,4 @@
 [submodule "DCD_MUSIC"]
 	path = DCD_MUSIC
-	url = https://github.com/aradgast/DCD-MUSIC.git
+	url = https://github.com/UliKonstantin/DCD-MUSIC.git
 	branch = new_loss
