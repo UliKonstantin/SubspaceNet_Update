@@ -60,7 +60,7 @@ def run_command(config: str, output: Optional[str], override: List[str], scenari
         elif scenario == 'evaluation':
             results = sim.run_evaluation()
         elif scenario == 'online_learning':
-            results = sim.run_online_learning()
+            results = sim.execute_online_learning()
         elif scenario == 'full':
             results = sim.run()  # Run the complete pipeline with all components
         
@@ -343,7 +343,7 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
                 results = sim.run()
             elif mode == 'online_learning':
                 logger.info("Running online learning simulation")
-                results = sim.run_online_learning()
+                results = sim.execute_online_learning()
             else:
                 logger.info("Running training-only simulation")
                 results = sim.run_training()
@@ -359,8 +359,13 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
 @override_option
 @click.option('--model', '-m', type=str, required=True, help='Path to the trained model for online learning')
 @click.option('--scenario', '-s', type=str, help='Run scenario (4d_grid for eta/process_noise/kalman_noise grid search)')
-@click.option('--values', '-v', multiple=True, type=float, help='Values to test in scenario (can be used multiple times)')
-def online_learning_command(config: str, output: Optional[str], override: List[str], model: str, scenario: Optional[str], values: List[float]):
+@click.option('--eta-values', multiple=True, type=float, help='Values for eta.')
+@click.option('--process-noise-values', multiple=True, type=float, help='Values for trajectory process noise.')
+@click.option('--kf-process-noise-values', multiple=True, type=float, help='Values for Kalman filter process noise std dev.')
+@click.option('--kf-measurement-noise-values', multiple=True, type=float, help='Values for Kalman filter measurement noise std dev.')
+def online_learning_command(config: str, output: Optional[str], override: List[str], model: str, scenario: Optional[str], 
+                            eta_values: List[float], process_noise_values: List[float], 
+                            kf_process_noise_values: List[float], kf_measurement_noise_values: List[float]):
     """Run online learning with a pre-trained model."""
     try:
         # Use config_handler to set up configuration and components
@@ -381,20 +386,14 @@ def online_learning_command(config: str, output: Optional[str], override: List[s
         if scenario and scenario.lower() == "4d_grid":
             logger.info("Running 4D grid search on eta, process_noise, kalman_filter process_noise_std_dev, and measurement_noise_std_dev")
             
-            # Define default ranges for the 4 parameters
-            # If values are provided via command line, split them into 4 groups
-            if values and len(values) >= 4:
-                # Assume values are provided in groups of equal length for each parameter
-                n_values_per_param = len(values) // 4
-                eta_values = values[:n_values_per_param]
-                process_noise_values = values[n_values_per_param:2*n_values_per_param]
-                kf_process_noise_values = values[2*n_values_per_param:3*n_values_per_param]
-                kf_measurement_noise_values = values[3*n_values_per_param:4*n_values_per_param]
-            else:
-                # Use default ranges
+            # Use provided values or fall back to defaults
+            if not eta_values:
                 eta_values = [0.0, 0.01, 0.015, 0.02, 0.03]
+            if not process_noise_values:
                 process_noise_values = [0.001, 0.01, 0.1]
+            if not kf_process_noise_values:
                 kf_process_noise_values = [0.001, 0.01, 0.1]
+            if not kf_measurement_noise_values:
                 kf_measurement_noise_values = [0.001, 0.01, 0.1]
             
             logger.info(f"Eta values: {eta_values}")
@@ -402,20 +401,20 @@ def online_learning_command(config: str, output: Optional[str], override: List[s
             logger.info(f"Kalman filter process noise std dev values: {kf_process_noise_values}")
             logger.info(f"Kalman filter measurement noise std dev values: {kf_measurement_noise_values}")
             
-            # 4D sweep over all combinations
+            # 4D sweep over all combinations - restructured to run eta last
             scenario_results = {}
             total_combinations = len(eta_values) * len(process_noise_values) * len(kf_process_noise_values) * len(kf_measurement_noise_values)
             combination_count = 0
             
-            for eta in eta_values:
-                scenario_results[eta] = {}
-                for proc_noise in process_noise_values:
-                    scenario_results[eta][proc_noise] = {}
-                    for kf_proc_noise in kf_process_noise_values:
-                        scenario_results[eta][proc_noise][kf_proc_noise] = {}
-                        for kf_meas_noise in kf_measurement_noise_values:
+            for proc_noise in process_noise_values:
+                scenario_results[proc_noise] = {}
+                for kf_proc_noise in kf_process_noise_values:
+                    scenario_results[proc_noise][kf_proc_noise] = {}
+                    for kf_meas_noise in kf_measurement_noise_values:
+                        scenario_results[proc_noise][kf_proc_noise][kf_meas_noise] = {}
+                        for eta in eta_values:
                             combination_count += 1
-                            logger.info(f"Online learning combination {combination_count}/{total_combinations}: eta={eta}, process_noise={proc_noise}, kf_process_noise={kf_proc_noise}, kf_measurement_noise={kf_meas_noise}")
+                            logger.info(f"Online learning combination {combination_count}/{total_combinations}: proc_noise={proc_noise}, kf_process_noise={kf_proc_noise}, kf_measurement_noise={kf_meas_noise}, eta={eta}")
                             
                             # Create overrides for all 4 parameters
                             grid_overrides = [
@@ -437,11 +436,11 @@ def online_learning_command(config: str, output: Optional[str], override: List[s
                                 components=components,
                                 config=grid_modified_config,
                                 sweep_param="4d_grid",
-                                sweep_value=(eta, proc_noise, kf_proc_noise, kf_meas_noise)
+                                sweep_value=(proc_noise, kf_proc_noise, kf_meas_noise, eta)
                             )
                             
                             # Create output directory with descriptive name
-                            grid_output_dir = output_dir / f"4d_grid_eta{eta}_pn{proc_noise}_kf_pn{kf_proc_noise}_kf_mn{kf_meas_noise}"
+                            grid_output_dir = output_dir / f"4d_grid_pn{proc_noise}_kf_pn{kf_proc_noise}_kf_mn{kf_meas_noise}_eta{eta}"
                             
                             # Create a new simulation with the modified config and updated components
                             scenario_sim = Simulation(
@@ -451,8 +450,8 @@ def online_learning_command(config: str, output: Optional[str], override: List[s
                             )
                             
                             # Run online learning with this configuration
-                            result = scenario_sim.run_online_learning()
-                            scenario_results[eta][proc_noise][kf_proc_noise][kf_meas_noise] = result
+                            result = scenario_sim.execute_online_learning()
+                            scenario_results[proc_noise][kf_proc_noise][kf_meas_noise][eta] = result
                             
                             logger.info(f"Completed combination {combination_count}/{total_combinations}")
             
@@ -464,17 +463,15 @@ def online_learning_command(config: str, output: Optional[str], override: List[s
             )
             logger.info(f"4D grid search completed with {total_results} combinations")
             
-            # Log summary of results
-            logger.info("=== 4D GRID SEARCH RESULTS SUMMARY ===")
-            for eta in sorted(scenario_results.keys()):
-                for proc_noise in sorted(scenario_results[eta].keys()):
-                    for kf_proc_noise in sorted(scenario_results[eta][proc_noise].keys()):
-                        for kf_meas_noise in sorted(scenario_results[eta][proc_noise][kf_proc_noise].keys()):
-                            result = scenario_results[eta][proc_noise][kf_proc_noise][kf_meas_noise]
-                            if 'online_learning_loss' in result:
-                                logger.info(f"  eta={eta:6.3f}, proc_noise={proc_noise:6.3f}, kf_proc_noise={kf_proc_noise:6.3f}, kf_meas_noise={kf_meas_noise:6.3f} => Online Learning Loss: {result['online_learning_loss']:.6f}")
-                            else:
-                                logger.info(f"  eta={eta:6.3f}, proc_noise={proc_noise:6.3f}, kf_proc_noise={kf_proc_noise:6.3f}, kf_meas_noise={kf_meas_noise:6.3f} => No online learning loss recorded")
+            # Generate eta comparison plots
+            try:
+                from utils.plotting import plot_eta_comparison_4d_grid
+                logger.info("Starting eta comparison plotting...")
+                saved_plots = plot_eta_comparison_4d_grid(scenario_results, output_dir)
+                logger.info(f"Eta comparison plotting completed: {len(saved_plots)} plots saved")
+            except Exception as e:
+                logger.error(f"Error during eta comparison plotting: {e}")
+                logger.debug("Plotting error details:", exc_info=True)
             
             logger.info("4D grid search completed successfully")
             
@@ -483,7 +480,7 @@ def online_learning_command(config: str, output: Optional[str], override: List[s
             sim = Simulation(modified_config, components, output_dir)
             
             # Run online learning scenario
-            results = sim.run_online_learning()
+            results = sim.execute_online_learning()
             
             if results.get("status") == "error":
                 logger.error(f"Online learning failed: {results.get('message')}")

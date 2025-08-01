@@ -50,13 +50,14 @@ class SineAccelStateModel(StateEvolutionModel):
         # Convert to radians for trigonometric function
         #x_rad = np.radians(x) if isinstance(x, (int, float)) else np.radians(x.copy())
         x_rad = x
+        x_deg = x_rad * 180/np.pi
         # Calculate acceleration term
         delta = (self.omega0 + self.kappa * np.sin(x_rad)) * self.time_step
         
         # Return in same units as input (degrees)
         #result = x + np.radians(delta)
-        result = 0.99*x + delta
-        
+        result_deg = 0.99*x_deg + delta
+        result = np.radians(result_deg) # Convert back to radians
         logger.debug(f"SineAccel state transition: {x} -> {result}")
         return result
     
@@ -76,7 +77,7 @@ class SineAccelStateModel(StateEvolutionModel):
         # Calculate the derivative
         # Note: need to account for degrees->radians conversion in the derivative
         #jacobian = 1 + self.kappa * np.cos(x_rad) * self.time_step * np.pi/180.0
-        jacobian = 1 + self.kappa * np.cos(x_rad) * self.time_step
+        jacobian = 0.99 + self.kappa * np.cos(x_rad) * self.time_step
         logger.debug(f"SineAccel Jacobian at x={x}: {jacobian}")
         return jacobian
     

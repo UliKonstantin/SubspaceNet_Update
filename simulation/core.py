@@ -24,6 +24,7 @@ from config.schema import Config
 from .runners.data import TrajectoryDataHandler
 from .runners.training import Trainer, TrainingConfig, TrajectoryTrainer
 from .runners.evaluation import Evaluator
+from .runners.Online_learning import OnlineLearning
 from simulation.kalman_filter import KalmanFilter1D, BatchKalmanFilter1D, BatchExtendedKalmanFilter1D
 from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
 from DCD_MUSIC.src.signal_creation import Samples
@@ -82,7 +83,7 @@ class Simulation:
         Run a single simulation with all components (legacy method).
         
         This method runs all components in sequence: training, evaluation, and online learning.
-        For more focused execution, use run_training, run_evaluation, or run_online_learning.
+        For more focused execution, use run_training, run_evaluation, or execute_online_learning.
         
         Returns:
             Dict containing simulation results.
@@ -106,7 +107,7 @@ class Simulation:
                     
         # Run online learning if enabled
         if hasattr(self.config, 'online_learning') and getattr(self.config.online_learning, 'enabled', False):
-            online_results = self.run_online_learning()
+            online_results = self.execute_online_learning()
             # Merge results
             for key, value in online_results.items():
                 if key != "status":  # Don't overwrite status from training
@@ -228,9 +229,9 @@ class Simulation:
             logger.exception(f"Error running evaluation: {e}")
             return {"status": "error", "message": str(e), "exception": type(e).__name__}
     
-    def run_online_learning(self) -> Dict[str, Any]:
+    def execute_online_learning(self) -> Dict[str, Any]:
         """
-        Run the online learning pipeline.
+        Execute the online learning pipeline.
         
         This method focuses on online model adaptation with streaming data.
         
@@ -240,7 +241,7 @@ class Simulation:
         logger.info("Starting online learning pipeline")
         
         try:
-                        # Load model from path if configured
+            # Load model from path if configured
             if self.config.simulation.load_model:
                 if hasattr(self.config.simulation, 'model_path') and self.config.simulation.model_path:
                     model_path = Path(self.config.simulation.model_path)
@@ -262,13 +263,22 @@ class Simulation:
                     logger.error("No model available for online learning")
                     return {"status": "error", "message": "No model available for online learning"}
             
-            # Run online learning pipeline over multiple trajectories and average results.
-            self._run_online_learning()
+            # Create OnlineLearning handler and run the pipeline
+            online_learning_handler = OnlineLearning(
+                config=self.config,
+                system_model=self.system_model,
+                trained_model=self.trained_model,
+                output_dir=self.output_dir,
+                results=self.results
+            )
+            
+            # Run online learning pipeline
+            result = online_learning_handler.run_online_learning()
             
             # Save results
             self._save_results()
             
-            return {"status": "success", "online_learning_results": self.results.get("online_learning", {})}
+            return result
             
         except Exception as e:
             logger.exception(f"Error running online learning: {e}")
@@ -1264,49 +1274,51 @@ class Simulation:
             logger.error(f"Failed to load or apply model weights from {model_path}: {load_err}")
             return False, f"Error during model loading: {load_err}" 
 
-    def _save_model_state(self, model, model_type=None):
-        """
-        Save model state to a timestamped file in the checkpoints directory.
-        
-        Args:
-            model: Model to save
-            model_type: Type of model for filename (uses config if None)
-            
-        Returns:
-            Path to saved model or None if save failed
-        """
-        if model is None:
-            logger.warning("Cannot save model: model is None")
-            return None
-        
-        model_save_dir = self.output_dir / "checkpoints"
-        model_save_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Determine model type from config if not provided
-        if model_type is None:
-            model_type = self.config.model.type
-        
-        model_save_path = model_save_dir / f"saved_{model_type}_{timestamp}.pt"
-        
-        logger.info(f"Saving model to {model_save_path}")
-        
-        # Save only the state_dict, not the entire model
-        try:
-            torch.save(model.state_dict(), model_save_path)
-            logger.info(f"Model saved successfully to {model_save_path}")
-            return model_save_path
-        except Exception as e:
-            logger.error(f"Failed to save model: {e}")
-            return None
+    # MOVED TO OnlineLearning class in simulation/runners/Online_learning.py
+    # def _save_model_state(self, model, model_type=None):
+    #     """
+    #     Save model state to a timestamped file in the checkpoints directory.
+    #     
+    #     Args:
+    #         model: Model to save
+    #         model_type: Type of model for filename (uses config if None)
+    #         
+    #     Returns:
+    #         Path to saved model or None if save failed
+    #     """
+    #     if model is None:
+    #         logger.warning("Cannot save model: model is None")
+    #         return None
+    #     
+    #     model_save_dir = self.output_dir / "checkpoints"
+    #     model_save_dir.mkdir(parents=True, exist_ok=True)
+    #     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    #     
+    #     # Determine model type from config if not provided
+    #     if model_type is None:
+    #         model_type = self.config.model.type
+    #     
+    #     model_save_path = model_save_dir / f"saved_{model_type}_{timestamp}.pt"
+    #     
+    #     logger.info(f"Saving model to {model_save_path}")
+    #     
+    #     # Save only the state_dict, not the entire model
+    #     try:
+    #         torch.save(model.state_dict(), model_save_path)
+    #         logger.info(f"Model saved successfully to {model_save_path}")
+    #         return model_save_path
+    #     except Exception as e:
+    #         logger.error(f"Failed to save model: {e}")
+    #         return None
 
-    def _run_single_trajectory_online_learning(self, trajectory_idx: int = 0) -> Dict[str, Any]:
-        """
-        Run online learning pipeline for a single trajectory.
-        """
-        try:
-            # Access online learning configuration
-            online_config = self.config.online_learning
+    # MOVED TO OnlineLearning class in simulation/runners/Online_learning.py
+    # def _run_single_trajectory_online_learning(self, trajectory_idx: int = 0) -> Dict[str, Any]:
+    #     """
+    #     Run online learning pipeline for a single trajectory.
+    #     """
+    #     try:
+    #         # Access online learning configuration
+    #         online_config = self.config.online_learning
             
             # Check if model is available for online learning
             if self.trained_model is None:
@@ -1496,89 +1508,91 @@ class Simulation:
                 }
             }
             
-        except Exception as e:
-            logger.exception(f"Error during online learning: {e}")
-            return {"status": "error", "message": str(e), "exception": type(e).__name__}
+    #     except Exception as e:
+    #         logger.exception(f"Error during online learning: {e}")
+    #         return {"status": "error", "message": str(e), "exception": type(e).__name__}
 
-    def _run_online_learning(self) -> None:
-        """
-        Run online learning pipeline over multiple trajectories and average results.
-        
-        This method runs the online learning process over a dataset of trajectories and
-        averages the results for more robust analysis.
-        """
-        try:
-            # Get dataset size from config
-            online_config = self.config.online_learning
-            dataset_size = getattr(online_config, 'dataset_size', 1)
-            
-            logger.info(f"Starting online learning over {dataset_size} trajectories")
-            
-            all_results = []
-            
-            # Run online learning for each trajectory
-            for trajectory_idx in range(dataset_size):
-                logger.info(f"Processing trajectory {trajectory_idx + 1}/{dataset_size}")
-                
-                # Reset eta to initial value for each new trajectory
-                initial_eta = 0
-                logger.info(f"Resetting eta to initial value {initial_eta:.4f} for trajectory {trajectory_idx + 1}")
-                self.system_model.params.eta = initial_eta
-                
-                # Reset the system model's distance noise and eta scaling
-                self.system_model.eta = self.system_model._SystemModel__set_eta()
-                if not getattr(self.system_model.params, 'nominal', True):
-                    self.system_model.location_noise = self.system_model.get_distance_noise(True)
-                
-                # Run single trajectory online learning
-                trajectory_result = self._run_single_trajectory_online_learning(trajectory_idx)
-                
-                # Plot single trajectory results
-                if trajectory_result.get("status") != "error":
-                    self._plot_single_trajectory_results(trajectory_result["online_learning_results"], trajectory_idx)
-                
-                if trajectory_result.get("status") == "error":
-                    logger.error(f"Error in trajectory {trajectory_idx + 1}: {trajectory_result.get('message')}")
-                    continue
-                    
-                all_results.append(trajectory_result["online_learning_results"])
-            
-            if not all_results:
-                logger.error("No successful trajectory results")
-                self.results["online_learning_error"] = "No successful trajectory results"
-                return
-                
-            # Average results across all trajectories
-            averaged_results = self._average_online_learning_results(all_results)
-            
-            # Store averaged results
-            self.results["online_learning"] = averaged_results
-            
-            # Plot averaged results
-            frobenius_norms = self._calculate_frobenius_norm_per_window(averaged_results["ekf_covariances"])
-            self._plot_online_learning_results(
-                window_losses=averaged_results["window_losses"],
-                window_covariances=averaged_results["window_covariances"],
-                window_eta_values=averaged_results["window_eta_values"],
-                window_updates=averaged_results["window_updates"],
-                window_pre_ekf_losses=averaged_results["pre_ekf_losses"],
-                window_labels=averaged_results["window_labels"],
-                ekf_covariances=averaged_results["ekf_covariances"],
-                frobenius_norms=frobenius_norms,
-                ekf_kalman_gains=averaged_results["ekf_kalman_gains"],
-                ekf_kalman_gain_times_innovation=averaged_results["ekf_kalman_gain_times_innovation"],
-                ekf_y_s_inv_y=averaged_results["ekf_y_s_inv_y"]
-            )
-            
-            logger.info(f"Online learning completed over {dataset_size} trajectories: "
-                       f"{averaged_results['drift_detected_count']:.1f} avg drifts detected, "
-                       f"{averaged_results['model_updated_count']:.1f} avg model updates")
-            
-        except Exception as e:
-            logger.exception(f"Error during multi-trajectory online learning: {e}")
-            self.results["online_learning_error"] = str(e)
+    # MOVED TO OnlineLearning class in simulation/runners/Online_learning.py
+    # def _run_online_learning(self) -> None:
+    #     """
+    #     Run online learning pipeline over multiple trajectories and average results.
+    #     
+    #     This method runs the online learning process over a dataset of trajectories and
+    #     averages the results for more robust analysis.
+    #     """
+    #     try:
+    #         # Get dataset size from config
+    #         online_config = self.config.online_learning
+    #         dataset_size = getattr(online_config, 'dataset_size', 1)
+    #         
+    #         logger.info(f"Starting online learning over {dataset_size} trajectories")
+    #         
+    #         all_results = []
+    #         
+    #         # Run online learning for each trajectory
+    #         for trajectory_idx in range(dataset_size):
+    #             logger.info(f"Processing trajectory {trajectory_idx + 1}/{dataset_size}")
+    #             
+    #             # Reset eta to initial value for each new trajectory
+    #             initial_eta = 0
+    #             logger.info(f"Resetting eta to initial value {initial_eta:.4f} for trajectory {trajectory_idx + 1}")
+    #             self.system_model.params.eta = initial_eta
+    #             
+    #             # Reset the system model's distance noise and eta scaling
+    #             self.system_model.eta = self.system_model._SystemModel__set_eta()
+    #             if not getattr(self.system_model.params, 'nominal', True):
+    #                 self.system_model.location_noise = self.system_model.get_distance_noise(True)
+    #             
+    #             # Run single trajectory online learning
+    #             trajectory_result = self._run_single_trajectory_online_learning(trajectory_idx)
+    #             
+    #             # Plot single trajectory results
+    #             if trajectory_result.get("status") != "error":
+    #                 self._plot_single_trajectory_results(trajectory_result["online_learning_results"], trajectory_idx)
+    #             
+    #             if trajectory_result.get("status") == "error":
+    #                 logger.error(f"Error in trajectory {trajectory_idx + 1}: {trajectory_result.get('message')}")
+    #                 continue
+    #                 
+    #             all_results.append(trajectory_result["online_learning_results"])
+    #         
+    #         if not all_results:
+    #             logger.error("No successful trajectory results")
+    #             self.results["online_learning_error"] = "No successful trajectory results"
+    #             return
+    #             
+    #         # Average results across all trajectories
+    #         averaged_results = self._average_online_learning_results(all_results)
+    #         
+    #         # Store averaged results
+    #         self.results["online_learning"] = averaged_results
+    #         
+    #         # Plot averaged results
+    #         frobenius_norms = self._calculate_frobenius_norm_per_window(averaged_results["ekf_covariances"])
+    #         self._plot_online_learning_results(
+    #             window_losses=averaged_results["window_losses"],
+    #             window_covariances=averaged_results["window_covariances"],
+    #             window_eta_values=averaged_results["window_eta_values"],
+    #             window_updates=averaged_results["window_updates"],
+    #             window_pre_ekf_losses=averaged_results["pre_ekf_losses"],
+    #             window_labels=averaged_results["window_labels"],
+    #             ekf_covariances=averaged_results["ekf_covariances"],
+    #             frobenius_norms=frobenius_norms,
+    #             ekf_kalman_gains=averaged_results["ekf_kalman_gains"],
+    #             ekf_kalman_gain_times_innovation=averaged_results["ekf_kalman_gain_times_innovation"],
+    #             ekf_y_s_inv_y=averaged_results["ekf_y_s_inv_y"]
+    #         )
+    #         
+    #         logger.info(f"Online learning completed over {dataset_size} trajectories: "
+    #                    f"{averaged_results['drift_detected_count']:.1f} avg drifts detected, "
+    #                    f"{averaged_results['model_updated_count']:.1f} avg model updates")
+    #         
+    #     except Exception as e:
+    #         logger.exception(f"Error during multi-trajectory online learning: {e}")
+    #         self.results["online_learning_error"] = str(e)
 
-    def _get_optimal_permutation(self, predictions: np.ndarray, true_angles: np.ndarray) -> np.ndarray:
+    # MOVED TO OnlineLearning class in simulation/runners/Online_learning.py
+    # def _get_optimal_permutation(self, predictions: np.ndarray, true_angles: np.ndarray) -> np.ndarray:
         """
         Calculate optimal permutation between predictions and true angles using RMSPE.
         
@@ -1613,8 +1627,9 @@ class Simulation:
         optimal_perm = torch.tensor(perm, dtype=torch.long, device=device)[min_idx]
         return optimal_perm.cpu().numpy()
 
-    def _evaluate_window(self, window_time_series, window_sources_num, window_labels, trajectory_idx: int = 0, window_idx: int = 0, 
-                         is_first_window: bool = True, last_ekf_predictions: List = None, last_ekf_covariances: List = None):
+    # MOVED TO OnlineLearning class in simulation/runners/Online_learning.py
+    # def _evaluate_window(self, window_time_series, window_sources_num, window_labels, trajectory_idx: int = 0, window_idx: int = 0, 
+    #                      is_first_window: bool = True, last_ekf_predictions: List = None, last_ekf_covariances: List = None):
         """
         Calculate loss on a window of trajectory data using Extended Kalman Filter.
         
@@ -1783,11 +1798,10 @@ class Simulation:
                         step_kalman_gain_times_innovation = []  # New list for this step's K*y
                         step_y_s_inv_y = []  # New list for this step's y*(S^-1)*y
                         for i in range(num_sources_this_step):
-                            # Predict
-                            predicted_angle = ekf_filters[i].predict()
-                            
-                            # Update with measurement
-                            updated_angle, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y = ekf_filters[i].update(angles_pred_np.flatten()[:num_sources_this_step][i])
+                            # Predict and update in one step
+                            predicted_angle, updated_angle, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y = ekf_filters[i].predict_and_update(
+                                measurement=angles_pred_np.flatten()[:num_sources_this_step][i]
+                            )
                             
                             # Store prediction, covariance and innovation
                             step_predictions.append(updated_angle)
@@ -1863,16 +1877,17 @@ class Simulation:
             logger.warning("No valid steps with sources found in the window for loss calculation.")
             return float('inf'), float('nan'), [], [], float('inf'), [], [], [], []  # Include pre-EKF loss in return
 
-    def _log_window_summary(
-        self,
-        avg_pre_ekf_loss: float,
-        avg_loss: float,
-        avg_window_cov: float,
-        current_eta: float,
-        is_near_field: bool,
-        trajectory_idx: int = 0,
-        window_idx: int = 0
-    ) -> None:
+    # MOVED TO OnlineLearning class in simulation/runners/Online_learning.py
+    # def _log_window_summary(
+    #     self,
+    #     avg_pre_ekf_loss: float,
+    #     avg_loss: float,
+    #     avg_window_cov: float,
+    #     current_eta: float,
+    #     is_near_field: bool,
+    #     trajectory_idx: int = 0,
+    #     window_idx: int = 0
+    # ) -> None:
         """
         Log window summary results in a columnar format similar to evaluation results.
         
@@ -1927,7 +1942,8 @@ class Simulation:
             print(f"{'Mode':<20} {'NEAR FIELD':<20} {'(No SubspaceNet comparison)':<25} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
             print("-" * 100)
 
-    def _plot_online_learning_results(self, window_losses, window_covariances, window_eta_values, window_updates, window_pre_ekf_losses, window_labels, ekf_covariances, frobenius_norms, ekf_kalman_gains=None, ekf_kalman_gain_times_innovation=None, ekf_y_s_inv_y=None):
+    # MOVED TO OnlineLearning class in simulation/runners/Online_learning.py
+    # def _plot_online_learning_results(self, window_losses, window_covariances, window_eta_values, window_updates, window_pre_ekf_losses, window_labels, ekf_covariances, frobenius_norms, ekf_kalman_gains=None, ekf_kalman_gain_times_innovation=None, ekf_y_s_inv_y=None):
         """
         Plot online learning results including plots as a function of eta.
         """
@@ -2176,7 +2192,8 @@ class Simulation:
             logger.error(f"Error plotting online learning results: {e}")
             logger.debug("Error details:", exc_info=True)
     
-    def _plot_single_trajectory_results(self, trajectory_results, trajectory_idx):
+    # MOVED TO OnlineLearning class in simulation/runners/Online_learning.py
+    # def _plot_single_trajectory_results(self, trajectory_results, trajectory_idx):
         """
         Plot results for a single trajectory including loss difference and innovation.
         
@@ -2277,7 +2294,8 @@ class Simulation:
             logger.error(f"Error plotting single trajectory results for trajectory {trajectory_idx}: {e}")
             logger.debug("Error details:", exc_info=True)
     
-    def _plot_online_learning_trajectory(self, window_labels, plot_dir, timestamp):
+    # MOVED TO OnlineLearning class in simulation/runners/Online_learning.py
+    # def _plot_online_learning_trajectory(self, window_labels, plot_dir, timestamp):
         """
         Plot the full trajectory across all windows for online learning.
         
@@ -2417,273 +2435,276 @@ class Simulation:
         except Exception as e:
             logger.error(f"Error plotting online learning trajectory: {e}")
     
-    def _calculate_frobenius_norm_per_window(self, window_ekf_covariances):
-        """
-        Calculate the Frobenius norm of covariance matrices per window.
-        
-        Args:
-            window_ekf_covariances: List of covariances per window
-                                   Shape: [num_windows][num_steps_in_window][num_sources]
-                                   Each covariance is a scalar or matrix
-        
-        Returns:
-            numpy.ndarray: Frobenius norms per window, shape [num_windows, 1]
-        """
-        try:
-            import numpy as np
-            
-            frobenius_norms = []
-            
-            for window_idx, window_covs in enumerate(window_ekf_covariances):
-                window_frobenius_sum = 0.0
-                valid_steps = 0
-                
-                for step_idx, step_covs in enumerate(window_covs):
-                    if len(step_covs) > 0:  # Check if there are covariances for this step
-                        for source_idx, cov in enumerate(step_covs):
-                            if isinstance(cov, (float, int)):
-                                # Scalar covariance - treat as 1x1 matrix
-                                window_frobenius_sum += abs(cov) ** 2
-                            else:
-                                # Matrix covariance - calculate Frobenius norm
-                                if hasattr(cov, 'shape'):
-                                    window_frobenius_sum += np.sum(np.abs(cov) ** 2)
-                                else:
-                                    window_frobenius_sum += abs(cov) ** 2
-                        valid_steps += 1
-                
-                # Calculate average Frobenius norm for this window
-                if valid_steps > 0:
-                    avg_frobenius = np.sqrt(window_frobenius_sum / valid_steps)
-                else:
-                    avg_frobenius = 0.0
-                
-                frobenius_norms.append([avg_frobenius])
-            
-            return np.array(frobenius_norms)  # Shape: [num_windows, 1]
-            
-        except Exception as e:
-            logger.error(f"Error calculating Frobenius norm per window: {e}")
-            # Return zeros if calculation fails
-            num_windows = len(window_ekf_covariances)
-            return np.zeros((num_windows, 1))
+    # MOVED TO OnlineLearning class in simulation/runners/Online_learning.py
+    # def _calculate_frobenius_norm_per_window(self, window_ekf_covariances):
+    #     """
+    #     Calculate the Frobenius norm of covariance matrices per window.
+    #     
+    #     Args:
+    #         window_ekf_covariances: List of covariances per window
+    #                                Shape: [num_windows][num_steps_in_window][num_sources]
+    #                                Each covariance is a scalar or matrix
+    #     
+    #     Returns:
+    #         numpy.ndarray: Frobenius norms per window, shape [num_windows, 1]
+    #     """
+    #     try:
+    #         import numpy as np
+    #         
+    #         frobenius_norms = []
+    #         
+    #         for window_idx, window_covs in enumerate(window_ekf_covariances):
+    #             window_frobenius_sum = 0.0
+    #             valid_steps = 0
+    #             
+    #             for step_idx, step_covs in enumerate(window_covs):
+    #                 if len(step_covs) > 0:  # Check if there are covariances for this step
+    #                     for source_idx, cov in enumerate(step_covs):
+    #                         if isinstance(cov, (float, int)):
+    #                             # Scalar covariance - treat as 1x1 matrix
+    #                             window_frobenius_sum += abs(cov) ** 2
+    #                         else:
+    #                             # Matrix covariance - calculate Frobenius norm
+    #                             if hasattr(cov, 'shape'):
+    #                                 window_frobenius_sum += np.sum(np.abs(cov) ** 2)
+    #                             else:
+    #                                 window_frobenius_sum += abs(cov) ** 2
+    #                     valid_steps += 1
+    #             
+    #             # Calculate average Frobenius norm for this window
+    #             if valid_steps > 0:
+    #                 avg_frobenius = np.sqrt(window_frobenius_sum / valid_steps)
+    #             else:
+    #                 avg_frobenius = 0.0
+    #             
+    #             frobenius_norms.append([avg_frobenius])
+    #         
+    #         return np.array(frobenius_norms)  # Shape: [num_windows, 1]
+    #         
+    #     except Exception as e:
+    #         logger.error(f"Error calculating Frobenius norm per window: {e}")
+    #         # Return zeros if calculation fails
+    #         num_windows = len(window_ekf_covariances)
+    #         return np.zeros((num_windows, 1))
 
-    def _plot_frobenius_norms(self, frobenius_norms, window_eta_values, plot_dir, timestamp, exclude_first=False):
-        """
-        Plot Frobenius norms of covariance matrices per window.
-        
-        Args:
-            frobenius_norms: List of Frobenius norms per window
-            window_eta_values: List of eta values per window
-            plot_dir: Directory to save the plots
-            timestamp: Timestamp for the plot filename
-            exclude_first: Whether to exclude the first point from the plot
-        """
-        try:
-            import matplotlib.pyplot as plt
-            import numpy as np
-            
-            def set_adjusted_ylim(ax, data, padding=0.1):
-                """Helper function to set y limits excluding first point"""
-                if len(data) > 1:
-                    data_without_first = data[1:]
-                    ymin = min(data_without_first)
-                    ymax = max(data_without_first)
-                    range_y = ymax - ymin
-                    ax.set_ylim([ymin - range_y * padding, ymax + range_y * padding])
-            
-            # Find indices where eta changes
-            eta_changes = []
-            eta_values = []
-            for i in range(1, len(window_eta_values)):
-                if abs(window_eta_values[i] - window_eta_values[i-1]) > 1e-6:
-                    eta_changes.append(i)
-                    eta_values.append(window_eta_values[i])
-            
-            # Create figure for Frobenius norms
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
-            
-            # Plot Frobenius norm vs window index
-            x = np.arange(len(frobenius_norms))
-            ax1.plot(x, frobenius_norms, 'b-', marker='o', linewidth=2, markersize=6, label='Frobenius Norm')
-            
-            # Add eta change markers
-            for idx, eta in zip(eta_changes, eta_values):
-                ax1.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
-                ax1.text(idx, max(frobenius_norms[1:]), f'η={eta:.3f}', rotation=90, verticalalignment='top')
-            
-            # Set y-axis limits excluding first point if requested
-            if exclude_first:
-                set_adjusted_ylim(ax1, frobenius_norms)
-            
-            # Add labels and title
-            ax1.set_xlabel('Window Index')
-            ax1.set_ylabel('Frobenius Norm')
-            ax1.set_title('Covariance Matrix Frobenius Norm vs Window Index' + 
-                         (' (Excluding Initial Value)' if exclude_first else ''))
-            ax1.legend()
-            ax1.grid(True, alpha=0.3)
-            
-            # Plot Frobenius norm vs eta
-            ax2.plot(window_eta_values, frobenius_norms, 'b-', marker='o', linewidth=2, markersize=6, label='Frobenius Norm')
-            
-            # Add eta change markers
-            for eta in eta_values:
-                ax2.scatter([eta], [frobenius_norms[window_eta_values.index(eta)]], color='red', marker='*', s=200, zorder=5)
-                ax2.text(eta, max(frobenius_norms[1:]), f'η={eta:.3f}', rotation=90, verticalalignment='top')
-            
-            # Set y-axis limits excluding first point if requested
-            if exclude_first:
-                set_adjusted_ylim(ax2, frobenius_norms)
-            
-            # Add labels and title
-            ax2.set_xlabel('Eta Value')
-            ax2.set_ylabel('Frobenius Norm')
-            ax2.set_title('Covariance Matrix Frobenius Norm vs Eta' + 
-                         (' (Excluding Initial Value)' if exclude_first else ''))
-            ax2.legend()
-            ax2.grid(True, alpha=0.3)
-            
-            # Adjust layout and save
-            plt.tight_layout()
-            plot_path = plot_dir / f"frobenius_norms_{timestamp}.png"
-            plt.savefig(plot_path)
-            plt.close()
-            
-            logger.info(f"Frobenius norm plots saved to {plot_path}")
-            
-        except ImportError:
-            logger.warning("matplotlib not available for plotting Frobenius norms")
-        except Exception as e:
-            logger.error(f"Error plotting Frobenius norms: {e}")
+    # MOVED TO OnlineLearning class in simulation/runners/Online_learning.py
+    # def _plot_frobenius_norms(self, frobenius_norms, window_eta_values, plot_dir, timestamp, exclude_first=False):
+    #     """
+    #     Plot Frobenius norms of covariance matrices per window.
+    #     
+    #     Args:
+    #         frobenius_norms: List of Frobenius norms per window
+    #         window_eta_values: List of eta values per window
+    #         plot_dir: Directory to save the plots
+    #         timestamp: Timestamp for the plot filename
+    #         exclude_first: Whether to exclude the first point from the plot
+    #     """
+    #     try:
+    #         import matplotlib.pyplot as plt
+    #         import numpy as np
+    #         
+    #         def set_adjusted_ylim(ax, data, padding=0.1):
+    #             """Helper function to set y limits excluding first point"""
+    #             if len(data) > 1:
+    #                 data_without_first = data[1:]
+    #                 ymin = min(data_without_first)
+    #                 ymax = max(data_without_first)
+    #                 range_y = ymax - ymin
+    #                 ax.set_ylim([ymin - range_y * padding, ymax + range_y * padding])
+    #         
+    #         # Find indices where eta changes
+    #         eta_changes = []
+    #         eta_values = []
+    #         for i in range(1, len(window_eta_values)):
+    #             if abs(window_eta_values[i] - window_eta_values[i-1]) > 1e-6:
+    #                 eta_changes.append(i)
+    #                 eta_values.append(window_eta_values[i])
+    #         
+    #         # Create figure for Frobenius norms
+    #         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+    #         
+    #         # Plot Frobenius norm vs window index
+    #         x = np.arange(len(frobenius_norms))
+    #         ax1.plot(x, frobenius_norms, 'b-', marker='o', linewidth=2, markersize=6, label='Frobenius Norm')
+    #         
+    #         # Add eta change markers
+    #         for idx, eta in zip(eta_changes, eta_values):
+    #             ax1.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+    #             ax1.text(idx, max(frobenius_norms[1:]), f'η={eta:.3f}', rotation=90, verticalalignment='top')
+    #         
+    #         # Set y-axis limits excluding first point if requested
+    #         if exclude_first:
+    #             set_adjusted_ylim(ax1, frobenius_norms)
+    #         
+    #         # Add labels and title
+    #         ax1.set_xlabel('Window Index')
+    #         ax1.set_ylabel('Frobenius Norm')
+    #         ax1.set_title('Covariance Matrix Frobenius Norm vs Window Index' + 
+    #                      (' (Excluding Initial Value)' if exclude_first else ''))
+    #         ax1.legend()
+    #         ax1.grid(True, alpha=0.3)
+    #         
+    #         # Plot Frobenius norm vs eta
+    #         ax2.plot(window_eta_values, frobenius_norms, 'b-', marker='o', linewidth=2, markersize=6, label='Frobenius Norm')
+    #         
+    #         # Add eta change markers
+    #         for eta in eta_values:
+    #             ax2.scatter([eta], [frobenius_norms[window_eta_values.index(eta)]], color='red', marker='*', s=200, zorder=5)
+    #             ax2.text(eta, max(frobenius_norms[1:]), f'η={eta:.3f}', rotation=90, verticalalignment='top')
+    #         
+    #         # Set y-axis limits excluding first point if requested
+    #         if exclude_first:
+    #             set_adjusted_ylim(ax2, frobenius_norms)
+    #         
+    #         # Add labels and title
+    #         ax2.set_xlabel('Eta Value')
+    #         ax2.set_ylabel('Frobenius Norm')
+    #         ax2.set_title('Covariance Matrix Frobenius Norm vs Eta' + 
+    #                      (' (Excluding Initial Value)' if exclude_first else ''))
+    #         ax2.legend()
+    #         ax2.grid(True, alpha=0.3)
+    #         
+    #         # Adjust layout and save
+    #         plt.tight_layout()
+    #         plot_path = plot_dir / f"frobenius_norms_{timestamp}.png"
+    #         plt.savefig(plot_path)
+    #         plt.close()
+    #         
+    #         logger.info(f"Frobenius norm plots saved to {plot_path}")
+    #         
+    #     except ImportError:
+    #         logger.warning("matplotlib not available for plotting Frobenius norms")
+    #     except Exception as e:
+    #         logger.error(f"Error plotting Frobenius norms: {e}")
 
-    def _average_online_learning_results(self, results_list):
-        """
-        Average results across multiple trajectories.
-        
-        Args:
-            results_list: List of dictionaries containing results from each trajectory
-        
-        Returns:
-            Dictionary with averaged results
-        """
-        import numpy as np
-            
-        # Initialize lists to store results from all trajectories
-        all_window_losses = []
-        all_window_covariances = []
-        all_window_eta_values = []
-        all_window_updates = []
-        all_drift_detected = []
-        all_model_updated = []
-        all_window_count = []
-        all_window_size = []
-        all_stride = []
-        all_loss_threshold = []
-        all_ekf_predictions = []
-        all_ekf_covariances = []
-        all_ekf_innovations = []  # New list for innovations
-        all_ekf_kalman_gains = []  # New list for Kalman gains
-        all_ekf_kalman_gain_times_innovation = []  # New list for K*y
-        all_ekf_y_s_inv_y = []  # New list for y*(S^-1)*y
-        all_pre_ekf_losses = []
-        all_window_labels = []
-        
-        # Collect results from each trajectory
-        for result in results_list:
-            all_window_losses.append(result["window_losses"])
-            all_window_covariances.append(result["window_covariances"])
-            all_window_eta_values.append(result["window_eta_values"])
-            all_window_updates.append(result["window_updates"])
-            all_drift_detected.append(result["drift_detected_count"])
-            all_model_updated.append(result["model_updated_count"])
-            all_window_count.append(result["window_count"])
-            all_window_size.append(result["window_size"])
-            all_stride.append(result["stride"])
-            all_loss_threshold.append(result["loss_threshold"])
-            all_ekf_predictions.append(result["ekf_predictions"])
-            all_ekf_covariances.append(result["ekf_covariances"])
-            all_ekf_innovations.append(result["ekf_innovations"])  # Collect innovations
-            all_ekf_kalman_gains.append(result["ekf_kalman_gains"])
-            all_ekf_kalman_gain_times_innovation.append(result["ekf_kalman_gain_times_innovation"])
-            all_ekf_y_s_inv_y.append(result["ekf_y_s_inv_y"])  # Collect y*(S^-1)*y
-            all_pre_ekf_losses.append(result["pre_ekf_losses"])
-            all_window_labels.append(result["window_labels"])
-        
-        # Average numerical results
-        avg_window_losses = np.mean(all_window_losses, axis=0)
-        avg_window_covariances = np.mean(all_window_covariances, axis=0)
-        avg_window_eta_values = all_window_eta_values[0]  # Should be same for all trajectories
-        avg_window_updates = np.mean(all_window_updates, axis=0)
-        avg_drift_detected = np.mean(all_drift_detected)
-        avg_model_updated = np.mean(all_model_updated)
-        avg_pre_ekf_losses = np.mean(all_pre_ekf_losses, axis=0)
-        
-        # Average innovations - handle nested structure
-        avg_ekf_innovations = []
-        for window_idx in range(len(all_ekf_innovations[0])):  # For each window
-            window_innovations = []
-            for step_idx in range(len(all_ekf_innovations[0][window_idx])):  # For each step
-                step_innovations = []
-                for source_idx in range(len(all_ekf_innovations[0][window_idx][step_idx])):  # For each source
-                    innovations = [traj[window_idx][step_idx][source_idx] for traj in all_ekf_innovations]
-                    step_innovations.append(np.mean(innovations))
-                window_innovations.append(step_innovations)
-            avg_ekf_innovations.append(window_innovations)
-        
-        # Average Kalman gains - handle nested structure
-        avg_ekf_kalman_gains = []
-        for window_idx in range(len(all_ekf_kalman_gains[0])):  # For each window
-            window_kalman_gains = []
-            for step_idx in range(len(all_ekf_kalman_gains[0][window_idx])):  # For each step
-                step_kalman_gains = []
-                for source_idx in range(len(all_ekf_kalman_gains[0][window_idx][step_idx])):  # For each source
-                    kalman_gains = [traj[window_idx][step_idx][source_idx] for traj in all_ekf_kalman_gains]
-                    step_kalman_gains.append(np.mean(kalman_gains))
-                window_kalman_gains.append(step_kalman_gains)
-            avg_ekf_kalman_gains.append(window_kalman_gains)
-        
-        # Average K*y - handle nested structure
-        avg_ekf_kalman_gain_times_innovation = []
-        for window_idx in range(len(all_ekf_kalman_gain_times_innovation[0])):  # For each window
-            window_k_times_y = []
-            for step_idx in range(len(all_ekf_kalman_gain_times_innovation[0][window_idx])):  # For each step
-                step_k_times_y = []
-                for source_idx in range(len(all_ekf_kalman_gain_times_innovation[0][window_idx][step_idx])):  # For each source
-                    k_times_y = [traj[window_idx][step_idx][source_idx] for traj in all_ekf_kalman_gain_times_innovation]
-                    step_k_times_y.append(np.mean(k_times_y))
-                window_k_times_y.append(step_k_times_y)
-            avg_ekf_kalman_gain_times_innovation.append(window_k_times_y)
-        
-        # Average y*(S^-1)*y - handle nested structure
-        avg_ekf_y_s_inv_y = []
-        for window_idx in range(len(all_ekf_y_s_inv_y[0])):  # For each window
-            window_y_s_inv_y = []
-            for step_idx in range(len(all_ekf_y_s_inv_y[0][window_idx])):  # For each step
-                step_y_s_inv_y = []
-                for source_idx in range(len(all_ekf_y_s_inv_y[0][window_idx][step_idx])):  # For each source
-                    y_s_inv_y = [traj[window_idx][step_idx][source_idx] for traj in all_ekf_y_s_inv_y]
-                    step_y_s_inv_y.append(np.mean(y_s_inv_y))
-                window_y_s_inv_y.append(step_y_s_inv_y)
-            avg_ekf_y_s_inv_y.append(window_y_s_inv_y)
-        
-        return {
-            "window_losses": avg_window_losses.tolist(),
-            "window_covariances": avg_window_covariances.tolist(),
-            "window_eta_values": avg_window_eta_values,
-            "window_updates": avg_window_updates.tolist(),
-            "drift_detected_count": float(avg_drift_detected),
-            "model_updated_count": float(avg_model_updated),
-            "window_count": all_window_count[0],  # Should be same for all trajectories
-            "window_size": all_window_size[0],    # Should be same for all trajectories
-            "stride": all_stride[0],              # Should be same for all trajectories
-            "loss_threshold": all_loss_threshold[0],  # Should be same for all trajectories
-            "ekf_predictions": all_ekf_predictions[0],  # Take first trajectory's predictions
-            "ekf_covariances": all_ekf_covariances[0],  # Take first trajectory's covariances
-            "ekf_innovations": avg_ekf_innovations,  # Add averaged innovations
-            "ekf_kalman_gains": avg_ekf_kalman_gains,  # Add averaged Kalman gains
-            "ekf_kalman_gain_times_innovation": avg_ekf_kalman_gain_times_innovation,  # Add averaged K*y
-            "ekf_y_s_inv_y": avg_ekf_y_s_inv_y,  # Add averaged y*(S^-1)*y
-            "pre_ekf_losses": avg_pre_ekf_losses.tolist(),
-            "window_labels": all_window_labels[0]  # Take first trajectory's labels
-        }
+    # MOVED TO OnlineLearning class in simulation/runners/Online_learning.py
+    # def _average_online_learning_results(self, results_list):
+    #     """
+    #     Average results across multiple trajectories.
+    #     
+    #     Args:
+    #         results_list: List of dictionaries containing results from each trajectory
+    #     
+    #     Returns:
+    #         Dictionary with averaged results
+    #     """
+    #     import numpy as np
+    #         
+    #     # Initialize lists to store results from all trajectories
+    #     all_window_losses = []
+    #     all_window_covariances = []
+    #     all_window_eta_values = []
+    #     all_window_updates = []
+    #     all_drift_detected = []
+    #     all_model_updated = []
+    #     all_window_count = []
+    #     all_window_size = []
+    #     all_stride = []
+    #     all_loss_threshold = []
+    #     all_ekf_predictions = []
+    #     all_ekf_covariances = []
+    #     all_ekf_innovations = []  # New list for innovations
+    #     all_ekf_kalman_gains = []  # New list for Kalman gains
+    #     all_ekf_kalman_gain_times_innovation = []  # New list for K*y
+    #     all_ekf_y_s_inv_y = []  # New list for y*(S^-1)*y
+    #     all_pre_ekf_losses = []
+    #     all_window_labels = []
+    #     
+    #     # Collect results from each trajectory
+    #     for result in results_list:
+    #         all_window_losses.append(result["window_losses"])
+    #         all_window_covariances.append(result["window_covariances"])
+    #         all_window_eta_values.append(result["window_eta_values"])
+    #         all_window_updates.append(result["window_updates"])
+    #         all_drift_detected.append(result["drift_detected_count"])
+    #         all_model_updated.append(result["model_updated_count"])
+    #         all_window_count.append(result["window_count"])
+    #         all_window_size.append(result["window_size"])
+    #         all_stride.append(result["stride"])
+    #         all_loss_threshold.append(result["loss_threshold"])
+    #         all_ekf_predictions.append(result["ekf_predictions"])
+    #         all_ekf_covariances.append(result["ekf_covariances"])
+    #         all_ekf_innovations.append(result["ekf_innovations"])  # Collect innovations
+    #         all_ekf_kalman_gains.append(result["ekf_kalman_gains"])
+    #         all_ekf_kalman_gain_times_innovation.append(result["ekf_kalman_gain_times_innovation"])
+    #         all_ekf_y_s_inv_y.append(result["ekf_y_s_inv_y"])  # Collect y*(S^-1)*y
+    #         all_pre_ekf_losses.append(result["pre_ekf_losses"])
+    #         all_window_labels.append(result["window_labels"])
+    #     
+    #     # Average numerical results
+    #     avg_window_losses = np.mean(all_window_losses, axis=0)
+    #     avg_window_covariances = np.mean(all_window_covariances, axis=0)
+    #     avg_window_eta_values = all_window_eta_values[0]  # Should be same for all trajectories
+    #     avg_window_updates = np.mean(all_window_updates, axis=0)
+    #     avg_drift_detected = np.mean(all_drift_detected)
+    #     avg_model_updated = np.mean(all_model_updated)
+    #     avg_pre_ekf_losses = np.mean(all_pre_ekf_losses, axis=0)
+    #     
+    #     # Average innovations - handle nested structure
+    #     avg_ekf_innovations = []
+    #     for window_idx in range(len(all_ekf_innovations[0])):  # For each window
+    #         window_innovations = []
+    #         for step_idx in range(len(all_ekf_innovations[0][window_idx])):  # For each step
+    #             step_innovations = []
+    #             for source_idx in range(len(all_ekf_innovations[0][window_idx][step_idx])):  # For each source
+    #                 innovations = [traj[window_idx][step_idx][source_idx] for traj in all_ekf_innovations]
+    #                 step_innovations.append(np.mean(innovations))
+    #             window_innovations.append(step_innovations)
+    #         avg_ekf_innovations.append(window_innovations)
+    #     
+    #     # Average Kalman gains - handle nested structure
+    #     avg_ekf_kalman_gains = []
+    #     for window_idx in range(len(all_ekf_kalman_gains[0])):  # For each window
+    #         window_kalman_gains = []
+    #         for step_idx in range(len(all_ekf_kalman_gains[0][window_idx])):  # For each step
+    #             step_kalman_gains = []
+    #             for source_idx in range(len(all_ekf_kalman_gains[0][window_idx][step_idx])):  # For each source
+    #                 kalman_gains = [traj[window_idx][step_idx][source_idx] for traj in all_ekf_kalman_gains]
+    #                 step_kalman_gains.append(np.mean(kalman_gains))
+    #             window_kalman_gains.append(step_kalman_gains)
+    #         avg_ekf_kalman_gains.append(window_kalman_gains)
+    #     
+    #     # Average K*y - handle nested structure
+    #     avg_ekf_kalman_gain_times_innovation = []
+    #     for window_idx in range(len(all_ekf_kalman_gain_times_innovation[0])):  # For each window
+    #         window_k_times_y = []
+    #         for step_idx in range(len(all_ekf_kalman_gain_times_innovation[0][window_idx])):  # For each step
+    #             step_k_times_y = []
+    #             for source_idx in range(len(all_ekf_kalman_gain_times_innovation[0][window_idx][step_idx])):  # For each source
+    #                 k_times_y = [traj[window_idx][step_idx][source_idx] for traj in all_ekf_kalman_gain_times_innovation]
+    #                 step_k_times_y.append(np.mean(k_times_y))
+    #             window_k_times_y.append(step_k_times_y)
+    #         avg_ekf_kalman_gain_times_innovation.append(window_k_times_y)
+    #     
+    #     # Average y*(S^-1)*y - handle nested structure
+    #     avg_ekf_y_s_inv_y = []
+    #     for window_idx in range(len(all_ekf_y_s_inv_y[0])):  # For each window
+    #         window_y_s_inv_y = []
+    #         for step_idx in range(len(all_ekf_y_s_inv_y[0][window_idx])):  # For each step
+    #             step_y_s_inv_y = []
+    #             for source_idx in range(len(all_ekf_y_s_inv_y[0][window_idx][step_idx])):  # For each source
+    #                 y_s_inv_y = [traj[window_idx][step_idx][source_idx] for traj in all_ekf_y_s_inv_y]
+    #                 step_y_s_inv_y.append(np.mean(y_s_inv_y))
+    #             window_y_s_inv_y.append(step_y_s_inv_y)
+    #         avg_ekf_y_s_inv_y.append(window_y_s_inv_y)
+    #     
+    #     return {
+    #         "window_losses": avg_window_losses.tolist(),
+    #         "window_covariances": avg_window_covariances.tolist(),
+    #         "window_eta_values": avg_window_eta_values,
+    #         "window_updates": avg_window_updates.tolist(),
+    #         "drift_detected_count": float(avg_drift_detected),
+    #         "model_updated_count": float(avg_model_updated),
+    #         "window_count": all_window_count[0],  # Should be same for all trajectories
+    #         "window_size": all_window_size[0],    # Should be same for all trajectories
+    #         "stride": all_stride[0],              # Should be same for all trajectories
+    #         "loss_threshold": all_loss_threshold[0],  # Should be same for all trajectories
+    #         "ekf_predictions": all_ekf_predictions[0],  # Take first trajectory's predictions
+    #         "ekf_covariances": all_ekf_covariances[0],  # Take first trajectory's covariances
+    #         "ekf_innovations": avg_ekf_innovations,  # Add averaged innovations
+    #         "ekf_kalman_gains": avg_ekf_kalman_gains,  # Add averaged Kalman gains
+    #         "ekf_kalman_gain_times_innovation": avg_ekf_kalman_gain_times_innovation,  # Add averaged K*y
+    #         "ekf_y_s_inv_y": avg_ekf_y_s_inv_y,  # Add averaged y*(S^-1)*y
+    #         "pre_ekf_losses": avg_pre_ekf_losses.tolist(),
+    #         "window_labels": all_window_labels[0]  # Take first trajectory's labels
+    #     }

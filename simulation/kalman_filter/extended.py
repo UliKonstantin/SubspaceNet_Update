@@ -56,7 +56,7 @@ class ExtendedKalmanFilter1D:
     automatically selects the appropriate model based on the trajectory type.
     """
     
-    def __init__(self, state_model, R, P0=1.0):
+    def __init__(self, state_model, R, P0=0.001):
         """
         Initialize the Extended Kalman Filter.
         
@@ -76,7 +76,7 @@ class ExtendedKalmanFilter1D:
         # State will be initialized later
         self.x = None  # State estimate
         self.P = P0  # State estimate covariance
-        
+        self.Q = 0 # Process noise variance
         logger.debug(f"Initialized Extended Kalman Filter with R={R}, P0={P0}")
     
     @classmethod
@@ -203,21 +203,19 @@ class ExtendedKalmanFilter1D:
         
         # State prediction using non-linear function
         x_pred = self.state_model.f(self.x)
-        
+
         # Get Jacobian at current state
         F = self.state_model.F_jacobian(self.x)
         
         # Get state-dependent process noise
-        Q = self.state_model.noise_variance(self.x)
+        self.Q = self.state_model.noise_variance(self.x)
         
         # Covariance prediction using linearization
-        P_pred = F * self.P * F + Q
+        P_pred = F * self.P * F + self.Q
         
         # Update state and covariance
         self.x = x_pred
         self.P = P_pred
-        
-        logger.debug(f"Prediction: x={x_pred}, P={P_pred}, F={F}, Q={Q}")
         
         # Optionally generate measurement for the predicted state
         if generate_measurement:
@@ -250,7 +248,6 @@ class ExtendedKalmanFilter1D:
         # Measurement model: z = x + v where v ~ N(0, R)
         measurement = state + measurement_noise
         
-        logger.debug(f"Simulated measurement: {measurement} (true state: {state}, noise: {measurement_noise})")
         return measurement
     
     def update(self, z=None):
@@ -273,7 +270,6 @@ class ExtendedKalmanFilter1D:
             logger.debug(f"Using simulated measurement: {z}")
         # Measurement model is linear (H=1) for our problem
         # Innovation / measurement residual (y = z - H * x̂_k|k-1)
-        print(f"z- the model estimation: {z}, self.x- the predict step output: {self.x}")
         y = z - self.x
         
         # Innovation covariance (S = H * P_k|k-1 * H^T + R)
@@ -295,32 +291,68 @@ class ExtendedKalmanFilter1D:
         self.x = x_new
         self.P = P_new
         
-        logger.debug(f"Update with z={z}: y={y}, K={K}, x={x_new}, P={P_new}, y*(S^-1)*y={y_s_inv_y}")
         return x_new, y, K, K * y, y_s_inv_y
 
-    def predict_and_update(self, true_state=None):
+    def predict_and_update(self, measurement=None, true_state=None):
         """
-        Perform a complete cycle of prediction and update with noise generation.
+        Perform a complete cycle of prediction and update.
         
         This method:
         1. Predicts the next state
-        2. Generates a noisy measurement based on provided true state or predicted state
-        3. Updates the filter state using this noisy measurement
+        2. Updates the filter state using provided measurement or simulated measurement
         
         Args:
-            true_state: Optional ground truth state to use for measurement generation.
-                       If None, uses the filter's predicted state.
+            measurement: Optional measurement to use for update. If None, generates
+                        a noisy measurement based on true_state or predicted state.
+            true_state: Optional ground truth state to use for measurement generation
+                       when measurement is None. If None, uses the filter's predicted state.
         
         Returns:
-            Tuple of (predicted_state, noisy_measurement, updated_state, covariance)
+            Tuple of (predicted_state, updated_state, innovation, kalman_gain, 
+                     kalman_gain_times_innovation, y_s_inv_y)
         """
         # Perform prediction step
         predicted_state = self.predict()
         
-        # Generate measurement (either from true state or from prediction)
-        measurement = self.simulate_measurement(true_state=true_state if true_state is not None else predicted_state)
+        # Use provided measurement or generate one
+        if measurement is not None:
+            z = measurement
+        else:
+            # Generate measurement (either from true state or from prediction)
+            z = self.simulate_measurement(true_state=true_state if true_state is not None else predicted_state)
         
-        # Perform update step with generated measurement
-        updated_state, innovation = self.update(z=measurement)
+        # Perform update step with measurement
+        updated_state, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y = self.update(z=z)
+        distance_to_measurement = updated_state - z
+        distance_to_evolution_model = updated_state - predicted_state
         
-        return predicted_state, measurement, updated_state, self.P 
+        # Log results in table format
+        table_header = "| Metric                                               | Value       |"
+        table_separator = "|------------------------------------------------------|-------------|"
+        # Calculate distance to ground truth if available
+        distance_to_ground_truth = updated_state - true_state if true_state is not None else None
+        
+        # Format values with proper conditionals
+        true_state_str = f"{true_state:11.6f}" if true_state is not None else "        N/A"
+        distance_to_ground_truth_str = f"{distance_to_ground_truth:11.6f}" if distance_to_ground_truth is not None else "        N/A"
+        
+        table_rows = [
+            f"| Predict Step State (State Evolution Model)           | {predicted_state:11.6f} |",
+            f"| Measurement     (SubspaceNet)                        | {z:11.6f} |",
+            f"| EKF State   (EKF)                                    | {updated_state:11.6f} |",
+            f"| True State (Ground Truth)                            | {true_state_str} |",
+            f"| Distance to Measurement (SubspaceNet)                | {distance_to_measurement:11.6f} |",
+            f"| Distance to State Evolution Model                    | {distance_to_evolution_model:11.6f} |",
+            f"| Distance to Ground Truth                             | {distance_to_ground_truth_str} |",
+            f"| Innovation (EKF)                                     | {innovation:11.6f} |",
+            f"| Kalman Gain (SubspaceNet-State Evolution Model)      | {kalman_gain:11.6f} |"
+        ]
+        
+        table_output = "\n".join([
+            "EKF Prediction and Update Results:",
+            table_header,
+            table_separator
+        ] + table_rows)
+        
+        logger.debug(f"\n{table_output}")
+        return predicted_state, updated_state, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y 

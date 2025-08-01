@@ -79,14 +79,14 @@ trajectory:
   # Sine acceleration non-linear model parameters
   sine_accel_omega0: 0.2       # Base angular velocity (rad/s) - reduced to be more stable
   sine_accel_kappa: 0.2           # Sine acceleration coefficient (rad/s²) - reduced to be more stable
-  sine_accel_noise_std:  0.1       # Noise standard deviation (rad) - reduced to be more stable
+  sine_accel_noise_std:  0.01       # Noise standard deviation (rad) - reduced to be more stable
   
   save_trajectory: false
 
 kalman_filter:
-  process_noise_std_dev: 0.1  # standard deviation of process noise (degrees), null to use trajectory.random_walk_std_dev
-  measurement_noise_std_dev: 0.01  # standard deviation of measurement noise (degrees)
-  initial_covariance: 1.0  # initial state covariance
+  process_noise_std_dev: 0.01  # standard deviation of process noise (degrees), null to use trajectory.random_walk_std_dev
+  measurement_noise_std_dev: 0.05  # standard deviation of measurement noise (degrees)
+  initial_covariance: 1  # initial state covariance
 
 # Enable online learning with appropriate parameters
 online_learning:
@@ -96,13 +96,13 @@ online_learning:
   loss_threshold: 0.2  # Threshold for detecting drift and triggering online learning
   max_iterations: 10  # Maximum iterations for online training
   learning_rate: 0.0001  # Learning rate for online training (smaller than main training)
-  trajectory_length: 150  # Length of trajectory specifically for online learning
-  dataset_size: 50  # Number of trajectories for online learning
+  trajectory_length: 80  # Length of trajectory specifically for online learning
+  dataset_size: 1  # Number of trajectories for online learning
   
   # Dynamic Eta Update Parameters - ADDED
-  eta_update_interval_windows: 5  # Update eta every 10 windows
-  eta_increment: 0.03            # Increase eta by 0.02 each time
-  max_eta: 0.03           # Don't let eta go above 0.5
+  eta_update_interval_windows: 10 # Update eta every 10 windows
+  eta_increment: 0.08            # Increase eta by 0.02 each time
+  max_eta: 0.08            # Don't let eta go above 0.5
   min_eta: 0.0                  # Don't let eta go below 0.0
 
 # No scenarios defined here, as this config is for a single online learning run

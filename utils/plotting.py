@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
 import logging
+import datetime
 
 def plot_loss_vs_scenario(scenario_results, scenario, output_dir):
     """
@@ -292,3 +293,371 @@ def _plot_kalman_noise_optimum_analysis(scenario_results, output_dir, dnn_loss_m
     plt.close()
     
     logger.info(f"Saved Kalman noise analysis plot to {analysis_plot_path}") 
+
+
+def plot_eta_comparison_4d_grid(scenario_results, output_dir):
+    """
+    Plot comparison between different eta scenarios with identical other settings.
+    
+    For each combination of process_noise, kf_process_noise, and kf_measurement_noise,
+    compare metrics across different eta values.
+    
+    Args:
+        scenario_results: 4D dict with structure {proc_noise: {kf_proc_noise: {kf_meas_noise: {eta: result}}}}
+        output_dir: Output directory for saving the plots
+        
+    Returns:
+        List of paths to the saved plots
+    """
+    logger = logging.getLogger("SubspaceNet.plotting")
+    
+    # Create timestamp and plot directory
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    plot_dir = Path(output_dir) / "eta_comparison_plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    
+    saved_plots = []
+    
+    # Extract all parameter combinations (excluding eta)
+    proc_noise_values = list(scenario_results.keys())
+    
+    logger.info(f"Creating eta comparison plots for {len(proc_noise_values)} process noise values")
+    
+    combination_count = 0
+    total_combinations = 0
+    
+    # Count total combinations first
+    for proc_noise in proc_noise_values:
+        for kf_proc_noise in scenario_results[proc_noise].keys():
+            for kf_meas_noise in scenario_results[proc_noise][kf_proc_noise].keys():
+                total_combinations += 1
+    
+    for proc_noise in proc_noise_values:
+        for kf_proc_noise in scenario_results[proc_noise].keys():
+            for kf_meas_noise in scenario_results[proc_noise][kf_proc_noise].keys():
+                combination_count += 1
+                
+                # Get all eta results for this parameter combination
+                eta_results = scenario_results[proc_noise][kf_proc_noise][kf_meas_noise]
+                eta_values = sorted(eta_results.keys())
+                
+                if len(eta_values) < 2:
+                    logger.warning(f"Skipping combination {combination_count}/{total_combinations}: only {len(eta_values)} eta values")
+                    continue
+                
+                logger.info(f"Processing combination {combination_count}/{total_combinations}: proc_noise={proc_noise}, kf_proc_noise={kf_proc_noise}, kf_meas_noise={kf_meas_noise}")
+                
+                # Extract metrics for each eta value
+                metrics_by_eta = {}
+                valid_etas = []
+                
+                for eta in eta_values:
+                    result = eta_results[eta]
+                    
+                    # Check if result is valid and has online learning results
+                    if (result.get("status") == "success" and 
+                        "online_learning_results" in result):
+                        
+                        ol_results = result["online_learning_results"]
+                        
+                        # Extract required metrics
+                        window_losses = ol_results.get("window_losses", [])
+                        pre_ekf_losses = ol_results.get("pre_ekf_losses", [])
+                        window_eta_values = ol_results.get("window_eta_values", [])
+                        ekf_innovations = ol_results.get("ekf_innovations", [])
+                        ekf_kalman_gain_times_innovation = ol_results.get("ekf_kalman_gain_times_innovation", [])
+                        ekf_y_s_inv_y = ol_results.get("ekf_y_s_inv_y", [])
+                        
+                        # Calculate derived metrics
+                        if len(window_losses) == len(pre_ekf_losses) and len(window_losses) > 1:
+                            # EKF improvement = pre_ekf_loss - ekf_loss
+                            ekf_improvement = [pre - post for pre, post in zip(pre_ekf_losses[1:], window_losses[1:])]
+                            
+                            # Calculate average innovation magnitude per window
+                            avg_innovations = []
+                            for window_innovations in ekf_innovations:
+                                window_avg = []
+                                for step_innovations in window_innovations:
+                                    if step_innovations:
+                                        window_avg.extend([abs(inn) for inn in step_innovations])
+                                if window_avg:
+                                    avg_innovations.append(np.mean(window_avg))
+                                else:
+                                    avg_innovations.append(0)
+                            
+                            # Calculate average K*y per window
+                            avg_k_times_y = []
+                            for window_k_times_y in ekf_kalman_gain_times_innovation:
+                                window_avg = []
+                                for step_k_times_y in window_k_times_y:
+                                    if step_k_times_y:
+                                        window_avg.extend(step_k_times_y)
+                                if window_avg:
+                                    avg_k_times_y.append(np.mean(window_avg))
+                                else:
+                                    avg_k_times_y.append(0)
+                            
+                            # Calculate average y*S^-1*y per window
+                            avg_y_s_inv_y = []
+                            for window_y_s_inv_y in ekf_y_s_inv_y:
+                                window_avg = []
+                                for step_y_s_inv_y in window_y_s_inv_y:
+                                    if step_y_s_inv_y:
+                                        window_avg.extend(step_y_s_inv_y)
+                                if window_avg:
+                                    avg_y_s_inv_y.append(np.mean(window_avg))
+                                else:
+                                    avg_y_s_inv_y.append(0)
+                            
+                            metrics_by_eta[eta] = {
+                                "window_losses": window_losses[1:],  # Exclude first window
+                                "ekf_improvement": ekf_improvement,
+                                "window_eta_values": window_eta_values[1:] if len(window_eta_values) > 1 else [],  # Exclude first window
+                                "avg_innovations": avg_innovations[1:] if len(avg_innovations) > 1 else [],
+                                "avg_k_times_y": avg_k_times_y[1:] if len(avg_k_times_y) > 1 else [],
+                                "avg_y_s_inv_y": avg_y_s_inv_y[1:] if len(avg_y_s_inv_y) > 1 else []
+                            }
+                            valid_etas.append(eta)
+                        else:
+                            logger.warning(f"Invalid data for eta={eta}: mismatched lengths or insufficient data")
+                    else:
+                        logger.warning(f"Invalid result for eta={eta}: {result.get('status', 'unknown status')}")
+                
+                if len(valid_etas) < 2:
+                    logger.warning(f"Skipping combination {combination_count}/{total_combinations}: only {len(valid_etas)} valid eta results")
+                    continue
+                
+                # Create comparison plot for this parameter combination
+                fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+                
+                # Determine the number of windows (assuming all eta values have same length)
+                first_eta = valid_etas[0]
+                n_windows = len(metrics_by_eta[first_eta]["window_losses"])
+                window_indices = np.arange(1, n_windows + 1)  # Start from window 1
+                
+                # For each eta scenario, find where eta changes occur within that scenario
+                eta_change_markers = {}
+                for eta in valid_etas:
+                    eta_change_markers[eta] = {"positions": [], "values": []}
+                    
+                    # Get the window eta values for this scenario
+                    scenario_eta_values = metrics_by_eta[eta]["window_eta_values"]
+                    
+                    if len(scenario_eta_values) > 1:
+                        # Find indices where eta changes (similar to original implementation)
+                        for i in range(1, len(scenario_eta_values)):
+                            if abs(scenario_eta_values[i] - scenario_eta_values[i-1]) > 1e-6:
+                                # Window index adjustment: +1 because we start from window 1 (excluded first window)
+                                eta_change_markers[eta]["positions"].append(i + 1)
+                                eta_change_markers[eta]["values"].append(scenario_eta_values[i])
+                
+                # Plot 1: Window Losses (Both EKF and SubspaceNet)
+                ax1 = axes[0, 0]
+                
+                # Define colors for different eta values
+                colors = plt.cm.tab10(np.linspace(0, 1, len(valid_etas)))
+                
+                for i, eta in enumerate(valid_etas):
+                    color = colors[i]
+                    
+                    # Plot EKF Loss (solid line, circle markers)
+                    ax1.plot(window_indices, metrics_by_eta[eta]["window_losses"], 
+                            color=color, linestyle='-', marker='o', 
+                            label=f'EKF η={eta:.3f}', linewidth=2, markersize=4)
+                    
+                    # Plot SubspaceNet Loss (dashed line, square markers)
+                    # Calculate SubspaceNet loss from EKF loss + improvement
+                    subspacenet_losses = [ekf_loss + improvement for ekf_loss, improvement in 
+                                        zip(metrics_by_eta[eta]["window_losses"], metrics_by_eta[eta]["ekf_improvement"])]
+                    ax1.plot(window_indices, subspacenet_losses, 
+                            color=color, linestyle='--', marker='s', 
+                            label=f'SubspaceNet η={eta:.3f}', linewidth=2, markersize=4)
+                    
+                # Add eta change markers for all scenarios (combine unique positions to avoid duplication)
+                all_eta_positions = set()
+                all_eta_markers = {}
+                for eta in valid_etas:
+                    for pos, eta_val in zip(eta_change_markers[eta]["positions"], eta_change_markers[eta]["values"]):
+                        all_eta_positions.add(pos)
+                        all_eta_markers[pos] = eta_val
+                
+                for pos in sorted(all_eta_positions):
+                    ax1.axvline(x=pos, color='red', linestyle='--', alpha=0.3)
+                    ax1.text(pos, 0.13, f'η={all_eta_markers[pos]:.3f}', rotation=90, verticalalignment='top', fontsize=8)
+                
+                ax1.set_xlabel('Window Index')
+                ax1.set_ylabel('Loss')
+                ax1.set_title('EKF vs SubspaceNet Loss vs Window Index\nRMSPE = √(1/N * Σ(θ_pred - θ_true)²)\nSolid=EKF, Dashed=SubspaceNet')
+                ax1.legend()
+                ax1.grid(True, alpha=0.3)
+                ax1.set_ylim([None, 0.14])  # Match the original plot limit
+                
+                # Plot 2: EKF Improvement
+                ax2 = axes[0, 1]
+                for i, eta in enumerate(valid_etas):
+                    color = colors[i]
+                    ax2.plot(window_indices, metrics_by_eta[eta]["ekf_improvement"], 
+                            color=color, linestyle='-', marker='s', 
+                            label=f'η={eta:.3f}', linewidth=2, markersize=4)
+                    
+                # Add eta change markers for all scenarios (combine unique positions to avoid duplication)
+                all_eta_positions = set()
+                all_eta_markers = {}
+                for eta in valid_etas:
+                    for pos, eta_val in zip(eta_change_markers[eta]["positions"], eta_change_markers[eta]["values"]):
+                        all_eta_positions.add(pos)
+                        all_eta_markers[pos] = eta_val
+                
+                for pos in sorted(all_eta_positions):
+                    ax2.axvline(x=pos, color='red', linestyle='--', alpha=0.3)
+                    ax2.text(pos, ax2.get_ylim()[1], f'η={all_eta_markers[pos]:.3f}', rotation=90, verticalalignment='top', fontsize=8)
+                
+                ax2.set_xlabel('Window Index')
+                ax2.set_ylabel('Loss Difference')
+                ax2.set_title('SubspaceNet Loss - EKF Loss vs Window Index\nImprovement = L_SubspaceNet - L_EKF')
+                ax2.legend()
+                ax2.grid(True, alpha=0.3)
+                
+                # Plot 3: Average Innovation Magnitude
+                ax3 = axes[0, 2]
+                for i, eta in enumerate(valid_etas):
+                    if metrics_by_eta[eta]["avg_innovations"]:
+                        color = colors[i]
+                        ax3.plot(window_indices, metrics_by_eta[eta]["avg_innovations"], 
+                                color=color, linestyle='-', marker='d', 
+                                label=f'η={eta:.3f}', linewidth=2, markersize=4)
+                
+                # Add eta change markers for all scenarios (combine unique positions to avoid duplication)
+                all_eta_positions = set()
+                all_eta_markers = {}
+                for eta in valid_etas:
+                    for pos, eta_val in zip(eta_change_markers[eta]["positions"], eta_change_markers[eta]["values"]):
+                        all_eta_positions.add(pos)
+                        all_eta_markers[pos] = eta_val
+                
+                for pos in sorted(all_eta_positions):
+                    ax3.axvline(x=pos, color='red', linestyle='--', alpha=0.3)
+                    ax3.text(pos, ax3.get_ylim()[1], f'η={all_eta_markers[pos]:.3f}', rotation=90, verticalalignment='top', fontsize=8)
+                
+                ax3.set_xlabel('Window Index')
+                ax3.set_ylabel('Average Innovation')
+                ax3.set_title('|EKF Innovation| vs Window Index\nInnovation = z_k - H x̂_k|k-1')
+                ax3.legend()
+                ax3.grid(True, alpha=0.3)
+                
+                # Plot 4: Average |K*y|
+                ax4 = axes[1, 0]
+                for i, eta in enumerate(valid_etas):
+                    if metrics_by_eta[eta]["avg_k_times_y"]:
+                        color = colors[i]
+                        ax4.plot(window_indices, np.abs(metrics_by_eta[eta]["avg_k_times_y"]), 
+                                color=color, linestyle='-', marker='v', 
+                                label=f'η={eta:.3f}', linewidth=2, markersize=4)
+                
+                # Add eta change markers for all scenarios (combine unique positions to avoid duplication)
+                all_eta_positions = set()
+                all_eta_markers = {}
+                for eta in valid_etas:
+                    for pos, eta_val in zip(eta_change_markers[eta]["positions"], eta_change_markers[eta]["values"]):
+                        all_eta_positions.add(pos)
+                        all_eta_markers[pos] = eta_val
+                
+                for pos in sorted(all_eta_positions):
+                    ax4.axvline(x=pos, color='red', linestyle='--', alpha=0.3)
+                    ax4.text(pos, ax4.get_ylim()[1], f'η={all_eta_markers[pos]:.3f}', rotation=90, verticalalignment='top', fontsize=8)
+                
+                ax4.set_xlabel('Window Index')
+                ax4.set_ylabel('|Average K*Innovation|')
+                ax4.set_title('Average |Kalman Gain × Innovation| vs Window Index\n|K_k × ν_k| = |K_k × (z_k - H x̂_k|k-1)|')
+                ax4.legend()
+                ax4.grid(True, alpha=0.3)
+                
+                # Plot 5: Average y*S^-1*y
+                ax5 = axes[1, 1]
+                for i, eta in enumerate(valid_etas):
+                    if metrics_by_eta[eta]["avg_y_s_inv_y"]:
+                        color = colors[i]
+                        ax5.plot(window_indices, metrics_by_eta[eta]["avg_y_s_inv_y"], 
+                                color=color, linestyle='-', marker='^', 
+                                label=f'η={eta:.3f}', linewidth=2, markersize=4)
+                
+                # Add eta change markers for all scenarios (combine unique positions to avoid duplication)
+                all_eta_positions = set()
+                all_eta_markers = {}
+                for eta in valid_etas:
+                    for pos, eta_val in zip(eta_change_markers[eta]["positions"], eta_change_markers[eta]["values"]):
+                        all_eta_positions.add(pos)
+                        all_eta_markers[pos] = eta_val
+                
+                for pos in sorted(all_eta_positions):
+                    ax5.axvline(x=pos, color='red', linestyle='--', alpha=0.3)
+                    ax5.text(pos, ax5.get_ylim()[1], f'η={all_eta_markers[pos]:.3f}', rotation=90, verticalalignment='top', fontsize=8)
+                
+                ax5.set_xlabel('Window Index')
+                ax5.set_ylabel('Average y*(S^-1)*y')
+                ax5.set_title('Average Innovation Covariance Metric vs Window Index\ny*(S^-1)*y = ν^T S^-1 ν')
+                ax5.legend()
+                ax5.grid(True, alpha=0.3)
+                
+                # Plot 6: Summary statistics
+                ax6 = axes[1, 2]
+                # Calculate mean values for summary
+                summary_metrics = []
+                summary_labels = []
+                summary_colors = []
+                for i, eta in enumerate(valid_etas):
+                    mean_ekf_loss = np.mean(metrics_by_eta[eta]["window_losses"])
+                    mean_improvement = np.mean(metrics_by_eta[eta]["ekf_improvement"])
+                    mean_subspacenet_loss = mean_ekf_loss + mean_improvement
+                    summary_metrics.append([mean_ekf_loss, mean_subspacenet_loss, mean_improvement])
+                    summary_labels.append(f'η={eta:.3f}')
+                    summary_colors.append(colors[i])
+                
+                summary_metrics = np.array(summary_metrics)
+                x_pos = np.arange(len(summary_labels))
+                
+                # Create bar plot with color-coded eta values
+                width = 0.25
+                for i, (eta, color) in enumerate(zip(valid_etas, summary_colors)):
+                    ax6.bar(x_pos[i] - width, summary_metrics[i, 0], width, 
+                           label=f'EKF η={eta:.3f}' if i == 0 else '', 
+                           color=color, alpha=0.7, edgecolor='black', linewidth=0.5)
+                    ax6.bar(x_pos[i], summary_metrics[i, 1], width, 
+                           label=f'SubspaceNet η={eta:.3f}' if i == 0 else '', 
+                           color=color, alpha=0.4, edgecolor='black', linewidth=0.5)
+                    
+                ax6_twin = ax6.twinx()
+                ax6_twin.bar(x_pos + width, summary_metrics[:, 2], width, 
+                           label='Mean EKF Improvement', alpha=0.9, color='orange', 
+                           edgecolor='black', linewidth=0.5)
+                
+                ax6.set_xlabel('Eta Values')
+                ax6.set_ylabel('Mean Loss')
+                ax6_twin.set_ylabel('Mean EKF Improvement', color='orange')
+                ax6.set_title('Summary: EKF vs SubspaceNet Loss by Eta\nDark=EKF, Light=SubspaceNet')
+                ax6.set_xticks(x_pos)
+                ax6.set_xticklabels(summary_labels)
+                ax6.grid(True, alpha=0.3)
+                
+                # Add combined legend for the summary plot
+                lines1, labels1 = ax6.get_legend_handles_labels()
+                lines2, labels2 = ax6_twin.get_legend_handles_labels()
+                ax6.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+                
+                # Add overall title
+                fig.suptitle(f'Eta Comparison: proc_noise={proc_noise:.3f}, kf_proc_noise={kf_proc_noise:.3f}, kf_meas_noise={kf_meas_noise:.3f}', 
+                            fontsize=16, y=0.98)
+                
+                plt.tight_layout()
+                
+                # Save the plot
+                plot_filename = f"eta_comparison_pn{proc_noise:.3f}_kfpn{kf_proc_noise:.3f}_kfmn{kf_meas_noise:.3f}_{timestamp}.png"
+                plot_path = plot_dir / plot_filename
+                plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+                plt.close()
+                
+                saved_plots.append(plot_path)
+                logger.info(f"Saved eta comparison plot {combination_count}/{total_combinations}: {plot_path.name}")
+    
+    logger.info(f"Completed eta comparison plotting: {len(saved_plots)} plots saved to {plot_dir}")
+    return saved_plots 
