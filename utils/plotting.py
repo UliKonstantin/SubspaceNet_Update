@@ -368,6 +368,23 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                         ekf_kalman_gain_times_innovation = ol_results.get("ekf_kalman_gain_times_innovation", [])
                         ekf_y_s_inv_y = ol_results.get("ekf_y_s_inv_y", [])
                         
+                        # Extract online learning data if available
+                        online_window_losses = ol_results.get("online_window_losses", [])
+                        online_pre_ekf_losses = ol_results.get("online_pre_ekf_losses", [])
+                        online_window_indices = ol_results.get("online_window_indices", [])
+                        training_window_losses = ol_results.get("training_window_losses", [])
+                        training_pre_ekf_losses = ol_results.get("training_pre_ekf_losses", [])
+                        training_window_indices = ol_results.get("training_window_indices", [])
+                        learning_start_window = ol_results.get("learning_start_window", None)
+                        
+                        # Extract online learning EKF data
+                        online_ekf_innovations = ol_results.get("online_ekf_innovations", [])
+                        online_ekf_kalman_gain_times_innovation = ol_results.get("online_ekf_kalman_gain_times_innovation", [])
+                        online_ekf_y_s_inv_y = ol_results.get("online_ekf_y_s_inv_y", [])
+                        training_ekf_innovations = ol_results.get("training_ekf_innovations", [])
+                        training_ekf_kalman_gain_times_innovation = ol_results.get("training_ekf_kalman_gain_times_innovation", [])
+                        training_ekf_y_s_inv_y = ol_results.get("training_ekf_y_s_inv_y", [])
+                        
                         # Calculate derived metrics
                         if len(window_losses) == len(pre_ekf_losses) and len(window_losses) > 1:
                             # EKF improvement = pre_ekf_loss - ekf_loss
@@ -409,13 +426,103 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                                 else:
                                     avg_y_s_inv_y.append(0)
                             
+                            # Calculate online learning metrics if available
+                            has_online_data = (len(online_window_losses) > 0 and len(online_window_indices) > 0)
+                            has_training_data = (len(training_window_losses) > 0 and len(training_window_indices) > 0)
+                            
+                            # Calculate online learning derived metrics
+                            online_avg_innovations = []
+                            online_avg_k_times_y = []
+                            online_avg_y_s_inv_y = []
+                            training_avg_innovations = []
+                            training_avg_k_times_y = []
+                            training_avg_y_s_inv_y = []
+                            
+                            if has_online_data and online_ekf_innovations:
+                                for window_innovations in online_ekf_innovations:
+                                    window_avg = []
+                                    for step_innovations in window_innovations:
+                                        if step_innovations:
+                                            window_avg.extend([abs(inn) for inn in step_innovations])
+                                    if window_avg:
+                                        online_avg_innovations.append(np.mean(window_avg))
+                                    else:
+                                        online_avg_innovations.append(0)
+                                        
+                                for window_k_times_y in online_ekf_kalman_gain_times_innovation:
+                                    window_avg = []
+                                    for step_k_times_y in window_k_times_y:
+                                        if step_k_times_y:
+                                            window_avg.extend(step_k_times_y)
+                                    if window_avg:
+                                        online_avg_k_times_y.append(np.mean(window_avg))
+                                    else:
+                                        online_avg_k_times_y.append(0)
+                                        
+                                for window_y_s_inv_y in online_ekf_y_s_inv_y:
+                                    window_avg = []
+                                    for step_y_s_inv_y in window_y_s_inv_y:
+                                        if step_y_s_inv_y:
+                                            window_avg.extend(step_y_s_inv_y)
+                                    if window_avg:
+                                        online_avg_y_s_inv_y.append(np.mean(window_avg))
+                                    else:
+                                        online_avg_y_s_inv_y.append(0)
+                            
+                            if has_training_data and training_ekf_innovations:
+                                for window_innovations in training_ekf_innovations:
+                                    window_avg = []
+                                    for step_innovations in window_innovations:
+                                        if step_innovations:
+                                            window_avg.extend([abs(inn) for inn in step_innovations])
+                                    if window_avg:
+                                        training_avg_innovations.append(np.mean(window_avg))
+                                    else:
+                                        training_avg_innovations.append(0)
+                                        
+                                for window_k_times_y in training_ekf_kalman_gain_times_innovation:
+                                    window_avg = []
+                                    for step_k_times_y in window_k_times_y:
+                                        if step_k_times_y:
+                                            window_avg.extend(step_k_times_y)
+                                    if window_avg:
+                                        training_avg_k_times_y.append(np.mean(window_avg))
+                                    else:
+                                        training_avg_k_times_y.append(0)
+                                        
+                                for window_y_s_inv_y in training_ekf_y_s_inv_y:
+                                    window_avg = []
+                                    for step_y_s_inv_y in window_y_s_inv_y:
+                                        if step_y_s_inv_y:
+                                            window_avg.extend(step_y_s_inv_y)
+                                    if window_avg:
+                                        training_avg_y_s_inv_y.append(np.mean(window_avg))
+                                    else:
+                                        training_avg_y_s_inv_y.append(0)
+                            
                             metrics_by_eta[eta] = {
                                 "window_losses": window_losses[1:],  # Exclude first window
                                 "ekf_improvement": ekf_improvement,
                                 "window_eta_values": window_eta_values[1:] if len(window_eta_values) > 1 else [],  # Exclude first window
                                 "avg_innovations": avg_innovations[1:] if len(avg_innovations) > 1 else [],
                                 "avg_k_times_y": avg_k_times_y[1:] if len(avg_k_times_y) > 1 else [],
-                                "avg_y_s_inv_y": avg_y_s_inv_y[1:] if len(avg_y_s_inv_y) > 1 else []
+                                "avg_y_s_inv_y": avg_y_s_inv_y[1:] if len(avg_y_s_inv_y) > 1 else [],
+                                # Online learning data
+                                "has_online_data": has_online_data,
+                                "has_training_data": has_training_data,
+                                "online_window_losses": online_window_losses,
+                                "online_pre_ekf_losses": online_pre_ekf_losses,
+                                "online_window_indices": online_window_indices,
+                                "online_avg_innovations": online_avg_innovations,
+                                "online_avg_k_times_y": online_avg_k_times_y,
+                                "online_avg_y_s_inv_y": online_avg_y_s_inv_y,
+                                "training_window_losses": training_window_losses,
+                                "training_pre_ekf_losses": training_pre_ekf_losses,
+                                "training_window_indices": training_window_indices,
+                                "training_avg_innovations": training_avg_innovations,
+                                "training_avg_k_times_y": training_avg_k_times_y,
+                                "training_avg_y_s_inv_y": training_avg_y_s_inv_y,
+                                "learning_start_window": learning_start_window
                             }
                             valid_etas.append(eta)
                         else:
@@ -473,6 +580,41 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                             color=color, linestyle='--', marker='s', 
                             label=f'SubspaceNet η={eta:.3f}', linewidth=2, markersize=4)
                     
+                    # Add online learning data if available
+                    if metrics_by_eta[eta]["has_online_data"]:
+                        online_x = np.array(metrics_by_eta[eta]["online_window_indices"])
+                        ax1.plot(online_x, metrics_by_eta[eta]["online_window_losses"], 
+                                color=color, linestyle='-', marker='d', 
+                                label=f'Online EKF η={eta:.3f}', linewidth=2, markersize=6)
+                        ax1.plot(online_x, metrics_by_eta[eta]["online_pre_ekf_losses"], 
+                                color=color, linestyle='--', marker='^', 
+                                label=f'Online SubspaceNet η={eta:.3f}', linewidth=2, markersize=6)
+                    
+                    # Add training data if available
+                    if metrics_by_eta[eta]["has_training_data"]:
+                        training_x = np.array(metrics_by_eta[eta]["training_window_indices"])
+                        ax1.plot(training_x, metrics_by_eta[eta]["training_window_losses"], 
+                                color=color, linestyle='-', marker='*', 
+                                label=f'Training EKF η={eta:.3f}', linewidth=2, markersize=6, alpha=0.7)
+                        ax1.plot(training_x, metrics_by_eta[eta]["training_pre_ekf_losses"], 
+                                color=color, linestyle='--', marker='s', 
+                                label=f'Training SubspaceNet η={eta:.3f}', linewidth=2, markersize=6, alpha=0.7)
+                        
+                        # Connect training to online if both are available
+                        if metrics_by_eta[eta]["has_online_data"]:
+                            last_training_x = training_x[-1]
+                            first_online_x = online_x[0]
+                            last_training_ekf = metrics_by_eta[eta]["training_window_losses"][-1]
+                            first_online_ekf = metrics_by_eta[eta]["online_window_losses"][0]
+                            last_training_subspace = metrics_by_eta[eta]["training_pre_ekf_losses"][-1]
+                            first_online_subspace = metrics_by_eta[eta]["online_pre_ekf_losses"][0]
+                            
+                            # Draw connecting lines
+                            ax1.plot([last_training_x, first_online_x], [last_training_ekf, first_online_ekf], 
+                                    color=color, linestyle='-', linewidth=2, alpha=0.7)
+                            ax1.plot([last_training_x, first_online_x], [last_training_subspace, first_online_subspace], 
+                                    color=color, linestyle='-', linewidth=2, alpha=0.7)
+                    
                 # Add eta change markers for all scenarios (combine unique positions to avoid duplication)
                 all_eta_positions = set()
                 all_eta_markers = {}
@@ -500,6 +642,33 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                             color=color, linestyle='-', marker='s', 
                             label=f'η={eta:.3f}', linewidth=2, markersize=4)
                     
+                    # Add online learning improvement if available
+                    if metrics_by_eta[eta]["has_online_data"]:
+                        online_x = np.array(metrics_by_eta[eta]["online_window_indices"])
+                        online_improvement = [pre - post for pre, post in zip(metrics_by_eta[eta]["online_pre_ekf_losses"], metrics_by_eta[eta]["online_window_losses"])]
+                        ax2.plot(online_x, online_improvement, 
+                                color=color, linestyle='-', marker='d', 
+                                label=f'Online η={eta:.3f}', linewidth=2, markersize=6)
+                    
+                    # Add training improvement if available
+                    if metrics_by_eta[eta]["has_training_data"]:
+                        training_x = np.array(metrics_by_eta[eta]["training_window_indices"])
+                        training_improvement = [pre - post for pre, post in zip(metrics_by_eta[eta]["training_pre_ekf_losses"], metrics_by_eta[eta]["training_window_losses"])]
+                        ax2.plot(training_x, training_improvement, 
+                                color=color, linestyle='-', marker='*', 
+                                label=f'Training η={eta:.3f}', linewidth=2, markersize=6, alpha=0.7)
+                        
+                        # Connect training to online if both are available
+                        if metrics_by_eta[eta]["has_online_data"]:
+                            last_training_x = training_x[-1]
+                            first_online_x = online_x[0]
+                            last_training_improvement = training_improvement[-1]
+                            first_online_improvement = online_improvement[0]
+                            
+                            # Draw connecting line
+                            ax2.plot([last_training_x, first_online_x], [last_training_improvement, first_online_improvement], 
+                                    color=color, linestyle='-', linewidth=2, alpha=0.7)
+                    
                 # Add eta change markers for all scenarios (combine unique positions to avoid duplication)
                 all_eta_positions = set()
                 all_eta_markers = {}
@@ -526,6 +695,31 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                         ax3.plot(window_indices, metrics_by_eta[eta]["avg_innovations"], 
                                 color=color, linestyle='-', marker='d', 
                                 label=f'η={eta:.3f}', linewidth=2, markersize=4)
+                    
+                    # Add online learning innovations if available
+                    if metrics_by_eta[eta]["has_online_data"] and metrics_by_eta[eta]["online_avg_innovations"]:
+                        online_x = np.array(metrics_by_eta[eta]["online_window_indices"])
+                        ax3.plot(online_x, metrics_by_eta[eta]["online_avg_innovations"], 
+                                color=color, linestyle='-', marker='d', 
+                                label=f'Online η={eta:.3f}', linewidth=2, markersize=6)
+                    
+                    # Add training innovations if available
+                    if metrics_by_eta[eta]["has_training_data"] and metrics_by_eta[eta]["training_avg_innovations"]:
+                        training_x = np.array(metrics_by_eta[eta]["training_window_indices"])
+                        ax3.plot(training_x, metrics_by_eta[eta]["training_avg_innovations"], 
+                                color=color, linestyle='-', marker='*', 
+                                label=f'Training η={eta:.3f}', linewidth=2, markersize=6, alpha=0.7)
+                        
+                        # Connect training to online if both are available
+                        if metrics_by_eta[eta]["has_online_data"] and metrics_by_eta[eta]["online_avg_innovations"]:
+                            last_training_x = training_x[-1]
+                            first_online_x = online_x[0]
+                            last_training_innovation = metrics_by_eta[eta]["training_avg_innovations"][-1]
+                            first_online_innovation = metrics_by_eta[eta]["online_avg_innovations"][0]
+                            
+                            # Draw connecting line
+                            ax3.plot([last_training_x, first_online_x], [last_training_innovation, first_online_innovation], 
+                                    color=color, linestyle='-', linewidth=2, alpha=0.7)
                 
                 # Add eta change markers for all scenarios (combine unique positions to avoid duplication)
                 all_eta_positions = set()
@@ -553,6 +747,31 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                         ax4.plot(window_indices, np.abs(metrics_by_eta[eta]["avg_k_times_y"]), 
                                 color=color, linestyle='-', marker='v', 
                                 label=f'η={eta:.3f}', linewidth=2, markersize=4)
+                    
+                    # Add online learning K*y if available
+                    if metrics_by_eta[eta]["has_online_data"] and metrics_by_eta[eta]["online_avg_k_times_y"]:
+                        online_x = np.array(metrics_by_eta[eta]["online_window_indices"])
+                        ax4.plot(online_x, np.abs(metrics_by_eta[eta]["online_avg_k_times_y"]), 
+                                color=color, linestyle='-', marker='v', 
+                                label=f'Online η={eta:.3f}', linewidth=2, markersize=6)
+                    
+                    # Add training K*y if available
+                    if metrics_by_eta[eta]["has_training_data"] and metrics_by_eta[eta]["training_avg_k_times_y"]:
+                        training_x = np.array(metrics_by_eta[eta]["training_window_indices"])
+                        ax4.plot(training_x, np.abs(metrics_by_eta[eta]["training_avg_k_times_y"]), 
+                                color=color, linestyle='-', marker='*', 
+                                label=f'Training η={eta:.3f}', linewidth=2, markersize=6, alpha=0.7)
+                        
+                        # Connect training to online if both are available
+                        if metrics_by_eta[eta]["has_online_data"] and metrics_by_eta[eta]["online_avg_k_times_y"]:
+                            last_training_x = training_x[-1]
+                            first_online_x = online_x[0]
+                            last_training_k_times_y = metrics_by_eta[eta]["training_avg_k_times_y"][-1]
+                            first_online_k_times_y = metrics_by_eta[eta]["online_avg_k_times_y"][0]
+                            
+                            # Draw connecting line
+                            ax4.plot([last_training_x, first_online_x], [abs(last_training_k_times_y), abs(first_online_k_times_y)], 
+                                    color=color, linestyle='-', linewidth=2, alpha=0.7)
                 
                 # Add eta change markers for all scenarios (combine unique positions to avoid duplication)
                 all_eta_positions = set()
@@ -580,6 +799,31 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                         ax5.plot(window_indices, metrics_by_eta[eta]["avg_y_s_inv_y"], 
                                 color=color, linestyle='-', marker='^', 
                                 label=f'η={eta:.3f}', linewidth=2, markersize=4)
+                    
+                    # Add online learning y*S^-1*y if available
+                    if metrics_by_eta[eta]["has_online_data"] and metrics_by_eta[eta]["online_avg_y_s_inv_y"]:
+                        online_x = np.array(metrics_by_eta[eta]["online_window_indices"])
+                        ax5.plot(online_x, metrics_by_eta[eta]["online_avg_y_s_inv_y"], 
+                                color=color, linestyle='-', marker='^', 
+                                label=f'Online η={eta:.3f}', linewidth=2, markersize=6)
+                    
+                    # Add training y*S^-1*y if available
+                    if metrics_by_eta[eta]["has_training_data"] and metrics_by_eta[eta]["training_avg_y_s_inv_y"]:
+                        training_x = np.array(metrics_by_eta[eta]["training_window_indices"])
+                        ax5.plot(training_x, metrics_by_eta[eta]["training_avg_y_s_inv_y"], 
+                                color=color, linestyle='-', marker='*', 
+                                label=f'Training η={eta:.3f}', linewidth=2, markersize=6, alpha=0.7)
+                        
+                        # Connect training to online if both are available
+                        if metrics_by_eta[eta]["has_online_data"] and metrics_by_eta[eta]["online_avg_y_s_inv_y"]:
+                            last_training_x = training_x[-1]
+                            first_online_x = online_x[0]
+                            last_training_y_s_inv_y = metrics_by_eta[eta]["training_avg_y_s_inv_y"][-1]
+                            first_online_y_s_inv_y = metrics_by_eta[eta]["online_avg_y_s_inv_y"][0]
+                            
+                            # Draw connecting line
+                            ax5.plot([last_training_x, first_online_x], [last_training_y_s_inv_y, first_online_y_s_inv_y], 
+                                    color=color, linestyle='-', linewidth=2, alpha=0.7)
                 
                 # Add eta change markers for all scenarios (combine unique positions to avoid duplication)
                 all_eta_positions = set()

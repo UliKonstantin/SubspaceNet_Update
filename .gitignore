@@ -23,7 +23,7 @@ wheels/
 
 # Experiment results
 experiments/results/
-
+experiments/debug_logs/
 # Models
 *.pth
 *.pt

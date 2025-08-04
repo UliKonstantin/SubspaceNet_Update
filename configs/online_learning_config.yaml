@@ -79,13 +79,13 @@ trajectory:
   # Sine acceleration non-linear model parameters
   sine_accel_omega0: 0.2       # Base angular velocity (rad/s) - reduced to be more stable
   sine_accel_kappa: 0.2           # Sine acceleration coefficient (rad/s²) - reduced to be more stable
-  sine_accel_noise_std:  0.01       # Noise standard deviation (rad) - reduced to be more stable
+  sine_accel_noise_std:  0.03       # Noise standard deviation (rad) - reduced to be more stable
   
   save_trajectory: false
 
 kalman_filter:
-  process_noise_std_dev: 0.01  # standard deviation of process noise (degrees), null to use trajectory.random_walk_std_dev
-  measurement_noise_std_dev: 0.05  # standard deviation of measurement noise (degrees)
+  process_noise_std_dev: 0.03  # standard deviation of process noise (degrees), null to use trajectory.random_walk_std_dev
+  measurement_noise_std_dev: 0.03  # standard deviation of measurement noise (degrees)
   initial_covariance: 1  # initial state covariance
 
 # Enable online learning with appropriate parameters
@@ -101,8 +101,8 @@ online_learning:
   
   # Dynamic Eta Update Parameters - ADDED
   eta_update_interval_windows: 10 # Update eta every 10 windows
-  eta_increment: 0.08            # Increase eta by 0.02 each time
-  max_eta: 0.08            # Don't let eta go above 0.5
+  eta_increment: 0.06            # Increase eta by 0.02 each time
+  max_eta: 0.06            # Don't let eta go above 0.5
   min_eta: 0.0                  # Don't let eta go below 0.0
 
 # No scenarios defined here, as this config is for a single online learning run
