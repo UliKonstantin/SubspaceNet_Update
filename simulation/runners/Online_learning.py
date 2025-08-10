@@ -191,19 +191,20 @@ class OnlineLearning:
                 logger.error("No model available for online learning")
                 return {"status": "error", "message": "No model available for online learning"}
             
-            # Initialize online model as copy of trained model using PyTorch's method
+            # Initialize online model as copy of trained model using the same factory function
             import torch
             from copy import deepcopy
             
-            # Create a new model instance and copy the state dict
+            # Create a new model instance using the same factory function that created the trained model
             try:
-                # Method 1: Create new instance and load state dict (preferred)
-                self.online_model = type(self.trained_model)()
+                # Method 1: Use the same factory function to ensure identical architecture
+                from config.factory import create_model
+                self.online_model = create_model(self.config, self.system_model)
                 self.online_model.load_state_dict(self.trained_model.state_dict())
                 self.online_model.eval()  # Set to eval mode like the trained model
-                logger.info("Initialized online model as copy of trained model using state_dict")
+                logger.info("Initialized online model as copy of trained model using factory function")
             except Exception as e:
-                logger.warning(f"State dict copy failed ({e}), trying clone approach")
+                logger.warning(f"Factory function copy failed ({e}), trying clone approach")
                 try:
                     # Method 2: Use torch.clone() for parameters
                     self.online_model = deepcopy(self.trained_model.cpu())
@@ -212,8 +213,7 @@ class OnlineLearning:
                     logger.info("Initialized online model using CPU deepcopy then moved to GPU")
                 except Exception as e2:
                     logger.error(f"All model copying methods failed: {e2}")
-                    self.online_model = self.trained_model  # Use same model as fallback
-                    logger.warning("Using shared model reference as fallback")
+                    raise RuntimeError(f"Failed to create online model copy. Factory function failed: {e}, Deepcopy failed: {e2}. Cannot proceed with online learning.")
             
             # Reset dual model state for new trajectory
             self.drift_detected = False
@@ -573,7 +573,7 @@ class OnlineLearning:
         logger.info(f"Online training step {self.online_training_count} called for trajectory {trajectory_idx}, window {window_idx}")
         
         # Set learning done after 3 training calls
-        if self.online_training_count >= 3:
+        if self.online_training_count >= 7:
             self.learning_done = True
             logger.info(f"Online model training completed after {self.online_training_count} training windows")
         
@@ -1014,7 +1014,17 @@ class OnlineLearning:
                     if not is_near_field:
                         # Model expects num_sources as int or 0-dim tensor
                         angles_pred, _, _ = model(step_data_tensor, num_sources_this_step)
+                        angles_old, _, _ = self.trained_model(step_data_tensor, num_sources_this_step)
                         
+                        # Compare model weights properly
+                        model_state = model.state_dict()
+                        trained_state = self.trained_model.state_dict()
+                        weights_equal = all(torch.equal(model_state[key], trained_state[key]) for key in model_state.keys())
+                        if weights_equal:
+                            logger.error("Model and trained model have the same weights - online model was not properly copied!")
+                            raise RuntimeError("Online model and trained model have identical weights. This indicates the online model was not properly initialized as an independent copy. Cannot proceed with online learning.")
+                        else:
+                            logger.info("Model and trained model have different weights - online model is properly initialized")
                         # Convert predictions to numpy for EKF processing
                         angles_pred_np = angles_pred.cpu().numpy().flatten()[:num_sources_this_step]
                         
@@ -1901,6 +1911,25 @@ class OnlineLearning:
                                 training_window_indices is not None and
                                 len(training_window_indices) > 0)
             
+            # Calculate differences between static and online models if online data is available
+            static_vs_online_ekf_diff = None
+            static_vs_online_pre_ekf_diff = None
+            if has_online_data:
+                # Get static model data for the online windows
+                if online_window_indices is not None and len(online_window_indices) > 0:
+                    # Use actual online window indices to get corresponding static data
+                    static_ekf_for_comparison = [window_losses[i] for i in online_window_indices]
+                    static_pre_ekf_for_comparison = [window_pre_ekf_losses[i] for i in online_window_indices]
+                else:
+                    # Fallback: use the last N windows where N is the length of online data
+                    start_idx = max(0, len(window_losses) - len(online_window_losses))
+                    static_ekf_for_comparison = window_losses[start_idx:]
+                    static_pre_ekf_for_comparison = window_pre_ekf_losses[start_idx:]
+                
+                # Calculate differences (positive = online better)
+                static_vs_online_ekf_diff = np.array(static_ekf_for_comparison) - np.array(online_window_losses)
+                static_vs_online_pre_ekf_diff = np.array(static_pre_ekf_for_comparison) - np.array(online_pre_ekf_losses)
+            
             # Find indices where eta changes
             eta_changes = []
             eta_values = []
@@ -1909,8 +1938,8 @@ class OnlineLearning:
                     eta_changes.append(i)
                     eta_values.append(window_eta_values[i])
             
-            # Create figure with multiple subplots (4x2 layout for 8 plots)
-            fig = plt.figure(figsize=(20, 20))
+            # Create figure with multiple subplots (5x2 layout for 10 plots to accommodate difference plots)
+            fig = plt.figure(figsize=(20, 25))
             
             # 1. Plot loss vs window index
             ax1 = fig.add_subplot(4, 2, 1)
@@ -2437,6 +2466,56 @@ class OnlineLearning:
                 ax7.set_title(title)
                 ax7.legend()
                 ax7.grid(True, alpha=0.3)
+            
+            # 8. Plot Static vs Online EKF Loss Difference
+            if has_online_data and static_vs_online_ekf_diff is not None:
+                ax8 = fig.add_subplot(5, 2, 8)
+                
+                # Use actual online window indices if available
+                if online_window_indices is not None and len(online_window_indices) > 0:
+                    online_x = np.array(online_window_indices)
+                else:
+                    online_x = np.arange(len(static_vs_online_ekf_diff))
+                
+                ax8.plot(online_x, static_vs_online_ekf_diff, 'red', marker='s', linewidth=2, markersize=6, label='Static - Online EKF Loss')
+                ax8.axhline(y=0, color='black', linestyle='--', alpha=0.5, label='No Difference Line')
+                
+                # Add eta change markers
+                for idx, eta in zip(eta_changes, eta_values):
+                    if idx in online_x:
+                        ax8.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                        ax8.text(idx, ax8.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+                
+                ax8.set_xlabel('Window Index')
+                ax8.set_ylabel('Loss Difference')
+                ax8.set_title('Static vs Online EKF Loss Difference\n(Positive = Online Better, Negative = Static Better)')
+                ax8.legend()
+                ax8.grid(True, alpha=0.3)
+            
+            # 9. Plot Static vs Online Pre-EKF Loss Difference
+            if has_online_data and static_vs_online_pre_ekf_diff is not None:
+                ax9 = fig.add_subplot(5, 2, 9)
+                
+                # Use actual online window indices if available
+                if online_window_indices is not None and len(online_window_indices) > 0:
+                    online_x = np.array(online_window_indices)
+                else:
+                    online_x = np.arange(len(static_vs_online_pre_ekf_diff))
+                
+                ax9.plot(online_x, static_vs_online_pre_ekf_diff, 'brown', marker='*', linewidth=2, markersize=6, label='Static - Online Pre-EKF Loss')
+                ax9.axhline(y=0, color='black', linestyle='--', alpha=0.5, label='No Difference Line')
+                
+                # Add eta change markers
+                for idx, eta in zip(eta_changes, eta_values):
+                    if idx in online_x:
+                        ax9.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                        ax9.text(idx, ax9.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+                
+                ax9.set_xlabel('Window Index')
+                ax9.set_ylabel('Loss Difference')
+                ax9.set_title('Static vs Online Pre-EKF Loss Difference\n(Positive = Online Better, Negative = Static Better)')
+                ax9.legend()
+                ax9.grid(True, alpha=0.3)
             
             # Adjust layout and save
             plt.tight_layout()
