@@ -6,6 +6,7 @@ handling non-linear state evolution models for angle tracking in DOA estimation.
 """
 
 import numpy as np
+import torch
 import logging
 from config.schema import TrajectoryType
 from simulation.kalman_filter.models import SineAccelStateModel, MultNoiseStateModel
@@ -56,37 +57,48 @@ class ExtendedKalmanFilter1D:
     automatically selects the appropriate model based on the trajectory type.
     """
     
-    def __init__(self, state_model, R, P0=0.001):
+    def __init__(self, state_model, R, P0=0.001, device=None):
         """
         Initialize the Extended Kalman Filter.
         
         Args:
             state_model: StateEvolutionModel instance
-            R: Measurement noise variance (scalar)
-            P0: Initial state covariance (scalar)
+            R: Measurement noise variance (scalar or tensor)
+            P0: Initial state covariance (scalar or tensor)
+            device: Device for tensor operations (cuda/cpu)
         """
+        # Set device for tensor operations
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
+        
+        # Convert parameters to tensors
+        R_tensor = torch.tensor(R, dtype=torch.float32, device=device)
+        P0_tensor = torch.tensor(P0, dtype=torch.float32, device=device)
+        
         # Prevent exactly zero measurement noise (numerical stability)
-        if R == 0:
-            R = 1e-6
+        if R_tensor == 0:
+            R_tensor = torch.tensor(1e-6, dtype=torch.float32, device=device)
             
         self.state_model = state_model
-        self.R = R  # Measurement noise variance
-        self.P0 = P0  # Initial state covariance
+        self.R = R_tensor  # Measurement noise variance (tensor)
+        self.P0 = P0_tensor  # Initial state covariance (tensor)
         
         # State will be initialized later
-        self.x = None  # State estimate
-        self.P = P0  # State estimate covariance
-        self.Q = 0 # Process noise variance
-        logger.debug(f"Initialized Extended Kalman Filter with R={R}, P0={P0}")
+        self.x = None  # State estimate (tensor)
+        self.P = P0_tensor.clone()  # State estimate covariance (tensor)
+        self.Q = torch.tensor(0.0, dtype=torch.float32, device=device)  # Process noise variance (tensor)
+        logger.debug(f"Initialized Extended Kalman Filter with R={R}, P0={P0}, device={device}")
     
     @classmethod
-    def from_config(cls, config, trajectory_type=None):
+    def from_config(cls, config, trajectory_type=None, device=None):
         """
         Get ExtendedKalmanFilter1D parameters from configuration.
         
         Args:
             config: Configuration object with kalman_filter and trajectory settings
             trajectory_type: Type of trajectory to model (defaults to config value)
+            device: Device for tensor operations (cuda/cpu)
             
         Returns:
             tuple: (state_model, R, P0) - Parameters needed for ExtendedKalmanFilter1D initialization
@@ -117,7 +129,7 @@ class ExtendedKalmanFilter1D:
             # Use KF process noise instead of trajectory noise
             noise_std = kf_process_noise_std
             
-            state_model = SineAccelStateModel(omega0, kappa, noise_std)
+            state_model = SineAccelStateModel(omega0, kappa, noise_std, device=device)
             logger.info(f"Using sine acceleration model with ω₀={omega0}, κ={kappa}, σ={noise_std}")
             
         elif trajectory_type == TrajectoryType.MULT_NOISE_NONLINEAR:
@@ -127,14 +139,14 @@ class ExtendedKalmanFilter1D:
             # Use KF process noise instead of trajectory noise
             base_std = kf_process_noise_std
             
-            state_model = MultNoiseStateModel(omega0, amp, base_std)
+            state_model = MultNoiseStateModel(omega0, amp, base_std, device=device)
             logger.info(f"Using multiplicative noise model with ω₀={omega0}, amp={amp}, σ={base_std}")
             
         else:
             # Default to random walk model for other types
             # Use KF process noise instead of trajectory noise
             noise_std = kf_process_noise_std
-            state_model = SineAccelStateModel(0.0, 0.0, noise_std)
+            state_model = SineAccelStateModel(0.0, 0.0, noise_std, device=device)
             logger.info(f"Using random walk model with σ={noise_std}")
         
         # Get measurement noise and initial covariance
@@ -144,22 +156,23 @@ class ExtendedKalmanFilter1D:
         return state_model, kf_R, kf_P0
 
     @classmethod
-    def create_from_config(cls, config, trajectory_type=None):
+    def create_from_config(cls, config, trajectory_type=None, device=None):
         """
         Create ExtendedKalmanFilter1D instance directly from config.
         
         Args:
             config: Configuration object with kalman_filter and trajectory settings
             trajectory_type: Type of trajectory to model (defaults to config value)
+            device: Device for tensor operations (cuda/cpu)
             
         Returns:
             ExtendedKalmanFilter1D instance
         """
-        params = cls.from_config(config, trajectory_type)
-        return cls(state_model=params[0], R=params[1], P0=params[2])
+        params = cls.from_config(config, trajectory_type, device=device)
+        return cls(state_model=params[0], R=params[1], P0=params[2], device=device)
     
     @classmethod
-    def create_filters_from_config(cls, config, num_instances=1, trajectory_type=None):
+    def create_filters_from_config(cls, config, num_instances=1, trajectory_type=None, device=None):
         """
         Create multiple ExtendedKalmanFilter1D instances directly from config.
         
@@ -167,12 +180,13 @@ class ExtendedKalmanFilter1D:
             config: Configuration object with kalman_filter and trajectory settings
             num_instances: Number of filter instances to create
             trajectory_type: Type of trajectory to model (defaults to config value)
+            device: Device for tensor operations (cuda/cpu)
             
         Returns:
             list: List of ExtendedKalmanFilter1D instances
         """
-        params = cls.from_config(config, trajectory_type)
-        filters = [cls(state_model=params[0], R=params[1], P0=params[2]) for _ in range(num_instances)]
+        params = cls.from_config(config, trajectory_type, device=device)
+        filters = [cls(state_model=params[0], R=params[1], P0=params[2], device=device) for _ in range(num_instances)]
         return filters
     
     def initialize_state(self, x0):
@@ -180,23 +194,23 @@ class ExtendedKalmanFilter1D:
         Initialize the state estimate.
         
         Args:
-            x0: Initial state estimate (scalar)
+            x0: Initial state estimate (scalar or tensor)
         """
-        self.x = x0
-        self.P = self.P0
+        # Convert to tensor if needed
+        if isinstance(x0, torch.Tensor):
+            self.x = x0.to(self.device)
+        else:
+            self.x = torch.tensor(x0, dtype=torch.float32, device=self.device)
+        
+        self.P = self.P0.clone()
         logger.debug(f"Initialized state to x0={x0} with covariance P0={self.P0}")
     
-    def predict(self, generate_measurement=False):
+    def predict(self):
         """
         Perform the time update (prediction) step.
         
-        Args:
-            generate_measurement: If True, also generates a noisy measurement for the
-                                predicted state and returns it along with the prediction
-        
         Returns:
-            If generate_measurement is False: Predicted state (scalar)
-            If generate_measurement is True: Tuple of (predicted state, measurement)
+            Predicted state (tensor)
         """
         if self.x is None:
             raise ValueError("State must be initialized before prediction")
@@ -217,60 +231,33 @@ class ExtendedKalmanFilter1D:
         self.x = x_pred
         self.P = P_pred
         
-        # Optionally generate measurement for the predicted state
-        if generate_measurement:
-            measurement = self.simulate_measurement(true_state=x_pred)
-            return x_pred, measurement
-        else:
-            return x_pred
+        return x_pred
     
-    def simulate_measurement(self, true_state=None):
-        """
-        Generate a simulated noisy measurement based on the current state.
-        
-        Args:
-            true_state: Optional true state to use instead of the filter's state estimate
-                        (useful for simulation when we know the ground truth)
-        
-        Returns:
-            Simulated noisy measurement (scalar)
-        """
-        if true_state is None:
-            if self.x is None:
-                raise ValueError("State must be initialized before simulating measurements")
-            state = self.x
-        else:
-            state = true_state
-            
-        # Generate measurement noise with variance R
-        measurement_noise = np.random.normal(0, np.sqrt(self.R))
-        
-        # Measurement model: z = x + v where v ~ N(0, R)
-        measurement = state + measurement_noise
-        
-        return measurement
+
     
-    def update(self, z=None):
+    def update(self, z):
         """
         Perform the measurement update step.
         
         Args:
-            z: Measurement (scalar). If None, a measurement will be simulated
-               based on the current state estimate.
+            z: Measurement (tensor)
             
         Returns:
-            Tuple of (updated state estimate (scalar), innovation (scalar))
+            Tuple of (updated state estimate (tensor), innovation (tensor), kalman_gain (tensor), 
+                     kalman_gain_times_innovation (tensor), y_s_inv_y (tensor))
         """
         if self.x is None:
             raise ValueError("State must be initialized before update")
         
-        # If no measurement provided, simulate one based on current state
-        if z is None:
-            z = self.simulate_measurement()
-            logger.debug(f"Using simulated measurement: {z}")
+        # Convert measurement to tensor if needed
+        if isinstance(z, torch.Tensor):
+            z_tensor = z.to(self.device)
+        else:
+            z_tensor = torch.tensor(z, dtype=torch.float32, device=self.device)
+            
         # Measurement model is linear (H=1) for our problem
         # Innovation / measurement residual (y = z - H * x̂_k|k-1)
-        y = z - self.x
+        y = z_tensor - self.x
         
         # Innovation covariance (S = H * P_k|k-1 * H^T + R)
         S = self.P + self.R
@@ -282,77 +269,38 @@ class ExtendedKalmanFilter1D:
         x_new = self.x + K * y
         
         # Covariance update (P_k|k = (I - K * H) * P_k|k-1)
-        P_new = (1 - K) * self.P
+        P_new = (torch.tensor(1.0, device=self.device) - K) * self.P
         
         # Calculate y*(S^-1)*y (innovation covariance metric)
-        y_s_inv_y = y * (1 / S) * y
+        y_s_inv_y = y * (torch.tensor(1.0, device=self.device) / S) * y
         
         # Update state and covariance
         self.x = x_new
         self.P = P_new
         
+        # Return all values as tensors
         return x_new, y, K, K * y, y_s_inv_y
 
-    def predict_and_update(self, measurement=None, true_state=None):
+    def predict_and_update(self, measurement, true_state=None):
         """
         Perform a complete cycle of prediction and update.
         
         This method:
         1. Predicts the next state
-        2. Updates the filter state using provided measurement or simulated measurement
+        2. Updates the filter state using provided measurement
         
         Args:
-            measurement: Optional measurement to use for update. If None, generates
-                        a noisy measurement based on true_state or predicted state.
-            true_state: Optional ground truth state to use for measurement generation
-                       when measurement is None. If None, uses the filter's predicted state.
+            measurement: Measurement to use for update (tensor or scalar)
+            true_state: Optional ground truth state for logging (tensor or scalar)
         
         Returns:
             Tuple of (predicted_state, updated_state, innovation, kalman_gain, 
-                     kalman_gain_times_innovation, y_s_inv_y)
+                     kalman_gain_times_innovation, y_s_inv_y) - all tensors
         """
         # Perform prediction step
         predicted_state = self.predict()
         
-        # Use provided measurement or generate one
-        if measurement is not None:
-            z = measurement
-        else:
-            # Generate measurement (either from true state or from prediction)
-            z = self.simulate_measurement(true_state=true_state if true_state is not None else predicted_state)
-        
         # Perform update step with measurement
-        updated_state, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y = self.update(z=z)
-        distance_to_measurement = updated_state - z
-        distance_to_evolution_model = updated_state - predicted_state
+        updated_state, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y = self.update(z=measurement)
         
-        # Log results in table format
-        table_header = "| Metric                                               | Value       |"
-        table_separator = "|------------------------------------------------------|-------------|"
-        # Calculate distance to ground truth if available
-        distance_to_ground_truth = updated_state - true_state if true_state is not None else None
-        
-        # Format values with proper conditionals
-        true_state_str = f"{true_state:11.6f}" if true_state is not None else "        N/A"
-        distance_to_ground_truth_str = f"{distance_to_ground_truth:11.6f}" if distance_to_ground_truth is not None else "        N/A"
-        
-        table_rows = [
-            f"| Predict Step State (State Evolution Model)           | {predicted_state:11.6f} |",
-            f"| Measurement     (SubspaceNet)                        | {z:11.6f} |",
-            f"| EKF State   (EKF)                                    | {updated_state:11.6f} |",
-            f"| True State (Ground Truth)                            | {true_state_str} |",
-            f"| Distance to Measurement (SubspaceNet)                | {distance_to_measurement:11.6f} |",
-            f"| Distance to State Evolution Model                    | {distance_to_evolution_model:11.6f} |",
-            f"| Distance to Ground Truth                             | {distance_to_ground_truth_str} |",
-            f"| Innovation (EKF)                                     | {innovation:11.6f} |",
-            f"| Kalman Gain (SubspaceNet-State Evolution Model)      | {kalman_gain:11.6f} |"
-        ]
-        
-        table_output = "\n".join([
-            "EKF Prediction and Update Results:",
-            table_header,
-            table_separator
-        ] + table_rows)
-        
-        logger.debug(f"\n{table_output}")
         return predicted_state, updated_state, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y 

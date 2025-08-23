@@ -6,6 +6,7 @@ This module implements the sine acceleration model:
 """
 
 import numpy as np
+import torch
 import logging
 from .base import StateEvolutionModel
 
@@ -20,7 +21,7 @@ class SineAccelStateModel(StateEvolutionModel):
     creating non-linear dynamics that depend on the current angle.
     """
     
-    def __init__(self, omega0, kappa, noise_std, time_step=1.0):
+    def __init__(self, omega0, kappa, noise_std, time_step=1.0, device=None):
         """
         Initialize the model.
         
@@ -29,36 +30,49 @@ class SineAccelStateModel(StateEvolutionModel):
             kappa: Sine acceleration coefficient (rad/s²)
             noise_std: Standard deviation of process noise (rad)
             time_step: Time step between measurements (s)
+            device: Device for tensor operations (cuda/cpu)
         """
-        self.omega0 = omega0
-        self.kappa = kappa
-        self.base_noise_variance = noise_std**2
-        self.time_step = time_step
+        # Set device for tensor operations
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
         
-        logger.debug(f"Created SineAccelStateModel with ω₀={omega0}, κ={kappa}, σ={noise_std}, T={time_step}")
+        # Convert parameters to tensors
+        self.omega0 = torch.tensor(omega0, dtype=torch.float32, device=device)
+        self.kappa = torch.tensor(kappa, dtype=torch.float32, device=device)
+        self.base_noise_variance = torch.tensor(noise_std**2, dtype=torch.float32, device=device)
+        self.time_step = torch.tensor(time_step, dtype=torch.float32, device=device)
+        
+        logger.debug(f"Created SineAccelStateModel with ω₀={omega0}, κ={kappa}, σ={noise_std}, T={time_step}, device={device}")
     
     def f(self, x):
         """
         State transition: θ_{k+1} = θ_k + (ω0 + κ sin θ_k)T
         
         Args:
-            x: Current angle (degrees)
+            x: Current angle (tensor or scalar)
             
         Returns:
-            Predicted next angle (degrees)
+            Predicted next angle (tensor)
         """
-        # Convert to radians for trigonometric function
-        #x_rad = np.radians(x) if isinstance(x, (int, float)) else np.radians(x.copy())
-        x_rad = x
-        x_deg = x_rad * 180/np.pi
-        # Calculate acceleration term
-        delta = (self.omega0 + self.kappa * np.sin(x_rad)) * self.time_step
+        # Convert to tensor if needed
+        if isinstance(x, torch.Tensor):
+            x_tensor = x.to(self.device)
+        else:
+            x_tensor = torch.tensor(x, dtype=torch.float32, device=self.device)
         
-        # Return in same units as input (degrees)
-        #result = x + np.radians(delta)
-        result_deg = 0.99*x_deg + delta
-        result = np.radians(result_deg) # Convert back to radians
-        logger.debug(f"SineAccel state transition: {x} -> {result}")
+        # x is already in radians
+        x_rad = x_tensor
+        x_deg = x_rad * 180.0 / torch.pi
+        
+        # Calculate acceleration term using tensor operations
+        delta = (self.omega0 + self.kappa * torch.sin(x_rad)) * self.time_step
+        
+        # Apply state transition
+        result_deg = 0.99 * x_deg + delta
+        result = result_deg * torch.pi / 180.0  # Convert back to radians
+        
+        logger.debug(f"SineAccel state transition: {float(x) if hasattr(x, 'item') else x} -> {float(result) if hasattr(result, 'item') else result}")
         return result
     
     def F_jacobian(self, x):
@@ -66,39 +80,62 @@ class SineAccelStateModel(StateEvolutionModel):
         Jacobian: ∂f/∂x = 1 + κT·cos(θ)
         
         Args:
-            x: Current angle (degrees)
+            x: Current angle (tensor or scalar)
             
         Returns:
-            Derivative of state transition with respect to state
+            Derivative of state transition with respect to state (tensor)
         """
-        # Convert to radians for trigonometric function
-        #x_rad = np.radians(x) if isinstance(x, (int, float)) else np.radians(x.copy())
-        x_rad = x
-        # Calculate the derivative
-        # Note: need to account for degrees->radians conversion in the derivative
-        #jacobian = 1 + self.kappa * np.cos(x_rad) * self.time_step * np.pi/180.0
-        jacobian = 0.99 + self.kappa * np.cos(x_rad) * self.time_step
-        logger.debug(f"SineAccel Jacobian at x={x}: {jacobian}")
+        # Convert to tensor if needed
+        if isinstance(x, torch.Tensor):
+            x_tensor = x.to(self.device)
+        else:
+            x_tensor = torch.tensor(x, dtype=torch.float32, device=self.device)
+        
+        # x is already in radians
+        x_rad = x_tensor
+        
+        # Calculate the derivative using tensor operations
+        jacobian = 0.99 + self.kappa * torch.cos(x_rad) * self.time_step
+        
+        logger.debug(f"SineAccel Jacobian at x={float(x) if hasattr(x, 'item') else x}: {float(jacobian) if hasattr(jacobian, 'item') else jacobian}")
         return jacobian
+    
+    def noise_variance(self, x):
+        """
+        Process noise variance (constant for this model).
+        
+        Args:
+            x: Current angle (tensor or scalar)
+            
+        Returns:
+            Noise variance (tensor)
+        """
+        # Return constant noise variance as tensor
+        return self.base_noise_variance
     
     def f_batch(self, x_batch):
         """
         Batch version of state transition function.
         
         Args:
-            x_batch: Array of current angles
+            x_batch: Tensor or array of current angles
             
         Returns:
-            Array of predicted next angles
+            Tensor of predicted next angles
         """
-        # Convert to numpy array if needed
-        x_array = np.asarray(x_batch)
+        # Convert to tensor if needed
+        if isinstance(x_batch, torch.Tensor):
+            x_tensor = x_batch.to(self.device)
+        else:
+            x_tensor = torch.tensor(x_batch, dtype=torch.float32, device=self.device)
         
-        # Apply state transition function element-wise
-        delta = (self.omega0 + self.kappa * np.sin(x_array)) * self.time_step
-        result = x_array + delta
+        # Apply state transition function element-wise using tensor operations
+        x_deg = x_tensor * 180.0 / torch.pi
+        delta = (self.omega0 + self.kappa * torch.sin(x_tensor)) * self.time_step
+        result_deg = 0.99 * x_deg + delta
+        result = result_deg * torch.pi / 180.0
         
-        logger.debug(f"SineAccel batch state transition for {len(x_array)} states")
+        logger.debug(f"SineAccel batch state transition for {x_tensor.numel()} states")
         return result
     
     def F_jacobian_batch(self, x_batch):
@@ -106,18 +143,21 @@ class SineAccelStateModel(StateEvolutionModel):
         Batch version of Jacobian computation.
         
         Args:
-            x_batch: Array of current angles
+            x_batch: Tensor or array of current angles
             
         Returns:
-            Array of Jacobians
+            Tensor of Jacobians
         """
-        # Convert to numpy array if needed
-        x_array = np.asarray(x_batch)
+        # Convert to tensor if needed
+        if isinstance(x_batch, torch.Tensor):
+            x_tensor = x_batch.to(self.device)
+        else:
+            x_tensor = torch.tensor(x_batch, dtype=torch.float32, device=self.device)
         
-        # Calculate Jacobians element-wise
-        jacobian = 1 + self.kappa * np.cos(x_array) * self.time_step
+        # Calculate Jacobians element-wise using tensor operations
+        jacobian = 0.99 + self.kappa * torch.cos(x_tensor) * self.time_step
         
-        logger.debug(f"SineAccel batch Jacobian for {len(x_array)} states")
+        logger.debug(f"SineAccel batch Jacobian for {x_tensor.numel()} states")
         return jacobian
     
     def noise_variance_batch(self, x_batch):
@@ -125,13 +165,16 @@ class SineAccelStateModel(StateEvolutionModel):
         Batch version of noise variance computation.
         
         Args:
-            x_batch: Array of current angles
+            x_batch: Tensor or array of current angles
             
         Returns:
-            Array of noise variances (constant for this model)
+            Tensor of noise variances (constant for this model)
         """
-        # Convert to numpy array if needed
-        x_array = np.asarray(x_batch)
+        # Convert to tensor if needed
+        if isinstance(x_batch, torch.Tensor):
+            x_tensor = x_batch.to(self.device)
+        else:
+            x_tensor = torch.tensor(x_batch, dtype=torch.float32, device=self.device)
         
-        # Return constant noise variance for all states
-        return np.full_like(x_array, self.base_noise_variance) 
+        # Return constant noise variance for all states using tensor operations
+        return torch.full_like(x_tensor, self.base_noise_variance, device=self.device) 

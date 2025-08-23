@@ -905,3 +905,1014 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
     
     logger.info(f"Completed eta comparison plotting: {len(saved_plots)} plots saved to {plot_dir}")
     return saved_plots 
+
+
+def plot_single_trajectory_results(trajectory_results, trajectory_idx, output_dir):
+    """
+    Plot results for a single trajectory including loss difference and innovation.
+    Also includes online learning results when available.
+    
+    Args:
+        trajectory_results: Dictionary containing single trajectory results
+        trajectory_idx: Index of the trajectory being plotted
+        output_dir: Output directory for saving plots
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import datetime
+        from pathlib import Path
+        
+        # Create timestamp and plot directory
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        plot_dir = Path(output_dir) / "plots" / "single_trajectories"
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Extract data from trajectory results
+        pre_ekf_losses = np.array(trajectory_results['pre_ekf_losses'])  # Shape: (30,)
+        window_losses = np.array(trajectory_results['window_losses'])    # Shape: (30,) - post EKF losses
+        ekf_innovations = np.array(trajectory_results['ekf_innovations']) # Shape: (30, 5, 3)
+        window_eta_values = trajectory_results['window_eta_values']
+        
+        # Check if online learning results are available
+        has_online_results = ('online_window_losses' in trajectory_results and 
+                            len(trajectory_results['online_window_losses']) > 0)
+        
+        # Calculate loss difference: pre_ekf_loss - post_ekf_loss (positive means EKF improved)
+        loss_difference = pre_ekf_losses - window_losses
+        
+        # Calculate average innovation magnitude per window
+        # Aggregate across steps (5) and sources (3) to get one value per window (30)
+        avg_innovations_per_window = []
+        for window_idx in range(ekf_innovations.shape[0]):  # 30 windows
+            window_innovations = []
+            for step_idx in range(ekf_innovations.shape[1]):  # 5 steps
+                for source_idx in range(ekf_innovations.shape[2]):  # 3 sources
+                    innovation_val = ekf_innovations[window_idx, step_idx, source_idx]
+                    window_innovations.append(abs(innovation_val))  # Use absolute value
+            
+            if window_innovations:
+                avg_innovations_per_window.append(np.mean(window_innovations))
+            else:
+                avg_innovations_per_window.append(0)
+        
+        avg_innovations_per_window = np.array(avg_innovations_per_window)
+        
+        # Find indices where eta changes
+        eta_changes = []
+        eta_values = []
+        for i in range(1, len(window_eta_values)):
+            if abs(window_eta_values[i] - window_eta_values[i-1]) > 1e-6:
+                eta_changes.append(i)
+                eta_values.append(window_eta_values[i])
+        
+        # Determine number of subplots based on available data
+        if has_online_results:
+            # Create figure with 6 subplots (2x3 layout) to accommodate difference plot
+            fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(2, 3, figsize=(20, 12))
+            
+            # Extract online learning data
+            online_window_losses = np.array(trajectory_results['online_window_losses'])
+            online_pre_ekf_losses = np.array(trajectory_results['online_pre_ekf_losses'])
+            online_ekf_innovations = np.array(trajectory_results['online_ekf_innovations'])
+            
+            # Calculate online loss difference
+            online_loss_difference = online_pre_ekf_losses - online_window_losses
+            
+            # Calculate online average innovation magnitude per window
+            online_avg_innovations_per_window = []
+            for window_idx in range(online_ekf_innovations.shape[0]):
+                window_innovations = []
+                for step_idx in range(online_ekf_innovations.shape[1]):
+                    for source_idx in range(online_ekf_innovations.shape[2]):
+                        innovation_val = online_ekf_innovations[window_idx, step_idx, source_idx]
+                        window_innovations.append(abs(innovation_val))
+                
+                if window_innovations:
+                    online_avg_innovations_per_window.append(np.mean(window_innovations))
+                else:
+                    online_avg_innovations_per_window.append(0)
+            
+            online_avg_innovations_per_window = np.array(online_avg_innovations_per_window)
+            
+            # Window indices for online results
+            online_window_indices = np.arange(len(online_window_losses))
+            
+            # Calculate difference between static and online models
+            # We need to align the data properly - static model has full trajectory, online has subset
+            # For now, we'll calculate difference for the online windows only
+            static_losses_for_comparison = window_losses[online_window_indices]  # Get static losses for online windows
+            static_pre_ekf_for_comparison = pre_ekf_losses[online_window_indices]  # Get static pre-ekf for online windows
+            
+            # Calculate differences
+            loss_difference_static_vs_online = static_losses_for_comparison - online_window_losses  # Positive = online better
+            pre_ekf_difference_static_vs_online = static_pre_ekf_for_comparison - online_pre_ekf_losses  # Positive = online better
+            
+        else:
+            # Create figure with 2 subplots (original layout)
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+            ax3, ax4 = None, None
+        
+        # Window indices for static model results
+        window_indices = np.arange(len(window_losses))
+        
+        # Plot 1: Static model loss difference (Pre-EKF Loss - Post-EKF Loss)
+        ax1.plot(window_indices, loss_difference, 'g-', marker='o', linewidth=2, markersize=6, label='Static Model: Pre-EKF Loss - Post-EKF Loss')
+        ax1.axhline(y=0, color='black', linestyle='--', alpha=0.5, label='No Improvement Line')
+        
+        # Add eta change markers
+        for idx, eta in zip(eta_changes, eta_values):
+            ax1.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+            ax1.text(idx, ax1.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+        
+        ax1.set_xlabel('Window Index')
+        ax1.set_ylabel('Loss Difference')
+        ax1.set_title(f'Trajectory {trajectory_idx}: Static Model Loss Difference\n(Positive = EKF Improved, Negative = EKF Worse)')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot 2: Static model innovation magnitude
+        ax2.plot(window_indices, avg_innovations_per_window, 'b-', marker='s', linewidth=2, markersize=6, label='Static Model: Average Innovation Magnitude')
+        
+        # Add eta change markers
+        for idx, eta in zip(eta_changes, eta_values):
+            ax2.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+            ax2.text(idx, ax2.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+        
+        ax2.set_xlabel('Window Index')
+        ax2.set_ylabel('Average Innovation Magnitude')
+        ax2.set_title(f'Trajectory {trajectory_idx}: Static Model Innovation Magnitude\n|Innovation| = |z_k - H x̂_k|k-1| = |measurement - prediction|')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # Add online learning plots if available
+        if has_online_results and ax3 is not None and ax4 is not None and ax5 is not None and ax6 is not None:
+            # Plot 3: Online model loss difference
+            ax3.plot(online_window_indices, online_loss_difference, 'purple', marker='d', linewidth=2, markersize=6, label='Online Model: Pre-EKF Loss - Post-EKF Loss')
+            ax3.axhline(y=0, color='black', linestyle='--', alpha=0.5, label='No Improvement Line')
+            
+            # Add eta change markers for online results
+            for idx, eta in zip(eta_changes, eta_values):
+                if idx < len(online_window_indices):
+                    ax3.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                    ax3.text(idx, ax3.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            ax3.set_xlabel('Window Index')
+            ax3.set_ylabel('Loss Difference')
+            ax3.set_title(f'Trajectory {trajectory_idx}: Online Model Loss Difference\n(Positive = EKF Improved, Negative = EKF Worse)')
+            ax3.legend()
+            ax3.grid(True, alpha=0.3)
+            
+            # Plot 4: Online model innovation magnitude
+            ax4.plot(online_window_indices, online_avg_innovations_per_window, 'orange', marker='^', linewidth=2, markersize=6, label='Online Model: Average Innovation Magnitude')
+            
+            # Add eta change markers for online results
+            for idx, eta in zip(eta_changes, eta_values):
+                if idx < len(online_window_indices):
+                    ax4.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                    ax4.text(idx, ax4.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            ax4.set_xlabel('Window Index')
+            ax4.set_ylabel('Average Innovation Magnitude')
+            ax4.set_title(f'Trajectory {trajectory_idx}: Online Model Innovation Magnitude\n|Innovation| = |z_k - H x̂_k|k-1| = |measurement - prediction|')
+            ax4.legend()
+            ax4.grid(True, alpha=0.3)
+            
+            # Plot 5: Static vs Online EKF Loss Difference
+            ax5.plot(online_window_indices, loss_difference_static_vs_online, 'red', marker='s', linewidth=2, markersize=6, label='Static - Online EKF Loss')
+            ax5.axhline(y=0, color='black', linestyle='--', alpha=0.5, label='No Difference Line')
+            
+            # Add eta change markers
+            for idx, eta in zip(eta_changes, eta_values):
+                if idx < len(online_window_indices):
+                    ax5.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                    ax5.text(idx, ax5.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            ax5.set_xlabel('Window Index')
+            ax5.set_ylabel('Loss Difference')
+            ax5.set_title(f'Trajectory {trajectory_idx}: Static vs Online EKF Loss Difference\n(Positive = Online Better, Negative = Static Better)')
+            ax5.legend()
+            ax5.grid(True, alpha=0.3)
+            
+            # Plot 6: Static vs Online Pre-EKF Loss Difference
+            ax6.plot(online_window_indices, pre_ekf_difference_static_vs_online, 'brown', marker='*', linewidth=2, markersize=6, label='Static - Online Pre-EKF Loss')
+            ax6.axhline(y=0, color='black', linestyle='--', alpha=0.5, label='No Difference Line')
+            
+            # Add eta change markers
+            for idx, eta in zip(eta_changes, eta_values):
+                if idx < len(online_window_indices):
+                    ax6.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                    ax6.text(idx, ax6.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            ax6.set_xlabel('Window Index')
+            ax6.set_ylabel('Loss Difference')
+            ax6.set_title(f'Trajectory {trajectory_idx}: Static vs Online Pre-EKF Loss Difference\n(Positive = Online Better, Negative = Static Better)')
+            ax6.legend()
+            ax6.grid(True, alpha=0.3)
+        
+        # Adjust layout and save
+        plt.tight_layout()
+        plot_filename = f"single_trajectory_{trajectory_idx}_{timestamp}.png"
+        if has_online_results:
+            plot_filename = f"single_trajectory_{trajectory_idx}_with_online_{timestamp}.png"
+        
+        plot_path = plot_dir / plot_filename
+        plt.savefig(plot_path)
+        plt.close()
+        
+        logger = logging.getLogger(__name__)
+        logger.info(f"Single trajectory plot saved: {plot_path}")
+        if has_online_results:
+            logger.info(f"Online learning results included in plot for trajectory {trajectory_idx}")
+        
+        return plot_path
+        
+    except ImportError:
+        logger = logging.getLogger(__name__)
+        logger.warning("matplotlib not available for single trajectory plotting")
+        return None
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error plotting single trajectory results for trajectory {trajectory_idx}: {e}")
+        return None
+
+
+def plot_online_learning_results(output_dir, window_losses, window_covariances, window_eta_values, window_updates, window_pre_ekf_losses, window_labels, ekf_covariances, ekf_kalman_gains=None, ekf_kalman_gain_times_innovation=None, ekf_y_s_inv_y=None, online_window_losses=None, online_window_covariances=None, online_pre_ekf_losses=None, online_ekf_innovations=None, online_ekf_kalman_gains=None, online_ekf_kalman_gain_times_innovation=None, online_ekf_y_s_inv_y=None, online_window_indices=None, training_window_losses=None, training_window_covariances=None, training_pre_ekf_losses=None, training_ekf_innovations=None, training_ekf_kalman_gains=None, training_ekf_kalman_gain_times_innovation=None, training_ekf_y_s_inv_y=None, training_window_indices=None, learning_start_window=None, window_delta_losses=None, window_delta_rmape_losses=None, online_delta_losses=None, online_delta_rmape_losses=None, training_delta_losses=None, training_delta_rmape_losses=None, window_pre_ekf_angles_pred=None, online_pre_ekf_angles_pred=None, training_pre_ekf_angles_pred=None, window_ekf_predictions=None, online_ekf_predictions=None, training_ekf_predictions=None):
+    """
+    Plot online learning results including plots as a function of eta.
+    Also includes online model results and training data when available.
+    
+    Args:
+        output_dir: Output directory for saving plots
+        window_losses: Static model window losses
+        window_covariances: Static model window covariances
+        window_eta_values: Eta values for each window
+        window_updates: Model update flags for each window
+        window_pre_ekf_losses: Static model pre-EKF losses
+        window_labels: Window labels for trajectory plotting
+        ekf_covariances: EKF covariances
+        ekf_kalman_gains: EKF Kalman gains (optional)
+        ekf_kalman_gain_times_innovation: EKF Kalman gain times innovation (optional)
+        ekf_y_s_inv_y: EKF y*S^-1*y values (optional)
+        online_window_losses: Online model window losses (optional)
+        online_window_covariances: Online model window covariances (optional)
+        online_pre_ekf_losses: Online model pre-EKF losses (optional)
+        online_ekf_innovations: Online model EKF innovations (optional)
+        online_ekf_kalman_gains: Online model EKF Kalman gains (optional)
+        online_ekf_kalman_gain_times_innovation: Online model EKF Kalman gain times innovation (optional)
+        online_ekf_y_s_inv_y: Online model EKF y*S^-1*y values (optional)
+        online_window_indices: Online model window indices (optional)
+        training_window_losses: Training model window losses (optional)
+        training_window_covariances: Training model window covariances (optional)
+        training_pre_ekf_losses: Training model pre-EKF losses (optional)
+        training_ekf_innovations: Training model EKF innovations (optional)
+        training_ekf_kalman_gains: Training model EKF Kalman gains (optional)
+        training_ekf_kalman_gain_times_innovation: Training model EKF Kalman gain times innovation (optional)
+        training_ekf_y_s_inv_y: Training model EKF y*S^-1*y values (optional)
+        training_window_indices: Training model window indices (optional)
+        learning_start_window: Learning start window index (optional)
+        window_delta_losses: Static model delta losses (optional)
+        window_delta_rmape_losses: Static model delta RMAPE losses (optional)
+        online_delta_losses: Online model delta losses (optional)
+        online_delta_rmape_losses: Online model delta RMAPE losses (optional)
+        training_delta_losses: Training model delta losses (optional)
+        training_delta_rmape_losses: Training model delta RMAPE losses (optional)
+        window_pre_ekf_angles_pred: Static model pre-EKF angle predictions (optional)
+        online_pre_ekf_angles_pred: Online model pre-EKF angle predictions (optional)
+        training_pre_ekf_angles_pred: Training model pre-EKF angle predictions (optional)
+        window_ekf_predictions: Static model EKF predictions (optional)
+        online_ekf_predictions: Online model EKF predictions (optional)
+        training_ekf_predictions: Training model EKF predictions (optional)
+        
+    Returns:
+        Tuple of plot paths (main_plot_path, trajectory_plot_path)
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import datetime
+        from pathlib import Path
+        
+        logger = logging.getLogger(__name__)
+        
+        # Create timestamp and plot directory
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        plot_dir = Path(output_dir) / "plots"
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        
+        def set_adjusted_ylim(ax, data, padding=0.1):
+            """Helper function to set y limits excluding first point"""
+            if len(data) > 1:
+                data_without_first = data[1:]
+                ymin = min(data_without_first)
+                ymax = max(data_without_first)
+                range_y = ymax - ymin
+                ax.set_ylim([ymin - range_y * padding, ymax + range_y * padding])
+        
+        # Check if online learning data is available
+        has_online_data = (online_window_losses is not None and 
+                          len(online_window_losses) > 0 and 
+                          online_pre_ekf_losses is not None and 
+                          len(online_pre_ekf_losses) > 0)
+        
+        # Check if training data is available
+        has_training_data = (training_window_losses is not None and 
+                            len(training_window_losses) > 0 and 
+                            training_pre_ekf_losses is not None and 
+                            len(training_pre_ekf_losses) > 0 and
+                            training_window_indices is not None and
+                            len(training_window_indices) > 0)
+        
+        # Calculate differences between static and online models if online data is available
+        static_vs_online_ekf_diff = None
+        static_vs_online_pre_ekf_diff = None
+        if has_online_data:
+            # Get static model data for the online windows
+            if online_window_indices is not None and len(online_window_indices) > 0:
+                # Use actual online window indices to get corresponding static data
+                static_ekf_for_comparison = [window_losses[i] for i in online_window_indices]
+                static_pre_ekf_for_comparison = [window_pre_ekf_losses[i] for i in online_window_indices]
+            else:
+                # Fallback: use the last N windows where N is the length of online data
+                start_idx = max(0, len(window_losses) - len(online_window_losses))
+                static_ekf_for_comparison = window_losses[start_idx:]
+                static_pre_ekf_for_comparison = window_pre_ekf_losses[start_idx:]
+            
+            # Calculate differences (positive = online better)
+            static_vs_online_ekf_diff = np.array(static_ekf_for_comparison) - np.array(online_window_losses)
+            static_vs_online_pre_ekf_diff = np.array(static_pre_ekf_for_comparison) - np.array(online_pre_ekf_losses)
+        
+        # Find indices where eta changes
+        eta_changes = []
+        eta_values = []
+        for i in range(1, len(window_eta_values)):
+            if abs(window_eta_values[i] - window_eta_values[i-1]) > 1e-6:
+                eta_changes.append(i)
+                eta_values.append(window_eta_values[i])
+        
+        # Create figure with multiple subplots (4x2 layout for 8 plots)
+        fig = plt.figure(figsize=(20, 24))
+        
+        # 1. Plot loss vs window index
+        ax1 = fig.add_subplot(4, 2, 1)
+        x = np.arange(len(window_losses))[1:]  # Start from second sample
+        
+        # Color scheme:
+        # 1. SubspaceNet without EKF (pre-EKF): Blue
+        # 2. SubspaceNet with EKF (EKF): Red  
+        # 3. Training/Online with EKF: Light red (related to red)
+        # 4. Training/Online without EKF: Light blue (related to blue)
+        
+        # Static model plots
+        ax1.plot(x, np.array(window_losses)[1:], 'red', marker='o', linewidth=2, label='Static Model EKF Loss')
+        ax1.plot(x, np.array(window_pre_ekf_losses)[1:], 'blue', marker='s', linewidth=2, label='Static Model SubspaceNet Loss')
+        
+        # Add online model data if available
+        if has_online_data:
+            # Use actual online window indices if available, otherwise fall back to learning start window
+            if online_window_indices is not None and len(online_window_indices) > 0:
+                online_x = np.array(online_window_indices)  # Use all window indices
+            elif learning_start_window is not None:
+                online_x = np.arange(learning_start_window, learning_start_window + len(online_window_losses))[1:]  # Start from second sample
+            else:
+                online_x = np.arange(len(online_window_losses))[1:]  # Start from second sample
+            ax1.plot(online_x, np.array(online_window_losses), 'lightcoral', marker='d', linewidth=2, label='Online Model EKF Loss')
+            ax1.plot(online_x, np.array(online_pre_ekf_losses), 'lightblue', marker='^', linewidth=2, label='Online Model SubspaceNet Loss')
+        
+        # Add training data if available
+        if has_training_data:
+            # Use actual training window indices
+            training_x = np.array(training_window_indices)  # Use all window indices
+            ax1.plot(training_x, np.array(training_window_losses), 'lightcoral', marker='*', linewidth=2, label='Training Model EKF Loss', linestyle='--')
+            ax1.plot(training_x, np.array(training_pre_ekf_losses), 'lightblue', marker='s', linewidth=2, label='Training Model SubspaceNet Loss', linestyle='--')
+            
+            # Connect training to online if both are available
+            if has_online_data and online_window_indices is not None and len(online_window_indices) > 0:
+                # Connect last training point to first online point
+                last_training_x = training_x[-1]  # Window 12
+                first_online_x = online_x[0]      # Window 13
+                last_training_ekf = np.array(training_window_losses)[-1]
+                first_online_ekf = np.array(online_window_losses)[0]
+                last_training_subspace = np.array(training_pre_ekf_losses)[-1]
+                first_online_subspace = np.array(online_pre_ekf_losses)[0]
+                
+                # Draw connecting lines
+                ax1.plot([last_training_x, first_online_x], [last_training_ekf, first_online_ekf], 'lightcoral', linestyle='-', linewidth=2, alpha=0.7)
+                ax1.plot([last_training_x, first_online_x], [last_training_subspace, first_online_subspace], 'lightblue', linestyle='-', linewidth=2, alpha=0.7)
+        
+        # Set y-axis limit to 0.14 for loss plot only
+        ax1.set_ylim([None, 0.14])
+        
+        # Add eta change markers (adjusted for starting from second sample)
+        for idx, eta in zip(eta_changes, eta_values):
+            if idx >= 1:  # Only show markers from second sample onwards
+                ax1.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                ax1.text(idx, 0.13, f'η={eta:.3f}', rotation=90, verticalalignment='top')
+        
+        # Add labels and title
+        ax1.set_xlabel('Window Index')
+        ax1.set_ylabel('Loss')
+        title = 'Loss vs Window Index (Starting from Window 1)\nRMSPE = √(1/N * Σ(θ_pred - θ_true)²)'
+        if has_online_data:
+            title += '\n(Static + Online Models)'
+        ax1.set_title(title)
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # 2. Plot EKF improvement vs window index (reversed: SubspaceNet - EKF)
+        ax2 = fig.add_subplot(4, 2, 2)
+        x = np.arange(len(window_losses))[1:]  # Start from second sample
+        static_improvement = np.array(window_pre_ekf_losses)[1:] - np.array(window_losses)[1:]  # Reversed calculation, starting from second sample
+        ax2.plot(x, static_improvement, 'green', marker='o', linewidth=2, label='Static Model Improvement')
+        
+        # Add online model improvement if available
+        if has_online_data:
+            # Use actual online window indices if available, otherwise fall back to learning start window
+            if online_window_indices is not None and len(online_window_indices) > 0:
+                online_x = np.array(online_window_indices)  # Use all window indices
+            elif learning_start_window is not None:
+                online_x = np.arange(learning_start_window, learning_start_window + len(online_window_losses))[1:]  # Start from second sample
+            else:
+                online_x = np.arange(len(online_window_losses))[1:]  # Start from second sample
+            online_improvement = np.array(online_pre_ekf_losses) - np.array(online_window_losses)
+            ax2.plot(online_x, online_improvement, 'lightgreen', marker='d', linewidth=2, label='Online Model Improvement')
+        
+        # Add training model improvement if available
+        if has_training_data:
+            # Use actual training window indices
+            training_x = np.array(training_window_indices)  # Use all window indices
+            training_improvement = np.array(training_pre_ekf_losses) - np.array(training_window_losses)
+            ax2.plot(training_x, training_improvement, 'lightgreen', marker='*', linewidth=2, label='Training Model Improvement', linestyle='--')
+            
+            # Connect training to online if both are available
+            if has_online_data and online_window_indices is not None and len(online_window_indices) > 0:
+                # Connect last training point to first online point
+                last_training_x = training_x[-1]  # Window 12
+                first_online_x = online_x[0]      # Window 13
+                last_training_improvement = training_improvement[-1]
+                first_online_improvement = online_improvement[0]
+                
+                # Draw connecting line
+                ax2.plot([last_training_x, first_online_x], [last_training_improvement, first_online_improvement], 'lightgreen', linestyle='-', linewidth=2, alpha=0.7)
+        
+        # Add eta change markers (adjusted for starting from second sample)
+        for idx, eta in zip(eta_changes, eta_values):
+            if idx >= 1:  # Only show markers from second sample onwards
+                ax2.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                ax2.text(idx, ax2.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+        
+        # Add labels and title
+        ax2.set_xlabel('Window Index')
+        ax2.set_ylabel('Loss Difference')
+        title = 'SubspaceNet Loss - EKF Loss vs Window Index (Starting from Window 1)\nImprovement = L_SubspaceNet - L_EKF'
+        if has_online_data:
+            title += '\n(Static + Online Models)'
+        ax2.set_title(title)
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. Plot covariance vs window index
+        ax3 = fig.add_subplot(4, 2, 3)
+        x = np.arange(len(window_covariances))[1:]  # Start from second sample
+        ax3.plot(x, np.array(window_covariances)[1:], 'orange', marker='o', linewidth=2, label='Static Model Average Covariance')
+        
+        # Add online model covariance if available
+        if has_online_data and online_window_covariances is not None and len(online_window_covariances) > 0:
+            # Use actual online window indices if available, otherwise fall back to learning start window
+            if online_window_indices is not None and len(online_window_indices) > 0:
+                online_x = np.array(online_window_indices)  # Use all window indices
+            elif learning_start_window is not None:
+                online_x = np.arange(learning_start_window, learning_start_window + len(online_window_covariances))[1:]  # Start from second sample
+            else:
+                online_x = np.arange(len(online_window_covariances))[1:]  # Start from second sample
+            ax3.plot(online_x, np.array(online_window_covariances), 'gold', marker='d', linewidth=2, label='Online Model Average Covariance')
+        
+        # Add training model covariance if available
+        if has_training_data and training_window_covariances is not None and len(training_window_covariances) > 0:
+            # Use actual training window indices
+            training_x = np.array(training_window_indices)  # Use all window indices
+            ax3.plot(training_x, np.array(training_window_covariances), 'gold', marker='*', linewidth=2, label='Training Model Average Covariance', linestyle='--')
+            
+            # Connect training to online if both are available
+            if has_online_data and online_window_covariances is not None and len(online_window_covariances) > 0:
+                # Connect last training point to first online point
+                last_training_x = training_x[-1]  # Window 12
+                first_online_x = online_x[0]      # Window 13
+                last_training_cov = np.array(training_window_covariances)[-1]
+                first_online_cov = np.array(online_window_covariances)[0]
+                
+                # Draw connecting line
+                ax3.plot([last_training_x, first_online_x], [last_training_cov, first_online_cov], 'gold', linestyle='-', linewidth=2, alpha=0.7)
+        
+        # Add eta change markers (adjusted for starting from second sample)
+        for idx, eta in zip(eta_changes, eta_values):
+            if idx >= 1:  # Only show markers from second sample onwards
+                ax3.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                ax3.text(idx, max(np.array(window_covariances)[1:]), f'η={eta:.3f}', rotation=90, verticalalignment='top')
+        
+        # Highlight windows where model was updated (adjusted for starting from second sample)
+        if window_updates:
+            update_indices = [i for i, updated in enumerate(window_updates) if updated and i >= 1]
+            update_covs = [window_covariances[i] for i in update_indices]
+            ax3.scatter(update_indices, update_covs, color='r', s=80, marker='o', label='Model Updated')
+        
+        # Add labels and title
+        ax3.set_xlabel('Window Index')
+        ax3.set_ylabel('Average Covariance')
+        title = 'Covariance vs Window Index (Starting from Window 1)\nP_k|k = (I - K_k H) P_k|k-1'
+        if has_online_data:
+            title += '\n(Static + Online Models)'
+        ax3.set_title(title)
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        
+        # 4. Plot Subspace-Kalman Delta Loss vs Window Index (RMSPE - L2)
+        ax4 = fig.add_subplot(4, 2, 4)
+        x = np.arange(len(window_delta_losses))[1:]  # Start from second sample
+        
+        # Static model prediction delta (baseline model)
+        ax4.plot(x, np.array(window_delta_losses)[1:], 'navy', marker='o', linewidth=2.5, markersize=7, alpha=0.9, label='Static Model (RMSPE-L2)')
+        
+        # Static model RMAPE delta if available
+        if window_delta_rmape_losses is not None and len(window_delta_rmape_losses) > 0:
+            ax4.plot(x, np.array(window_delta_rmape_losses)[1:], 'royalblue', marker='s', linewidth=2.5, markersize=7, alpha=0.9, label='Static Model (RMAPE-L1)')
+        
+        # Add online training phase delta if available
+        if has_training_data and training_delta_losses is not None and len(training_delta_losses) > 0:
+            # Use actual training window indices
+            training_x = np.array(training_window_indices)
+            ax4.plot(training_x, np.array(training_delta_losses), 'darkgreen', marker='o', linewidth=2.5, markersize=7, linestyle='--', alpha=0.9, label='Online Training (RMSPE-L2)')
+            
+            # Training RMAPE delta if available
+            if training_delta_rmape_losses is not None and len(training_delta_rmape_losses) > 0:
+                ax4.plot(training_x, np.array(training_delta_rmape_losses), 'forestgreen', marker='s', linewidth=2.5, markersize=7, linestyle='--', alpha=0.9, label='Online Training (RMAPE-L1)')
+        
+        # Add online inference phase delta if available
+        if has_online_data and online_delta_losses is not None and len(online_delta_losses) > 0:
+            # Use actual online window indices if available
+            if online_window_indices is not None and len(online_window_indices) > 0:
+                online_x = np.array(online_window_indices)
+            else:
+                online_x = np.arange(len(online_delta_losses))
+            ax4.plot(online_x, np.array(online_delta_losses), 'crimson', marker='o', linewidth=2.5, markersize=7, alpha=0.9, label='Online Inference (RMSPE-L2)')
+            
+            # Online inference RMAPE delta if available
+            if online_delta_rmape_losses is not None and len(online_delta_rmape_losses) > 0:
+                ax4.plot(online_x, np.array(online_delta_rmape_losses), 'red', marker='s', linewidth=2.5, markersize=7, alpha=0.9, label='Online Inference (RMAPE-L1)')
+            
+            # Connect training to online inference if both are available
+            if has_training_data and training_delta_losses is not None and len(training_delta_losses) > 0:
+                # Connect last training point to first online point (RMSPE only for cleaner visualization)
+                last_training_x = training_x[-1]
+                first_online_x = online_x[0]
+                last_training_delta = np.array(training_delta_losses)[-1]
+                first_online_delta = np.array(online_delta_losses)[0]
+                
+                # Draw connecting line for phase transition
+                ax4.plot([last_training_x, first_online_x], [last_training_delta, first_online_delta], 'darkgreen', linestyle='-', linewidth=2, alpha=0.5)
+        
+        # Add eta change markers
+        for idx, eta in zip(eta_changes, eta_values):
+            if idx >= 1:  # Only show markers from second sample onwards
+                ax4.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                ax4.text(idx, ax4.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+        
+        ax4.set_xlabel('Window Index')
+        ax4.set_ylabel('Prediction Delta')
+        ax4.set_title('Subspace-Kalman Prediction Delta vs Window Index\nStatic → Training → Inference Pipeline')
+        ax4.legend(loc='upper right', framealpha=0.9, fontsize=9)
+        ax4.grid(True, alpha=0.3)
+        
+        # 5. Plot average Kalman gain vs window index
+        if ekf_kalman_gains is not None:
+            ax5 = fig.add_subplot(4, 2, 5)
+            # Calculate average Kalman gain per window
+            avg_kalman_gains = []
+            for window_gains in ekf_kalman_gains:
+                window_avg = []
+                for step_gains in window_gains:
+                    if step_gains:  # Check if there are any gains in this step
+                        window_avg.extend(step_gains)
+                if window_avg:
+                    avg_kalman_gains.append(np.mean(window_avg))
+                else:
+                    avg_kalman_gains.append(0)
+            
+            x = np.arange(len(avg_kalman_gains))[1:]  # Start from second sample
+            ax5.plot(x, np.array(avg_kalman_gains)[1:], 'purple', marker='d', label='Static Model Average Kalman Gain')
+            
+            # Add online model Kalman gains if available
+            if has_online_data and online_ekf_kalman_gains is not None and len(online_ekf_kalman_gains) > 0:
+                # Calculate average online Kalman gain per window
+                online_avg_kalman_gains = []
+                for window_gains in online_ekf_kalman_gains:
+                    window_avg = []
+                    for step_gains in window_gains:
+                        if step_gains:  # Check if there are any gains in this step
+                            window_avg.extend(step_gains)
+                    if window_avg:
+                        online_avg_kalman_gains.append(np.mean(window_avg))
+                    else:
+                        online_avg_kalman_gains.append(0)
+                
+                # Use actual online window indices if available, otherwise fall back to learning start window
+                if online_window_indices is not None and len(online_window_indices) > 0:
+                    online_x = np.array(online_window_indices)  # Use all window indices
+                elif learning_start_window is not None:
+                    online_x = np.arange(learning_start_window, learning_start_window + len(online_avg_kalman_gains))[1:]  # Start from second sample
+                else:
+                    online_x = np.arange(len(online_avg_kalman_gains))[1:]  # Start from second sample
+                ax5.plot(online_x, np.array(online_avg_kalman_gains), 'orange', marker='^', label='Online Model Average Kalman Gain')
+            
+            # Add training model Kalman gains if available
+            if has_training_data and training_ekf_kalman_gains is not None and len(training_ekf_kalman_gains) > 0:
+                # Calculate average training Kalman gain per window
+                training_avg_kalman_gains = []
+                for window_gains in training_ekf_kalman_gains:
+                    window_avg = []
+                    for step_gains in window_gains:
+                        if step_gains:  # Check if there are any gains in this step
+                            window_avg.extend(step_gains)
+                    if window_avg:
+                        training_avg_kalman_gains.append(np.mean(window_avg))
+                    else:
+                        training_avg_kalman_gains.append(0)
+                
+                # Use actual training window indices
+                training_x = np.array(training_window_indices)  # Use all window indices
+                ax5.plot(training_x, np.array(training_avg_kalman_gains), 'brown', marker='*', label='Training Model Average Kalman Gain', linestyle='--')
+                
+                # Connect training to online if both are available
+                if has_online_data and online_avg_kalman_gains is not None and len(online_avg_kalman_gains) > 0:
+                    # Connect last training point to first online point
+                    last_training_x = training_x[-1]  # Window 12
+                    first_online_x = online_x[0]      # Window 13
+                    last_training_kalman = np.array(training_avg_kalman_gains)[-1]
+                    first_online_kalman = np.array(online_avg_kalman_gains)[0]
+                    
+                    # Draw connecting line
+                    ax5.plot([last_training_x, first_online_x], [last_training_kalman, first_online_kalman], 'brown', linestyle='-', linewidth=2, alpha=0.7)
+            
+            # Add eta change markers (adjusted for starting from second sample)
+            for idx, eta in zip(eta_changes, eta_values):
+                if idx >= 1:  # Only show markers from second sample onwards
+                    ax5.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                    ax5.text(idx, ax5.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+        
+            # Add labels and title
+            ax5.set_xlabel('Window Index')
+            ax5.set_ylabel('Average Kalman Gain')
+            title = 'Average Kalman Gain vs Window Index (Starting from Window 1)\nK_k = P_k|k-1 H^T (H P_k|k-1 H^T + R)^-1'
+            if has_online_data:
+                title += '\n(Static + Online Models)'
+            ax5.set_title(title)
+            ax5.legend()
+            ax5.grid(True, alpha=0.3)
+        
+        # 6. Plot average K*y vs window index
+        if ekf_kalman_gain_times_innovation is not None:
+            ax6 = fig.add_subplot(4, 2, 6)
+            # Calculate average K*y per window
+            avg_k_times_y = []
+            for window_k_times_y in ekf_kalman_gain_times_innovation:
+                window_avg = []
+                for step_k_times_y in window_k_times_y:
+                    if step_k_times_y:  # Check if there are any values in this step
+                        window_avg.extend(step_k_times_y)
+                if window_avg:
+                    avg_k_times_y.append(np.mean(window_avg))
+                else:
+                    avg_k_times_y.append(0)
+            
+            x = np.arange(len(avg_k_times_y))[1:]  # Start from second sample
+            ax6.plot(x, np.array(avg_k_times_y)[1:], 'orange', marker='v', label='Static Model Average K*Innovation')
+            
+            # Add online model K*y if available
+            if has_online_data and online_ekf_kalman_gain_times_innovation is not None and len(online_ekf_kalman_gain_times_innovation) > 0:
+                # Calculate average online K*y per window
+                online_avg_k_times_y = []
+                for window_k_times_y in online_ekf_kalman_gain_times_innovation:
+                    window_avg = []
+                    for step_k_times_y in window_k_times_y:
+                        if step_k_times_y:  # Check if there are any values in this step
+                            window_avg.extend(step_k_times_y)
+                    if window_avg:
+                        online_avg_k_times_y.append(np.mean(window_avg))
+                    else:
+                        online_avg_k_times_y.append(0)
+                
+                # Use actual online window indices if available, otherwise fall back to learning start window
+                if online_window_indices is not None and len(online_window_indices) > 0:
+                    online_x = np.array(online_window_indices)  # Use all window indices
+                elif learning_start_window is not None:
+                    online_x = np.arange(learning_start_window, learning_start_window + len(online_avg_k_times_y))[1:]  # Start from second sample
+                else:
+                    online_x = np.arange(len(online_avg_k_times_y))[1:]  # Start from second sample
+                ax6.plot(online_x, np.array(online_avg_k_times_y), 'red', marker='s', label='Online Model Average K*Innovation')
+            
+            # Add training model K*y if available
+            if has_training_data and training_ekf_kalman_gain_times_innovation is not None and len(training_ekf_kalman_gain_times_innovation) > 0:
+                # Calculate average training K*y per window
+                training_avg_k_times_y = []
+                for window_k_times_y in training_ekf_kalman_gain_times_innovation:
+                    window_avg = []
+                    for step_k_times_y in window_k_times_y:
+                        if step_k_times_y:  # Check if there are any values in this step
+                            window_avg.extend(step_k_times_y)
+                    if window_avg:
+                        training_avg_k_times_y.append(np.mean(window_avg))
+                    else:
+                        training_avg_k_times_y.append(0)
+                
+                # Use actual training window indices
+                training_x = np.array(training_window_indices)  # Use all window indices
+                ax6.plot(training_x, np.array(training_avg_k_times_y), 'brown', marker='*', label='Training Model Average K*Innovation', linestyle='--')
+                
+                # Connect training to online if both are available
+                if has_online_data and online_avg_k_times_y is not None and len(online_avg_k_times_y) > 0:
+                    # Connect last training point to first online point
+                    last_training_x = training_x[-1]  # Window 12
+                    first_online_x = online_x[0]      # Window 13
+                    last_training_k_times_y = np.array(training_avg_k_times_y)[-1]
+                    first_online_k_times_y = np.array(online_avg_k_times_y)[0]
+                    
+                    # Draw connecting line
+                    ax6.plot([last_training_x, first_online_x], [last_training_k_times_y, first_online_k_times_y], 'brown', linestyle='-', linewidth=2, alpha=0.7)
+            
+            # Add eta change markers (adjusted for starting from second sample)
+            for idx, eta in zip(eta_changes, eta_values):
+                if idx >= 1:  # Only show markers from second sample onwards
+                    ax6.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                    ax6.text(idx, ax6.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+        
+            # Add labels and title
+            ax6.set_xlabel('Window Index')
+            ax6.set_ylabel('Average K*Innovation')
+            title = 'Average Kalman Gain × Innovation vs Window Index (Starting from Window 1)\nK_k × ν_k = K_k × (z_k - H x̂_k|k-1)'
+            if has_online_data:
+                title += '\n(Static + Online Models)'
+            ax6.set_title(title)
+            ax6.legend()
+            ax6.grid(True, alpha=0.3)
+        
+        # 7. Plot average y*(S^-1)*y vs window index
+        if ekf_y_s_inv_y is not None:
+            ax7 = fig.add_subplot(4, 2, 7)
+            # Calculate average y*(S^-1)*y per window
+            avg_y_s_inv_y = []
+            for window_y_s_inv_y in ekf_y_s_inv_y:
+                window_avg = []
+                for step_y_s_inv_y in window_y_s_inv_y:
+                    if step_y_s_inv_y:  # Check if there are any values in this step
+                        window_avg.extend(step_y_s_inv_y)
+                if window_avg:
+                    avg_y_s_inv_y.append(np.mean(window_avg))
+                else:
+                    avg_y_s_inv_y.append(0)
+            
+            x = np.arange(len(avg_y_s_inv_y))[1:]  # Start from second sample
+            ax7.plot(x, np.array(avg_y_s_inv_y)[1:], 'red', marker='^', label='Static Model Average y*(S^-1)*y')
+            
+            # Add online model y*(S^-1)*y if available
+            if has_online_data and online_ekf_y_s_inv_y is not None and len(online_ekf_y_s_inv_y) > 0:
+                # Calculate average online y*(S^-1)*y per window
+                online_avg_y_s_inv_y = []
+                for window_y_s_inv_y in online_ekf_y_s_inv_y:
+                    window_avg = []
+                    for step_y_s_inv_y in window_y_s_inv_y:
+                        if step_y_s_inv_y:  # Check if there are any values in this step
+                            window_avg.extend(step_y_s_inv_y)
+                    if window_avg:
+                        online_avg_y_s_inv_y.append(np.mean(window_avg))
+                    else:
+                        online_avg_y_s_inv_y.append(0)
+                
+                # Use actual online window indices if available, otherwise fall back to learning start window
+                if online_window_indices is not None and len(online_window_indices) > 0:
+                    online_x = np.array(online_window_indices)  # Use all window indices
+                elif learning_start_window is not None:
+                    online_x = np.arange(learning_start_window, learning_start_window + len(online_avg_y_s_inv_y))[1:]  # Start from second sample
+                else:
+                    online_x = np.arange(len(online_avg_y_s_inv_y))[1:]  # Start from second sample
+                ax7.plot(online_x, np.array(online_avg_y_s_inv_y), 'brown', marker='*', label='Online Model Average y*(S^-1)*y')
+            
+            # Add training model y*(S^-1)*y if available
+            if has_training_data and training_ekf_y_s_inv_y is not None and len(training_ekf_y_s_inv_y) > 0:
+                # Calculate average training y*(S^-1)*y per window
+                training_avg_y_s_inv_y = []
+                for window_y_s_inv_y in training_ekf_y_s_inv_y:
+                    window_avg = []
+                    for step_y_s_inv_y in window_y_s_inv_y:
+                        if step_y_s_inv_y:  # Check if there are any values in this step
+                            window_avg.extend(step_y_s_inv_y)
+                    if window_avg:
+                        training_avg_y_s_inv_y.append(np.mean(window_avg))
+                    else:
+                        training_avg_y_s_inv_y.append(0)
+                
+                # Use actual training window indices
+                training_x = np.array(training_window_indices)  # Use all window indices
+                ax7.plot(training_x, np.array(training_avg_y_s_inv_y), 'gray', marker='o', label='Training Model Average y*(S^-1)*y', linestyle='--')
+                
+                # Connect training to online if both are available
+                if has_online_data and online_avg_y_s_inv_y is not None and len(online_avg_y_s_inv_y) > 0:
+                    # Connect last training point to first online point
+                    last_training_x = training_x[-1]  # Window 12
+                    first_online_x = online_x[0]      # Window 13
+                    last_training_y_s_inv_y = np.array(training_avg_y_s_inv_y)[-1]
+                    first_online_y_s_inv_y = np.array(online_avg_y_s_inv_y)[0]
+                    
+                    # Draw connecting line
+                    ax7.plot([last_training_x, first_online_x], [last_training_y_s_inv_y, first_online_y_s_inv_y], 'gray', linestyle='-', linewidth=2, alpha=0.7)
+            
+            # Add eta change markers (adjusted for starting from second sample)
+            for idx, eta in zip(eta_changes, eta_values):
+                if idx >= 1:  # Only show markers from second sample onwards
+                    ax7.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                    ax7.text(idx, ax7.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            # Add labels and title
+            ax7.set_xlabel('Window Index')
+            ax7.set_ylabel('Average y*(S^-1)*y')
+            title = 'Average Innovation Covariance Metric vs Window Index (Starting from Window 1)\ny*(S^-1)*y = ν^T S^-1 ν'
+            if has_online_data:
+                title += '\n(Static + Online Models)'
+            ax7.set_title(title)
+            ax7.legend()
+            ax7.grid(True, alpha=0.3)
+
+        
+        # Adjust layout and save
+        plt.tight_layout()
+        plot_path = plot_dir / f"online_learning_results_{timestamp}.png"
+        plt.savefig(plot_path)
+        plt.close()
+        
+        # Plot online learning trajectory
+        trajectory_plot_path = plot_online_learning_trajectory(window_labels, plot_dir, timestamp)
+        
+        logger.info(f"Online learning plots saved: {plot_path.name}")
+        return plot_path, trajectory_plot_path
+        
+    except ImportError:
+        logger = logging.getLogger(__name__)
+        logger.warning("matplotlib not available for plotting")
+        return None, None
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error plotting online learning results: {e}")
+        return None, None
+
+
+def plot_online_learning_trajectory(window_labels, plot_dir, timestamp):
+    """
+    Plot the full trajectory across all windows for online learning.
+    
+    Args:
+        window_labels: List of labels for each window, where each window contains a list of numpy arrays
+        plot_dir: Directory to save the plots
+        timestamp: Timestamp for the plot filename
+        
+    Returns:
+        Path to saved trajectory plot
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from pathlib import Path
+        
+        logger = logging.getLogger(__name__)
+        
+        # Flatten all labels across all windows to get the complete trajectory
+        all_angles = []
+        all_distances = []
+        window_indices = []  # Track which window each step belongs to
+        
+        for window_idx, window_label_list in enumerate(window_labels):
+            for step_idx, step_labels in enumerate(window_label_list):
+                # step_labels is a numpy array containing [angle1, angle2, ..., angleM] (in radians)
+                # For far-field, we assume distances are constant (e.g., 30m)
+                # For near-field, distances would be included in the labels
+                
+                # Convert radians to degrees for plotting
+                angles_deg = step_labels * (180.0 / np.pi)
+                all_angles.append(angles_deg)
+                
+                # Use the same range increment mechanism as in generate_trajectories
+                # Start at 20m and increment by 1m each step
+                global_step = len(all_angles) - 1  # Current global step index
+                base_distance = 20.0 + global_step * 1.0  # Increment by 1m each step
+                
+                num_sources = len(step_labels)
+                distances = np.full(num_sources, base_distance)
+                all_distances.append(distances)
+                
+                # Track window index
+                window_indices.append(window_idx)
+        
+        if not all_angles:
+            logger.warning("No trajectory data available for plotting")
+            return None
+        
+        # Find the maximum number of sources across all steps
+        max_sources = max(len(angles) for angles in all_angles)
+        total_steps = len(all_angles)
+        
+        # Pad arrays to have consistent dimensions
+        padded_angles = np.full((total_steps, max_sources), np.nan)
+        padded_distances = np.full((total_steps, max_sources), np.nan)
+        
+        for step_idx, (angles, distances) in enumerate(zip(all_angles, all_distances)):
+            num_sources = len(angles)
+            padded_angles[step_idx, :num_sources] = angles
+            padded_distances[step_idx, :num_sources] = distances
+        
+        # Create the trajectory plot
+        plt.figure(figsize=(12, 10))
+        
+        # Plot each source trajectory
+        for s in range(max_sources):
+            # Get valid data for this source (some steps might have fewer sources)
+            valid_mask = ~np.isnan(padded_angles[:, s])
+            if np.any(valid_mask):
+                angles_rad = padded_angles[valid_mask, s] * (np.pi / 180.0)  # Convert back to radians for plotting
+                distances = padded_distances[valid_mask, s]
+                
+                # Convert from polar to Cartesian coordinates
+                x = distances * np.cos(angles_rad)
+                y = distances * np.sin(angles_rad)
+                
+                # Plot trajectory
+                plt.plot(x, y, '-o', markersize=4, label=f'Source {s+1}')
+                
+                # Mark start and end points
+                if len(x) > 0:
+                    plt.plot(x[0], y[0], 'go', markersize=8)  # Green for start
+                    plt.plot(x[-1], y[-1], 'ro', markersize=8)  # Red for end
+        
+        # Plot radar location
+        plt.plot(0, 0, 'bD', markersize=12, label='Radar')
+        
+        # Add distance circles
+        for d in [20, 30, 40, 50]:
+            circle = plt.Circle((0, 0), d, fill=False, linestyle='--', alpha=0.3)
+            plt.gca().add_patch(circle)
+            plt.text(0, d, f'{d}m', va='bottom', ha='center')
+        
+        # Add angle lines
+        for a in range(-90, 91, 30):
+            a_rad = a * (np.pi/180)
+            plt.plot([0, 60*np.cos(a_rad)], [0, 60*np.sin(a_rad)], 'k:', alpha=0.2)
+            plt.text(55*np.cos(a_rad), 55*np.sin(a_rad), f'{a}°', 
+                    va='center', ha='center', bbox=dict(facecolor='white', alpha=0.5))
+        
+        plt.grid(True, alpha=0.3)
+        plt.axis('equal')
+        plt.xlabel('X (meters)')
+        plt.ylabel('Y (meters)')
+        plt.title(f'Online Learning Full Trajectory (T={total_steps}, Sources={max_sources}, Windows={len(window_labels)})')
+        plt.legend()
+        
+        # Add window boundary markers if there are multiple windows
+        if len(window_labels) > 1:
+            # Find window boundaries
+            window_boundaries = []
+            current_window = window_indices[0]
+            for i, window_idx in enumerate(window_indices):
+                if window_idx != current_window:
+                    window_boundaries.append(i)
+                    current_window = window_idx
+            
+            # Add vertical lines for window boundaries
+            for boundary_idx in window_boundaries:
+                if boundary_idx < len(all_angles):
+                    # Get the position at the boundary
+                    angles_at_boundary = all_angles[boundary_idx]
+                    distances_at_boundary = all_distances[boundary_idx]
+                    
+                    # Plot boundary markers for each source
+                    for s in range(len(angles_at_boundary)):
+                        if not np.isnan(angles_at_boundary[s]):
+                            angle_rad = angles_at_boundary[s] * (np.pi / 180.0)
+                            distance = distances_at_boundary[s]
+                            x = distance * np.cos(angle_rad)
+                            y = distance * np.sin(angle_rad)
+                            plt.plot(x, y, 'ks', markersize=10, markerfacecolor='none', markeredgewidth=2)
+        
+        # Save the plot
+        plot_path = Path(plot_dir) / f"online_learning_trajectory_{timestamp}.png"
+        plt.savefig(plot_path)
+        plt.close()
+        logger.info(f"Online learning trajectory plot saved to {plot_dir}:")
+        logger.info(f"  - Trajectory plot: {plot_path.name}")
+        
+        return plot_path
+        
+    except ImportError:
+        logger = logging.getLogger(__name__)
+        logger.warning("matplotlib not available for plotting online learning trajectory")
+        return None
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error plotting online learning trajectory: {e}")
+        return None

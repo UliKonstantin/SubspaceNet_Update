@@ -101,8 +101,8 @@ online_learning:
   
   # Dynamic Eta Update Parameters - ADDED
   eta_update_interval_windows: 10 # Update eta every 10 windows
-  eta_increment: 0.06            # Increase eta by 0.02 each time
-  max_eta: 0.06            # Don't let eta go above 0.5
+  eta_increment: 0.08            # Increase eta by 0.02 each time
+  max_eta: 0.08            # Don't let eta go above 0.5
   min_eta: 0.0                  # Don't let eta go below 0.0
 
 # No scenarios defined here, as this config is for a single online learning run
