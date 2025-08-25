@@ -82,11 +82,11 @@ class SineAccelStateModel(StateEvolutionModel):
         # Calculate acceleration term using tensor operations
         # Ensure all operations maintain gradients
         delta = (self.omega0 + self.kappa * torch.sin(x_rad)) * self.time_step
-        
+        x_deg = x_rad * 180.0 / np.pi
         # Apply state transition (simplified version without degree conversion)
         # Use direct radian calculation to maintain gradient flow
-        result = x_rad + delta
-        
+        result_deg = 0.99*x_deg + delta
+        result = result_deg * np.pi / 180.0
         logger.debug(f"SineAccel state transition: {float(x) if hasattr(x, 'item') else x} -> {float(result) if hasattr(result, 'item') else result}")
         return result
     

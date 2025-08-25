@@ -1164,10 +1164,29 @@ class OnlineLearning:
                     
                     for i in range(num_sources_this_step):
                         # Predict and update in one step - pass tensor directly
+                        print(f"**********Predicting and updating for source {i}, Filter Parameters**********")
+                        print(f"P0: {ekf_filters[i].P0}")
+                        print(f"P: {ekf_filters[i].P}")
+                        print(f"Q: {ekf_filters[i].Q}")
+                        print(f"R: {ekf_filters[i].R}")
+                        print(f"x: {ekf_filters[i].x}")
+                        print(f"true_state: {true_angles_this_step[i]}")
                         predicted_angle, updated_angle, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y = ekf_filters[i].predict_and_update(
-                            measurement=pre_ekf_angles_pred.flatten()[i],  # Flatten to get proper indexing
-                            true_state=true_angles_this_step[i]
+                            measurement= pre_ekf_angles_pred.flatten()[i],  # Flatten to get proper indexing
+                            true_state= true_angles_this_step[i]
                         )
+                        print(f"Predicted angle: {predicted_angle}")
+                        print(f"Updated angle: {updated_angle}")
+                        print(f"Innovation: {innovation}")
+                        print(f"Kalman gain: {kalman_gain}")
+                        print(f"Kalman gain times innovation: {kalman_gain_times_innovation}")
+                        print(f"y_s_inv_y: {y_s_inv_y}")
+                        print(f"**********Predicting and updating for source {i}**********")
+                        print(f"Pre-EKF angle: {pre_ekf_angles_pred.flatten()[i]}")
+                        print(f"True angle: {true_angles_this_step[i]}")
+                        print(f" difference between pre-EKF and true angle: {abs(pre_ekf_angles_pred.flatten()[i] - true_angles_this_step[i])}")
+                        print(f" difference between predicted and true angle: {abs(predicted_angle - true_angles_this_step[i])}")
+                        print(f" difference between updated and true angle: {abs(updated_angle - true_angles_this_step[i])}")
                         
                         # Store prediction, covariance and innovation
                         step_predictions.append(updated_angle)

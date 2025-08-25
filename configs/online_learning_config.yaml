@@ -86,7 +86,7 @@ trajectory:
 kalman_filter:
   process_noise_std_dev: 0.03  # standard deviation of process noise (degrees), null to use trajectory.random_walk_std_dev
   measurement_noise_std_dev: 0.03  # standard deviation of measurement noise (degrees)
-  initial_covariance: 1  # initial state covariance
+  initial_covariance: 0.001  # initial state covariance
 
 # Enable online learning with appropriate parameters
 online_learning:

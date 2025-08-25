@@ -966,7 +966,9 @@ class OnlineLearningTrajectoryGenerator:
             
             # Add noise (in degrees)
             noise = (torch.randn(self.current_M) * sa_noise_sd).numpy()
-            
+            print(f"noise: {noise}")
+            print(f"delta: {delta}")
+            print(f"self.last_true_angles: {0.99*self.last_true_angles}")
             # Update angle (all in degrees)
             next_angles = 0.99*self.last_true_angles + delta + noise
             
