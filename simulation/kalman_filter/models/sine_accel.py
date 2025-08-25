@@ -37,11 +37,26 @@ class SineAccelStateModel(StateEvolutionModel):
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device = device
         
-        # Convert parameters to tensors
-        self.omega0 = torch.tensor(omega0, dtype=torch.float32, device=device)
-        self.kappa = torch.tensor(kappa, dtype=torch.float32, device=device)
-        self.base_noise_variance = torch.tensor(noise_std**2, dtype=torch.float32, device=device)
-        self.time_step = torch.tensor(time_step, dtype=torch.float32, device=device)
+        # Convert parameters to tensors with consistent dtype (float32 for training compatibility)
+        if isinstance(omega0, torch.Tensor):
+            self.omega0 = omega0.to(device=device, dtype=torch.float32)
+        else:
+            self.omega0 = torch.tensor(omega0, dtype=torch.float32, device=device)
+            
+        if isinstance(kappa, torch.Tensor):
+            self.kappa = kappa.to(device=device, dtype=torch.float32)
+        else:
+            self.kappa = torch.tensor(kappa, dtype=torch.float32, device=device)
+            
+        if isinstance(noise_std, torch.Tensor):
+            self.base_noise_variance = (noise_std.to(device=device, dtype=torch.float32)) ** 2
+        else:
+            self.base_noise_variance = torch.tensor(noise_std**2, dtype=torch.float32, device=device)
+            
+        if isinstance(time_step, torch.Tensor):
+            self.time_step = time_step.to(device=device, dtype=torch.float32)
+        else:
+            self.time_step = torch.tensor(time_step, dtype=torch.float32, device=device)
         
         logger.debug(f"Created SineAccelStateModel with ω₀={omega0}, κ={kappa}, σ={noise_std}, T={time_step}, device={device}")
     
@@ -55,22 +70,22 @@ class SineAccelStateModel(StateEvolutionModel):
         Returns:
             Predicted next angle (tensor)
         """
-        # Convert to tensor if needed
+        # Convert to tensor if needed, ensuring proper dtype and device
         if isinstance(x, torch.Tensor):
-            x_tensor = x.to(self.device)
+            x_tensor = x.to(device=self.device, dtype=torch.float32)
         else:
             x_tensor = torch.tensor(x, dtype=torch.float32, device=self.device)
         
         # x is already in radians
         x_rad = x_tensor
-        x_deg = x_rad * 180.0 / torch.pi
         
         # Calculate acceleration term using tensor operations
+        # Ensure all operations maintain gradients
         delta = (self.omega0 + self.kappa * torch.sin(x_rad)) * self.time_step
         
-        # Apply state transition
-        result_deg = 0.99 * x_deg + delta
-        result = result_deg * torch.pi / 180.0  # Convert back to radians
+        # Apply state transition (simplified version without degree conversion)
+        # Use direct radian calculation to maintain gradient flow
+        result = x_rad + delta
         
         logger.debug(f"SineAccel state transition: {float(x) if hasattr(x, 'item') else x} -> {float(result) if hasattr(result, 'item') else result}")
         return result
@@ -85,9 +100,9 @@ class SineAccelStateModel(StateEvolutionModel):
         Returns:
             Derivative of state transition with respect to state (tensor)
         """
-        # Convert to tensor if needed
+        # Convert to tensor if needed, ensuring proper dtype and device
         if isinstance(x, torch.Tensor):
-            x_tensor = x.to(self.device)
+            x_tensor = x.to(device=self.device, dtype=torch.float32)
         else:
             x_tensor = torch.tensor(x, dtype=torch.float32, device=self.device)
         
@@ -95,7 +110,8 @@ class SineAccelStateModel(StateEvolutionModel):
         x_rad = x_tensor
         
         # Calculate the derivative using tensor operations
-        jacobian = 0.99 + self.kappa * torch.cos(x_rad) * self.time_step
+        # Ensure all operations maintain gradients
+        jacobian = torch.tensor(1.0, dtype=torch.float32, device=self.device) + self.kappa * torch.cos(x_rad) * self.time_step
         
         logger.debug(f"SineAccel Jacobian at x={float(x) if hasattr(x, 'item') else x}: {float(jacobian) if hasattr(jacobian, 'item') else jacobian}")
         return jacobian
@@ -111,7 +127,11 @@ class SineAccelStateModel(StateEvolutionModel):
             Noise variance (tensor)
         """
         # Return constant noise variance as tensor
-        return self.base_noise_variance
+        # Ensure it has the same shape as input for broadcasting
+        if isinstance(x, torch.Tensor):
+            return torch.full_like(x, self.base_noise_variance, dtype=torch.float32, device=self.device)
+        else:
+            return self.base_noise_variance
     
     def f_batch(self, x_batch):
         """
@@ -123,17 +143,16 @@ class SineAccelStateModel(StateEvolutionModel):
         Returns:
             Tensor of predicted next angles
         """
-        # Convert to tensor if needed
+        # Convert to tensor if needed, ensuring proper dtype and device
         if isinstance(x_batch, torch.Tensor):
-            x_tensor = x_batch.to(self.device)
+            x_tensor = x_batch.to(device=self.device, dtype=torch.float32)
         else:
             x_tensor = torch.tensor(x_batch, dtype=torch.float32, device=self.device)
         
         # Apply state transition function element-wise using tensor operations
-        x_deg = x_tensor * 180.0 / torch.pi
+        # Ensure all operations maintain gradients
         delta = (self.omega0 + self.kappa * torch.sin(x_tensor)) * self.time_step
-        result_deg = 0.99 * x_deg + delta
-        result = result_deg * torch.pi / 180.0
+        result = x_tensor + delta
         
         logger.debug(f"SineAccel batch state transition for {x_tensor.numel()} states")
         return result
@@ -148,14 +167,15 @@ class SineAccelStateModel(StateEvolutionModel):
         Returns:
             Tensor of Jacobians
         """
-        # Convert to tensor if needed
+        # Convert to tensor if needed, ensuring proper dtype and device
         if isinstance(x_batch, torch.Tensor):
-            x_tensor = x_batch.to(self.device)
+            x_tensor = x_batch.to(device=self.device, dtype=torch.float32)
         else:
             x_tensor = torch.tensor(x_batch, dtype=torch.float32, device=self.device)
         
         # Calculate Jacobians element-wise using tensor operations
-        jacobian = 0.99 + self.kappa * torch.cos(x_tensor) * self.time_step
+        # Ensure all operations maintain gradients
+        jacobian = torch.tensor(1.0, dtype=torch.float32, device=self.device) + self.kappa * torch.cos(x_tensor) * self.time_step
         
         logger.debug(f"SineAccel batch Jacobian for {x_tensor.numel()} states")
         return jacobian
@@ -170,11 +190,11 @@ class SineAccelStateModel(StateEvolutionModel):
         Returns:
             Tensor of noise variances (constant for this model)
         """
-        # Convert to tensor if needed
+        # Convert to tensor if needed, ensuring proper dtype and device
         if isinstance(x_batch, torch.Tensor):
-            x_tensor = x_batch.to(self.device)
+            x_tensor = x_batch.to(device=self.device, dtype=torch.float32)
         else:
             x_tensor = torch.tensor(x_batch, dtype=torch.float32, device=self.device)
         
         # Return constant noise variance for all states using tensor operations
-        return torch.full_like(x_tensor, self.base_noise_variance, device=self.device) 
+        return torch.full_like(x_tensor, self.base_noise_variance, dtype=torch.float32, device=self.device) 

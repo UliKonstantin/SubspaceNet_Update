@@ -7,6 +7,7 @@ state evolution models must implement for use with the ExtendedKalmanFilter1D.
 
 from abc import ABC, abstractmethod
 import numpy as np
+import torch
 import logging
 
 logger = logging.getLogger("SubspaceNet.kalman_filter.models")
@@ -26,10 +27,10 @@ class StateEvolutionModel(ABC):
         Non-linear state transition function.
         
         Args:
-            x: Current state
+            x: Current state (tensor or scalar)
             
         Returns:
-            Next state without noise
+            Next state without noise (tensor)
         """
         pass
     
@@ -39,10 +40,10 @@ class StateEvolutionModel(ABC):
         Jacobian of the state transition function.
         
         Args:
-            x: Current state
+            x: Current state (tensor or scalar)
             
         Returns:
-            Derivative of f with respect to x
+            Derivative of f with respect to x (tensor)
         """
         pass
     
@@ -51,9 +52,17 @@ class StateEvolutionModel(ABC):
         State-dependent process noise variance.
         
         Args:
-            x: Current state
+            x: Current state (tensor or scalar)
             
         Returns:
-            Process noise variance at state x
+            Process noise variance at state x (tensor)
         """
-        return self.base_noise_variance 
+        # Default implementation returns constant noise variance
+        # Subclasses should override this for state-dependent noise
+        if hasattr(self, 'base_noise_variance'):
+            if isinstance(x, torch.Tensor):
+                return torch.full_like(x, self.base_noise_variance, dtype=torch.float32, device=x.device)
+            else:
+                return self.base_noise_variance
+        else:
+            raise NotImplementedError("Subclasses must implement noise_variance or provide base_noise_variance") 

@@ -142,6 +142,12 @@ class KalmanFilterConfig(BaseModel):
     initial_covariance: float = 1.0  # Initial state covariance (uncertainty)
 
 
+class OnlineLearningLossConfig(BaseModel):
+    """Configuration for online learning loss function."""
+    metric: Literal["rmspe", "rmape"] = Field(default="rmape", description="Loss metric to use: 'rmspe' or 'rmape'")
+    supervision: Literal["supervised", "unsupervised"] = Field(default="unsupervised", description="Supervision mode: 'supervised' (compare with ground truth) or 'unsupervised' (compare with pre-EKF predictions)")
+
+
 class OnlineLearningConfig(BaseModel):
     """Online learning configuration parameters."""
     enabled: bool = False
@@ -166,6 +172,9 @@ class OnlineLearningConfig(BaseModel):
     
     # Multi-trajectory parameters
     dataset_size: int = Field(default=1, description="Number of trajectories to run and average results over. Default is 1 for backward compatibility.")
+    
+    # Loss configuration
+    loss_config: OnlineLearningLossConfig = Field(default_factory=OnlineLearningLossConfig, description="Configuration for online learning loss function")
 
 
 class ScenarioSystemModelOverride(BaseModel):

@@ -72,9 +72,16 @@ class ExtendedKalmanFilter1D:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device = device
         
-        # Convert parameters to tensors
-        R_tensor = torch.tensor(R, dtype=torch.float32, device=device)
-        P0_tensor = torch.tensor(P0, dtype=torch.float32, device=device)
+        # Convert parameters to tensors with consistent dtype (float32 for training compatibility)
+        if isinstance(R, torch.Tensor):
+            R_tensor = R.to(device=device, dtype=torch.float32)
+        else:
+            R_tensor = torch.tensor(R, dtype=torch.float32, device=device)
+            
+        if isinstance(P0, torch.Tensor):
+            P0_tensor = P0.to(device=device, dtype=torch.float32)
+        else:
+            P0_tensor = torch.tensor(P0, dtype=torch.float32, device=device)
         
         # Prevent exactly zero measurement noise (numerical stability)
         if R_tensor == 0:
@@ -196,12 +203,13 @@ class ExtendedKalmanFilter1D:
         Args:
             x0: Initial state estimate (scalar or tensor)
         """
-        # Convert to tensor if needed
+        # Convert to tensor if needed, ensuring proper dtype and device
         if isinstance(x0, torch.Tensor):
-            self.x = x0.to(self.device)
+            self.x = x0.to(device=self.device, dtype=torch.float32)
         else:
             self.x = torch.tensor(x0, dtype=torch.float32, device=self.device)
         
+        # Ensure P is properly initialized as tensor
         self.P = self.P0.clone()
         logger.debug(f"Initialized state to x0={x0} with covariance P0={self.P0}")
     
@@ -225,6 +233,7 @@ class ExtendedKalmanFilter1D:
         self.Q = self.state_model.noise_variance(self.x)
         
         # Covariance prediction using linearization
+        # Use proper tensor operations to maintain gradients
         P_pred = F * self.P * F + self.Q
         
         # Update state and covariance
@@ -232,8 +241,6 @@ class ExtendedKalmanFilter1D:
         self.P = P_pred
         
         return x_pred
-    
-
     
     def update(self, z):
         """
@@ -249,9 +256,9 @@ class ExtendedKalmanFilter1D:
         if self.x is None:
             raise ValueError("State must be initialized before update")
         
-        # Convert measurement to tensor if needed
+        # Convert measurement to tensor if needed, ensuring proper dtype and device
         if isinstance(z, torch.Tensor):
-            z_tensor = z.to(self.device)
+            z_tensor = z.to(device=self.device, dtype=torch.float32)
         else:
             z_tensor = torch.tensor(z, dtype=torch.float32, device=self.device)
             
@@ -269,10 +276,11 @@ class ExtendedKalmanFilter1D:
         x_new = self.x + K * y
         
         # Covariance update (P_k|k = (I - K * H) * P_k|k-1)
-        P_new = (torch.tensor(1.0, device=self.device) - K) * self.P
+        # Use proper tensor operations to maintain gradients
+        P_new = (torch.tensor(1.0, dtype=torch.float32, device=self.device) - K) * self.P
         
         # Calculate y*(S^-1)*y (innovation covariance metric)
-        y_s_inv_y = y * (torch.tensor(1.0, device=self.device) / S) * y
+        y_s_inv_y = y * (torch.tensor(1.0, dtype=torch.float32, device=self.device) / S) * y
         
         # Update state and covariance
         self.x = x_new
