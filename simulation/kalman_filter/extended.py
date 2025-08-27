@@ -246,7 +246,7 @@ class ExtendedKalmanFilter1D:
         """
         if self.x is None:
             raise ValueError("State must be initialized before prediction")
-        print(f"state before prediction: {self.x}")
+        # print(f"state before prediction: {self.x}")
         # State prediction using non-linear function
         x_pred = self.state_model.f(self.x, self.source_idx)
 

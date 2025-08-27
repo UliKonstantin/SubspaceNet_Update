@@ -669,21 +669,31 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                             ax2.plot([last_training_x, first_online_x], [last_training_improvement, first_online_improvement], 
                                     color=color, linestyle='-', linewidth=2, alpha=0.7)
                     
-                # Add eta change markers for all scenarios (combine unique positions to avoid duplication)
-                all_eta_positions = set()
-                all_eta_markers = {}
-                for eta in valid_etas:
-                    for pos, eta_val in zip(eta_change_markers[eta]["positions"], eta_change_markers[eta]["values"]):
-                        all_eta_positions.add(pos)
-                        all_eta_markers[pos] = eta_val
+                # Add eta change markers (adjusted for starting from second sample)
+                for idx, eta in zip(eta_changes, eta_values):
+                    if idx >= 1:  # Only show markers from second sample onwards
+                        ax2.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                        ax2.text(idx, ax2.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
                 
-                for pos in sorted(all_eta_positions):
-                    ax2.axvline(x=pos, color='red', linestyle='--', alpha=0.3)
-                    ax2.text(pos, ax2.get_ylim()[1], f'η={all_eta_markers[pos]:.3f}', rotation=90, verticalalignment='top', fontsize=8)
+                # Add training end marker if available
+                if training_end_window is not None and training_end_window >= 1:
+                    ax2.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+                    ax2.text(training_end_window, ax2.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
+                            color='purple', fontweight='bold', fontsize=10)
                 
+                # Add training start marker if available
+                if training_start_window is not None and training_start_window >= 1:
+                    ax2.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+                    ax2.text(training_start_window, ax2.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
+                            color='orange', fontweight='bold', fontsize=10)
+                
+                # Add labels and title
                 ax2.set_xlabel('Window Index')
                 ax2.set_ylabel('Loss Difference')
-                ax2.set_title('SubspaceNet Loss - EKF Loss vs Window Index\nImprovement = L_SubspaceNet - L_EKF')
+                title = 'SubspaceNet Loss - EKF Loss vs Window Index (Starting from Window 1)\nImprovement = L_SubspaceNet - L_EKF'
+                if has_online_data:
+                    title += '\n(Static + Online Models)'
+                ax2.set_title(title)
                 ax2.legend()
                 ax2.grid(True, alpha=0.3)
                 
@@ -966,6 +976,28 @@ def plot_single_trajectory_results(trajectory_results, trajectory_idx, output_di
                 eta_changes.append(i)
                 eta_values.append(window_eta_values[i])
         
+        # Calculate training end window for single trajectory plots
+        training_end_window = None
+        if has_online_results and 'training_window_indices' in trajectory_results:
+            training_window_indices = trajectory_results['training_window_indices']
+            if training_window_indices and len(training_window_indices) > 0:
+                # Training ends after 13 training windows, so the last training window is window 12 (0-indexed)
+                if len(training_window_indices) >= 13:
+                    training_end_window = training_window_indices[12]  # 13th training window (0-indexed)
+                else:
+                    # If less than 13 training windows, use the last training window
+                    training_end_window = training_window_indices[-1]
+        
+        # Calculate training start window for single trajectory plots
+        training_start_window = None
+        if has_online_results and 'learning_start_window' in trajectory_results:
+            training_start_window = trajectory_results['learning_start_window']
+        elif has_online_results and 'training_window_indices' in trajectory_results:
+            training_window_indices = trajectory_results['training_window_indices']
+            if training_window_indices and len(training_window_indices) > 0:
+                # Use the first training window index as training start
+                training_start_window = training_window_indices[0]
+        
         # Determine number of subplots based on available data
         if has_online_results:
             # Create figure with 6 subplots (2x3 layout) to accommodate difference plot
@@ -1025,6 +1057,18 @@ def plot_single_trajectory_results(trajectory_results, trajectory_idx, output_di
             ax1.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
             ax1.text(idx, ax1.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
         
+        # Add training end marker if available
+        if training_end_window is not None:
+            ax1.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+            ax1.text(training_end_window, ax1.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
+                    color='purple', fontweight='bold', fontsize=10)
+        
+        # Add training start marker if available
+        if training_start_window is not None:
+            ax1.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+            ax1.text(training_start_window, ax1.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
+                    color='orange', fontweight='bold', fontsize=10)
+        
         ax1.set_xlabel('Window Index')
         ax1.set_ylabel('Loss Difference')
         ax1.set_title(f'Trajectory {trajectory_idx}: Static Model Loss Difference\n(Positive = EKF Improved, Negative = EKF Worse)')
@@ -1038,6 +1082,18 @@ def plot_single_trajectory_results(trajectory_results, trajectory_idx, output_di
         for idx, eta in zip(eta_changes, eta_values):
             ax2.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
             ax2.text(idx, ax2.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+        
+        # Add training end marker if available
+        if training_end_window is not None:
+            ax2.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+            ax2.text(training_end_window, ax2.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
+                    color='purple', fontweight='bold', fontsize=10)
+        
+        # Add training start marker if available
+        if training_start_window is not None:
+            ax2.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+            ax2.text(training_start_window, ax2.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
+                    color='orange', fontweight='bold', fontsize=10)
         
         ax2.set_xlabel('Window Index')
         ax2.set_ylabel('Average Innovation Magnitude')
@@ -1057,6 +1113,18 @@ def plot_single_trajectory_results(trajectory_results, trajectory_idx, output_di
                     ax3.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
                     ax3.text(idx, ax3.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
             
+            # Add training end marker if available
+            if training_end_window is not None and training_end_window < len(online_window_indices):
+                ax3.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+                ax3.text(training_end_window, ax3.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
+                        color='purple', fontweight='bold', fontsize=10)
+            
+            # Add training start marker if available
+            if training_start_window is not None and training_start_window < len(online_window_indices):
+                ax3.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+                ax3.text(training_start_window, ax3.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
+                        color='orange', fontweight='bold', fontsize=10)
+            
             ax3.set_xlabel('Window Index')
             ax3.set_ylabel('Loss Difference')
             ax3.set_title(f'Trajectory {trajectory_idx}: Online Model Loss Difference\n(Positive = EKF Improved, Negative = EKF Worse)')
@@ -1071,6 +1139,18 @@ def plot_single_trajectory_results(trajectory_results, trajectory_idx, output_di
                 if idx < len(online_window_indices):
                     ax4.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
                     ax4.text(idx, ax4.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            # Add training end marker if available
+            if training_end_window is not None and training_end_window < len(online_window_indices):
+                ax4.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+                ax4.text(training_end_window, ax4.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
+                        color='purple', fontweight='bold', fontsize=10)
+            
+            # Add training start marker if available
+            if training_start_window is not None and training_start_window < len(online_window_indices):
+                ax4.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+                ax4.text(training_start_window, ax4.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
+                        color='orange', fontweight='bold', fontsize=10)
             
             ax4.set_xlabel('Window Index')
             ax4.set_ylabel('Average Innovation Magnitude')
@@ -1088,6 +1168,18 @@ def plot_single_trajectory_results(trajectory_results, trajectory_idx, output_di
                     ax5.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
                     ax5.text(idx, ax5.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
             
+            # Add training end marker if available
+            if training_end_window is not None and training_end_window < len(online_window_indices):
+                ax5.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+                ax5.text(training_end_window, ax5.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
+                        color='purple', fontweight='bold', fontsize=10)
+            
+            # Add training start marker if available
+            if training_start_window is not None and training_start_window < len(online_window_indices):
+                ax5.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+                ax5.text(training_start_window, ax5.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
+                        color='orange', fontweight='bold', fontsize=10)
+            
             ax5.set_xlabel('Window Index')
             ax5.set_ylabel('Loss Difference')
             ax5.set_title(f'Trajectory {trajectory_idx}: Static vs Online EKF Loss Difference\n(Positive = Online Better, Negative = Static Better)')
@@ -1103,6 +1195,18 @@ def plot_single_trajectory_results(trajectory_results, trajectory_idx, output_di
                 if idx < len(online_window_indices):
                     ax6.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
                     ax6.text(idx, ax6.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            # Add training end marker if available
+            if training_end_window is not None and training_end_window < len(online_window_indices):
+                ax6.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+                ax6.text(training_end_window, ax6.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
+                        color='purple', fontweight='bold', fontsize=10)
+            
+            # Add training start marker if available
+            if training_start_window is not None and training_start_window < len(online_window_indices):
+                ax6.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+                ax6.text(training_start_window, ax6.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
+                        color='orange', fontweight='bold', fontsize=10)
             
             ax6.set_xlabel('Window Index')
             ax6.set_ylabel('Loss Difference')
@@ -1299,6 +1403,25 @@ def plot_online_learning_results(output_dir, window_losses, window_covariances, 
                 eta_changes.append(i)
                 eta_values.append(window_eta_values[i])
         
+        # Calculate training end window (training ends after 13 training windows)
+        training_end_window = None
+        if has_training_data and training_window_indices is not None and len(training_window_indices) > 0:
+            # Training ends after 13 training windows, so the last training window is window 12 (0-indexed)
+            # The training end window is the window where training completed and online inference started
+            if len(training_window_indices) >= 13:
+                training_end_window = training_window_indices[12]  # 13th training window (0-indexed)
+            else:
+                # If less than 13 training windows, use the last training window
+                training_end_window = training_window_indices[-1]
+        
+        # Calculate training start window (when time_to_learn is reached)
+        training_start_window = None
+        if learning_start_window is not None:
+            training_start_window = learning_start_window
+        elif has_training_data and training_window_indices is not None and len(training_window_indices) > 0:
+            # If learning_start_window is not provided, use the first training window index
+            training_start_window = training_window_indices[0]
+        
         # Create figure with multiple subplots (4x2 layout for 8 plots)
         fig = plt.figure(figsize=(20, 24))
         
@@ -1377,6 +1500,18 @@ def plot_online_learning_results(output_dir, window_losses, window_covariances, 
                 ax1.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
                 ax1.text(idx, 0.13, f'η={eta:.3f}', rotation=90, verticalalignment='top')
         
+        # Add training end marker if available
+        if training_end_window is not None and training_end_window >= 1:
+            ax1.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+            ax1.text(training_end_window, 0.13, 'Training End', rotation=90, verticalalignment='top', 
+                    color='purple', fontweight='bold', fontsize=10)
+        
+        # Add training start marker if available
+        if training_start_window is not None and training_start_window >= 1:
+            ax1.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+            ax1.text(training_start_window, 0.13, 'Training Start', rotation=90, verticalalignment='top', 
+                    color='orange', fontweight='bold', fontsize=10)
+        
         # Add labels and title
         ax1.set_xlabel('Window Index')
         ax1.set_ylabel('Loss')
@@ -1428,6 +1563,18 @@ def plot_online_learning_results(output_dir, window_losses, window_covariances, 
             if idx >= 1:  # Only show markers from second sample onwards
                 ax2.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
                 ax2.text(idx, ax2.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+        
+        # Add training end marker if available
+        if training_end_window is not None and training_end_window >= 1:
+            ax2.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+            ax2.text(training_end_window, ax2.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
+                    color='purple', fontweight='bold', fontsize=10)
+        
+        # Add training start marker if available
+        if training_start_window is not None and training_start_window >= 1:
+            ax2.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+            ax2.text(training_start_window, ax2.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
+                    color='orange', fontweight='bold', fontsize=10)
         
         # Add labels and title
         ax2.set_xlabel('Window Index')
@@ -1546,6 +1693,18 @@ def plot_online_learning_results(output_dir, window_losses, window_covariances, 
                 ax3.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
                 ax3.text(idx, ax3.get_ylim()[1] * 0.9, f'η={eta:.3f}', rotation=90, verticalalignment='top', fontsize=8)
         
+        # Add training end marker if available
+        if training_end_window is not None and training_end_window >= 1:
+            ax3.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+            ax3.text(training_end_window, ax3.get_ylim()[1] * 0.9, 'Training End', rotation=90, verticalalignment='top', 
+                    color='purple', fontweight='bold', fontsize=10)
+        
+        # Add training start marker if available
+        if training_start_window is not None and training_start_window >= 1:
+            ax3.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+            ax3.text(training_start_window, ax3.get_ylim()[1] * 0.9, 'Training Start', rotation=90, verticalalignment='top', 
+                    color='orange', fontweight='bold', fontsize=10)
+        
         # Add labels and title
         ax3.set_xlabel('Window Index')
         ax3.set_ylabel('Average Angle Predictions (radians)')
@@ -1607,6 +1766,18 @@ def plot_online_learning_results(output_dir, window_losses, window_covariances, 
                 ax4.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
                 ax4.text(idx, ax4.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
         
+        # Add training end marker if available
+        if training_end_window is not None and training_end_window >= 1:
+            ax4.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+            ax4.text(training_end_window, ax4.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
+                    color='purple', fontweight='bold', fontsize=10)
+        
+        # Add training start marker if available
+        if training_start_window is not None and training_start_window >= 1:
+            ax4.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+            ax4.text(training_start_window, ax4.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
+                    color='orange', fontweight='bold', fontsize=10)
+        
         ax4.set_xlabel('Window Index')
         ax4.set_ylabel('Prediction Delta')
         ax4.set_title('Subspace-Kalman Prediction Delta vs Window Index\nStatic → Training → Inference Pipeline')
@@ -1651,6 +1822,18 @@ def plot_online_learning_results(output_dir, window_losses, window_covariances, 
             if idx >= 1:  # Only show markers from second sample onwards
                 ax5.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
                 ax5.text(idx, max(np.array(window_covariances)[1:]), f'η={eta:.3f}', rotation=90, verticalalignment='top')
+        
+        # Add training end marker if available
+        if training_end_window is not None and training_end_window >= 1:
+            ax5.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+            ax5.text(training_end_window, max(np.array(window_covariances)[1:]), 'Training End', rotation=90, verticalalignment='top', 
+                    color='purple', fontweight='bold', fontsize=10)
+        
+        # Add training start marker if available
+        if training_start_window is not None and training_start_window >= 1:
+            ax5.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+            ax5.text(training_start_window, max(np.array(window_covariances)[1:]), 'Training Start', rotation=90, verticalalignment='top', 
+                    color='orange', fontweight='bold', fontsize=10)
         
         # Highlight windows where model was updated (adjusted for starting from second sample)
         if window_updates:
@@ -1749,6 +1932,18 @@ def plot_online_learning_results(output_dir, window_losses, window_covariances, 
                 if idx >= 1:  # Only show markers from second sample onwards
                     ax6.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
                     ax6.text(idx, ax6.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            # Add training end marker if available
+            if training_end_window is not None and training_end_window >= 1:
+                ax6.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+                ax6.text(training_end_window, ax6.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
+                        color='purple', fontweight='bold', fontsize=10)
+        
+            # Add training start marker if available
+            if training_start_window is not None and training_start_window >= 1:
+                ax6.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+                ax6.text(training_start_window, ax6.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
+                        color='orange', fontweight='bold', fontsize=10)
         
             # Add labels and title
             ax6.set_xlabel('Window Index')
@@ -1835,6 +2030,18 @@ def plot_online_learning_results(output_dir, window_losses, window_covariances, 
                 if idx >= 1:  # Only show markers from second sample onwards
                     ax7.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
                     ax7.text(idx, ax7.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            # Add training end marker if available
+            if training_end_window is not None and training_end_window >= 1:
+                ax7.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+                ax7.text(training_end_window, ax7.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
+                        color='purple', fontweight='bold', fontsize=10)
+        
+            # Add training start marker if available
+            if training_start_window is not None and training_start_window >= 1:
+                ax7.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+                ax7.text(training_start_window, ax7.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
+                        color='orange', fontweight='bold', fontsize=10)
         
             # Add labels and title
             ax7.set_xlabel('Window Index')
@@ -1921,6 +2128,18 @@ def plot_online_learning_results(output_dir, window_losses, window_covariances, 
                 if idx >= 1:  # Only show markers from second sample onwards
                     ax8.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
                     ax8.text(idx, ax8.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            # Add training end marker if available
+            if training_end_window is not None and training_end_window >= 1:
+                ax8.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+                ax8.text(training_end_window, ax8.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
+                        color='purple', fontweight='bold', fontsize=10)
+            
+            # Add training start marker if available
+            if training_start_window is not None and training_start_window >= 1:
+                ax8.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+                ax8.text(training_start_window, ax8.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
+                        color='orange', fontweight='bold', fontsize=10)
             
             # Add labels and title
             ax8.set_xlabel('Window Index')

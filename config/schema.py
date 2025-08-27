@@ -226,6 +226,51 @@ class ScenarioConfig(BaseModel):
     retrain_model: bool = Field(default=False, description="Whether to retrain the model for each scenario value.")
 
 
+class LoggingConfig(BaseModel):
+    """Logging configuration parameters."""
+    level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
+        default="INFO", 
+        description="Global logging level. Controls verbosity of all loggers."
+    )
+    
+    # Specific logger levels (optional overrides)
+    subspace_net_level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = Field(
+        default=None,
+        description="Logging level for SubspaceNet loggers. If None, uses global level."
+    )
+    
+    kalman_filter_level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = Field(
+        default=None,
+        description="Logging level for Kalman filter loggers. If None, uses global level."
+    )
+    
+    torch_level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = Field(
+        default="WARNING",
+        description="Logging level for PyTorch loggers. Defaults to WARNING to reduce noise."
+    )
+    
+    matplotlib_level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = Field(
+        default="WARNING",
+        description="Logging level for matplotlib loggers. Defaults to WARNING to reduce noise."
+    )
+    
+    # File logging options
+    log_to_file: bool = Field(
+        default=False,
+        description="Whether to log to a file in addition to console output."
+    )
+    
+    log_file_path: Optional[str] = Field(
+        default=None,
+        description="Path for log file. If None and log_to_file=True, uses default path."
+    )
+    
+    log_file_level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = Field(
+        default="DEBUG",
+        description="Logging level for file output. If None, uses global level."
+    )
+
+
 class Config(BaseModel):
     """Complete configuration model."""
     system_model: SystemModelConfig = SystemModelConfig()
@@ -237,6 +282,7 @@ class Config(BaseModel):
     trajectory: TrajectoryConfig = TrajectoryConfig()
     kalman_filter: KalmanFilterConfig = KalmanFilterConfig()
     online_learning: OnlineLearningConfig = OnlineLearningConfig()
+    logging: LoggingConfig = LoggingConfig()
     # New scenario-related fields
     scenarios: Optional[List[ScenarioDefinition]] = Field(default=None, description="List of scenarios to run.")
     train_base_model_only_once: bool = Field(default=True, description="If True and scenarios use a shared model, train it only once initially.")

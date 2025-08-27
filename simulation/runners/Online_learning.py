@@ -765,7 +765,7 @@ class OnlineLearning:
         logger.info(f"Online training step {self.online_training_count} called for trajectory {trajectory_idx}, window {window_idx}")
         
         # Set learning done after 7 training calls
-        if self.online_training_count >= 7:
+        if self.online_training_count >= 10:
             self.learning_done = True
             logger.info(f"Online model training completed after {self.online_training_count} training windows")
         
@@ -867,9 +867,19 @@ class OnlineLearning:
                                     source_idx=i,  # Pass source index to use source-specific parameters
                                     initial_time=training_initial_time  # Pass initial time for correct oscillatory behavior
                                 )
-                                # Initialize with true angles for stable training
-                                training_ekf.initialize_state(true_angles_this_step[i])
                                 self.training_ekf_filters.append(training_ekf)
+                            
+                            # Use the _initialize_ekf_state method to properly initialize state and covariance
+                            # This ensures we use the last predictions and covariances from the previous window
+                            self._initialize_ekf_state(
+                                step=0, 
+                                num_sources_this_step=num_sources_this_step, 
+                                true_angles_this_step=true_angles_this_step,
+                                ekf_filters=self.training_ekf_filters, 
+                                is_first_window=False,  # Not first window since we're in online training
+                                last_ekf_predictions=last_ekf_predictions, 
+                                last_ekf_covariances=last_ekf_covariances
+                            )
                         
                         # Apply EKF to each source prediction using tensor inputs to preserve gradients
                         ekf_angles_pred = []
@@ -1202,7 +1212,7 @@ class OnlineLearning:
                         logger.error("Model and trained model have the same weights - online model was not properly copied!")
                         raise RuntimeError("Online model and trained model have identical weights. This indicates the online model was not properly initialized as an independent copy. Cannot proceed with online learning.")
                     elif model_is_trained:
-                        logger.info("online model is not initialized yet")
+                        logger.info("The evaluated model is not the online model,online model is not initialized yet or this is evaluation comparison")
                     else:
                         logger.info("Model and trained model dont have the same weights - online model is properly initialized")
                         pretrained_model_angle_pred, _, _ = self.trained_model(step_data_tensor,num_sources_this_step)
@@ -1239,34 +1249,34 @@ class OnlineLearning:
                     
                     for i in range(num_sources_this_step):
                         # Predict and update in one step - pass tensor directly
-                        print(f"**********Predicting and updating for source {i}, Filter Parameters**********")
-                        print(f"P0: {ekf_filters[i].P0}")
-                        print(f"P: {ekf_filters[i].P}")
-                        print(f"Q: {ekf_filters[i].Q}")
-                        print(f"R: {ekf_filters[i].R}")
-                        print(f"x: {ekf_filters[i].x}")
-                        print(f"Source {i} parameters:")
-                        print(f"Time step: {step}")
-                        print(f"Ekf time step: {ekf_filters[i].state_model.current_time}")
-                        print(f"True_state: {true_angles_this_step[i]}")
+                        # print(f"**********Predicting and updating for source {i}, Filter Parameters**********")
+                        # print(f"P0: {ekf_filters[i].P0}")
+                        # print(f"P: {ekf_filters[i].P}")
+                        # print(f"Q: {ekf_filters[i].Q}")
+                        # print(f"R: {ekf_filters[i].R}")
+                        # print(f"x: {ekf_filters[i].x}")
+                        # print(f"Source {i} parameters:")
+                        # print(f"Time step: {step}")
+                        # print(f"Ekf time step: {ekf_filters[i].state_model.current_time}")
+                        # print(f"True_state: {true_angles_this_step[i]}")
                         predicted_angle, updated_angle, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y = ekf_filters[i].predict_and_update(
                             measurement= pre_ekf_angles_pred.flatten()[i],  # Flatten to get proper indexing
                             true_state= true_angles_this_step[i]
                         )      
-                        print(f"SubspaceNet angle: {pre_ekf_angles_pred.flatten()[i]}")
-                        print(f"Predicted angle: {predicted_angle}")
-                        print(f"Updated angle: {updated_angle}")
-                        print(f"Innovation: {innovation}")
-                        print(f"Kalman gain: {kalman_gain}")
-                        print(f"Kalman gain times innovation: {kalman_gain_times_innovation}")
-                        print(f"y_s_inv_y: {y_s_inv_y}")
-                        print(f"**********Predicting and updating for source {i}**********")
-                        print(f"Pre-EKF angle: {pre_ekf_angles_pred.flatten()[i]}")
-                        print(f"True angle: {true_angles_this_step[i]}")
+                        # print(f"SubspaceNet angle: {pre_ekf_angles_pred.flatten()[i]}")
+                        # print(f"Predicted angle: {predicted_angle}")
+                        # print(f"Updated angle: {updated_angle}")
+                        # print(f"Innovation: {innovation}")
+                        # print(f"Kalman gain: {kalman_gain}")
+                        # print(f"Kalman gain times innovation: {kalman_gain_times_innovation}")
+                        # print(f"y_s_inv_y: {y_s_inv_y}")
+                        # print(f"**********Predicting and updating for source {i}**********")
+                        # print(f"Pre-EKF angle: {pre_ekf_angles_pred.flatten()[i]}")
+                        # print(f"True angle: {true_angles_this_step[i]}")
                         
-                        print(f" difference between pre-EKF and true angle: {abs(pre_ekf_angles_pred.flatten()[i] - true_angles_this_step[i])}")
-                        print(f" difference between predicted and true angle: {abs(predicted_angle - true_angles_this_step[i])}")
-                        print(f" difference between updated and true angle: {abs(updated_angle - true_angles_this_step[i])}")
+                        # print(f" difference between pre-EKF and true angle: {abs(pre_ekf_angles_pred.flatten()[i] - true_angles_this_step[i])}")
+                        # print(f" difference between predicted and true angle: {abs(predicted_angle - true_angles_this_step[i])}")
+                        # print(f" difference between updated and true angle: {abs(updated_angle - true_angles_this_step[i])}")
                         
                         # Store prediction, covariance and innovation
                         step_predictions.append(updated_angle)

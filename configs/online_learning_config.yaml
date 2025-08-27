@@ -77,8 +77,8 @@ trajectory:
   enabled: true
   trajectory_type: "sine_accel_nonlinear"  # Type of trajectory for online learning
   # Sine acceleration non-linear model parameters (now oscillatory with source-specific patterns)
-  sine_accel_omega0: [0.2, 0.3, 0.15]  # Frequency of oscillation (rad/s) - different for each source
-  sine_accel_kappa: [4, -4, 1]  # Amplitude of oscillation (rad) - different for each source  
+  sine_accel_omega0: [1, 0.5, 0.15]  # Frequency of oscillation (rad/s) - different for each source
+  sine_accel_kappa: [3, -3, 1]  # Amplitude of oscillation (rad) - different for each source  
   sine_accel_noise_std: 0.03   # Noise standard deviation (rad) - controls randomness
   save_trajectory: false
 
@@ -95,24 +95,36 @@ online_learning:
   loss_threshold: 0.2  # Threshold for detecting drift and triggering online learning
   max_iterations: 10  # Maximum iterations for online training
   learning_rate: 0.0001  # Learning rate for online training (smaller than main training)
-  trajectory_length: 100  # Length of trajectory specifically for online learning
+  trajectory_length: 300  # Length of trajectory specifically for online learning
   dataset_size: 1  # Number of trajectories for online learning
   
-  # Loss configuration for online learning
+  # Dynamic Eta Update Parameters
+  eta_update_interval_windows: 20  # Update eta every N windows. If null or 0, eta is not periodically updated
+  eta_increment: 0.08  # Amount to increment (if positive) or decrement (if negative) eta by when an update occurs
+  max_eta: 0.08  # Maximum allowed value for eta during dynamic updates
+  min_eta: 0.0  # Minimum allowed value for eta during dynamic updates
+  
+  # Calibration error control
+  use_nominal: true  # If true (default), nominal array configuration (no calibration errors) is used for sample generation
+  
+  # Loss configuration
   loss_config:
-    metric: "rmspe"           # Options: "rmspe", "rmape"
-    supervision: "unsupervised"  # Options: "supervised", "unsupervised"
+    metric: "rmape"  # Loss metric to use: 'rmspe' or 'rmape'
+    supervision: "unsupervised"  # Supervision mode: 'supervised' (compare with ground truth) or 'unsupervised' (compare with pre-EKF predictions)
   
-  # Dynamic Eta Update Parameters - ADDED
-  eta_update_interval_windows: 5 # Update eta every 10 windows
-  eta_increment: 0.00            # Increase eta by 0.02 each time
-  max_eta: 0.00            # Don't let eta go above 0.5
-  min_eta: 0.0                  # Don't let eta go below 0.0
-  
-  # Online Learning Start Configuration
-  time_to_learn: 10  # Start online learning at window index 10 (0-based indexing)
-  # Set to null/None to disable automatic online learning start
-  # Set to a specific window index (0-based) to start online learning at that window
+  # Online learning start configuration
+  time_to_learn: 35  # Window index at which to start online learning
+
+# Logging configuration
+logging:
+  level: "INFO"  # Global logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  subspace_net_level: null  # Override for SubspaceNet loggers (null = use global level)
+  kalman_filter_level: "WARNING"  # Override for Kalman filter loggers (set to WARNING to reduce noise)
+  torch_level: "WARNING"  # PyTorch logging level (WARNING to reduce noise)
+  matplotlib_level: "WARNING"  # Matplotlib logging level (WARNING to reduce noise)
+  log_to_file: false  # Whether to log to a file in addition to console
+  log_file_path: null  # Path for log file (null = use default)
+  log_file_level: "DEBUG"  # Logging level for file output
 
 # No scenarios defined here, as this config is for a single online learning run
 scenarios: null

@@ -82,3 +82,14 @@ kalman_filter:
   process_noise_std_dev: null  # standard deviation of process noise (degrees), null to use trajectory.random_walk_std_dev
   measurement_noise_std_dev: 1.0e-3  # standard deviation of measurement noise (degrees)
   initial_covariance: 1.0  # initial state covariance 
+
+# Logging configuration
+logging:
+  level: "INFO"  # Global logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  subspace_net_level: null  # Override for SubspaceNet loggers (null = use global level)
+  kalman_filter_level: null  # Override for Kalman filter loggers (null = use global level)
+  torch_level: "WARNING"  # PyTorch logging level (WARNING to reduce noise)
+  matplotlib_level: "WARNING"  # Matplotlib logging level (WARNING to reduce noise)
+  log_to_file: false  # Whether to log to a file in addition to console
+  log_file_path: null  # Path for log file (null = use default)
+  log_file_level: "DEBUG"  # Logging level for file output 

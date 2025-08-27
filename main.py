@@ -19,13 +19,7 @@ from experiments.runner import run_experiment
 from cli.commands import show_command, save_command
 from cli.options import config_option, output_option, override_option
 from simulation.core import Simulation
-
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger('SubspaceNet')
+from utils.logging_utils import setup_logging_from_config
 
 # Device setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -49,6 +43,10 @@ def run_command(config: str, output: Optional[str], override: List[str], scenari
     try:
         # Use config_handler to set up configuration and components
         config_obj, components, output_dir = setup_configuration(config, output, override)
+        
+        # Setup logging from config
+        setup_logging_from_config(config_obj.logging, output_dir)
+        logger = logging.getLogger('SubspaceNet')
         
         # Create simulation instance
         logger.info(f"Running {scenario} scenario")
@@ -81,6 +79,9 @@ def run_command(config: str, output: Optional[str], override: List[str], scenari
 def evaluate_command(config: str, output: Optional[str], override: List[str],
                     model: str, trajectory: bool, scenario: Optional[str], values: List[float]):
     """Evaluate a pre-trained model without training. Optionally run parameter sweeps."""
+    # Initialize logger at function start to avoid UnboundLocalError
+    logger = None
+    
     try:
         # Add required overrides to skip training and use the provided model
         override = list(override) + [
@@ -96,6 +97,10 @@ def evaluate_command(config: str, output: Optional[str], override: List[str],
             
         # Use config_handler to set up configuration and components
         config_obj, components, output_dir = setup_configuration(config, output, override)
+        
+        # Setup logging from config
+        setup_logging_from_config(config_obj.logging, output_dir)
+        logger = logging.getLogger('SubspaceNet')
         
         # Create simulation
         logger.info(f"Evaluating model: {model}")
@@ -294,7 +299,13 @@ def evaluate_command(config: str, output: Optional[str], override: List[str],
             logger.info("Evaluation completed successfully")
         
     except Exception as e:
-        logger.error(f"Error evaluating model: {e}", exc_info=True)
+        if logger is not None:
+            logger.error(f"Error evaluating model: {e}", exc_info=True)
+        else:
+            # Fallback logging if logger is not available
+            print(f"Error evaluating model: {e}")
+            import traceback
+            traceback.print_exc()
         sys.exit(1)
 
 @cli.command('simulate')
@@ -310,6 +321,9 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
                     scenario: Optional[str], values: List[float], trajectory: bool,
                     mode: str):
     """Run a simulation with the specified configuration."""
+    # Initialize logger at function start to avoid UnboundLocalError
+    logger = None
+    
     try:
         # Add trajectory override if enabled
         if trajectory:
@@ -317,6 +331,10 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
             
         # Use config_handler to set up configuration and components
         config_obj, components, output_dir = setup_configuration(config, output, override)
+        
+        # Setup logging from config
+        setup_logging_from_config(config_obj.logging, output_dir)
+        logger = logging.getLogger('SubspaceNet')
         
         # Create simulation
         logger.info("Creating simulation")
@@ -350,7 +368,13 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
             logger.info(f"{mode.capitalize()} simulation completed successfully")
         
     except Exception as e:
-        logger.error(f"Error running simulation: {e}", exc_info=True)
+        if logger is not None:
+            logger.error(f"Error running simulation: {e}", exc_info=True)
+        else:
+            # Fallback logging if logger is not available
+            print(f"Error running simulation: {e}")
+            import traceback
+            traceback.print_exc()
         sys.exit(1)
 
 @cli.command('online_learning')
@@ -367,9 +391,16 @@ def online_learning_command(config: str, output: Optional[str], override: List[s
                             eta_values: List[float], process_noise_values: List[float], 
                             kf_process_noise_values: List[float], kf_measurement_noise_values: List[float]):
     """Run online learning with a pre-trained model."""
+    # Initialize logger at function start to avoid UnboundLocalError
+    logger = None
+    
     try:
         # Use config_handler to set up configuration and components
         config_obj, components, output_dir = setup_configuration(config, output, override)
+        
+        # Setup logging from config
+        setup_logging_from_config(config_obj.logging, output_dir)
+        logger = logging.getLogger('SubspaceNet')
         
         # Apply required overrides for online learning
         from config.loader import apply_overrides
@@ -489,7 +520,13 @@ def online_learning_command(config: str, output: Optional[str], override: List[s
             logger.info("Online learning completed successfully")
         
     except Exception as e:
-        logger.error(f"Error running online learning: {e}", exc_info=True)
+        if logger is not None:
+            logger.error(f"Error running online learning: {e}", exc_info=True)
+        else:
+            # Fallback logging if logger is not available
+            print(f"Error running online learning: {e}")
+            import traceback
+            traceback.print_exc()
         sys.exit(1)
 
 # Add other commands

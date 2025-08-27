@@ -942,6 +942,9 @@ class OnlineLearningTrajectoryGenerator:
         old_eta = self.system_model_params.eta
         self.system_model_params.eta = new_eta
         
+        # Also update sv_noise_var to the same value as eta
+        self.system_model_params.sv_noise_var = new_eta
+        
         # Regenerate distance noise with new eta value
         self.samples_model.eta = self.samples_model._SystemModel__set_eta()
         #if not getattr(self.system_model_params, 'nominal', True):
