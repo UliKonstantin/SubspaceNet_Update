@@ -72,7 +72,11 @@ trajectory:
   trajectory_type: "random_walk"
   trajectory_length: 30
   random_walk_std_dev: 5  # standard deviation for random walk trajectory (degrees)
-  save_trajectory: false 
+  save_trajectory: false
+  # Sine acceleration non-linear model parameters (now oscillatory with source-specific patterns)
+  sine_accel_omega0: [0.2, 0.3, 0.15]  # Frequency of oscillation (rad/s) - different for each source
+  sine_accel_kappa: [0.1, 0.15, 0.08]  # Amplitude of oscillation (rad) - different for each source
+  sine_accel_noise_std: 0.01 # Noise standard deviation (rad) - controls randomness
 
 kalman_filter:
   process_noise_std_dev: null  # standard deviation of process noise (degrees), null to use trajectory.random_walk_std_dev

@@ -57,7 +57,7 @@ class ExtendedKalmanFilter1D:
     automatically selects the appropriate model based on the trajectory type.
     """
     
-    def __init__(self, state_model, R, P0=0.001, device=None):
+    def __init__(self, state_model, R, P0=0.001, device=None, source_idx=0):
         """
         Initialize the Extended Kalman Filter.
         
@@ -66,11 +66,15 @@ class ExtendedKalmanFilter1D:
             R: Measurement noise variance (scalar or tensor)
             P0: Initial state covariance (scalar or tensor)
             device: Device for tensor operations (cuda/cpu)
+            source_idx: Index of the source this filter tracks (default 0)
         """
         # Set device for tensor operations
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device = device
+        
+        # Store source index
+        self.source_idx = source_idx
         
         # Convert parameters to tensors with consistent dtype (float32 for training compatibility)
         if isinstance(R, torch.Tensor):
@@ -95,10 +99,10 @@ class ExtendedKalmanFilter1D:
         self.x = None  # State estimate (tensor)
         self.P = P0_tensor.clone()  # State estimate covariance (tensor)
         self.Q = torch.tensor(0.0, dtype=torch.float32, device=device)  # Process noise variance (tensor)
-        logger.debug(f"Initialized Extended Kalman Filter with R={R}, P0={P0}, device={device}")
+        logger.debug(f"Initialized Extended Kalman Filter for source {source_idx} with R={R}, P0={P0}, device={device}")
     
     @classmethod
-    def from_config(cls, config, trajectory_type=None, device=None):
+    def from_config(cls, config, trajectory_type=None, device=None, initial_time=0.0):
         """
         Get ExtendedKalmanFilter1D parameters from configuration.
         
@@ -106,6 +110,7 @@ class ExtendedKalmanFilter1D:
             config: Configuration object with kalman_filter and trajectory settings
             trajectory_type: Type of trajectory to model (defaults to config value)
             device: Device for tensor operations (cuda/cpu)
+            initial_time: Initial time value for oscillatory models (default 0.0)
             
         Returns:
             tuple: (state_model, R, P0) - Parameters needed for ExtendedKalmanFilter1D initialization
@@ -130,14 +135,30 @@ class ExtendedKalmanFilter1D:
         
         # Create appropriate state evolution model based on trajectory type
         if trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
-            # Get sine acceleration model parameters
+            # Get sine acceleration model parameters (support both single values and arrays)
             omega0 = config.trajectory.sine_accel_omega0
             kappa = config.trajectory.sine_accel_kappa
             # Use KF process noise instead of trajectory noise
             noise_std = kf_process_noise_std
             
-            state_model = SineAccelStateModel(omega0, kappa, noise_std, device=device)
-            logger.info(f"Using sine acceleration model with ω₀={omega0}, κ={kappa}, σ={noise_std}")
+            # Convert single values to arrays for source-specific parameters
+            if isinstance(omega0, (int, float)):
+                omega0 = [omega0] * config.system_model.M
+            if isinstance(kappa, (int, float)):
+                kappa = [kappa] * config.system_model.M
+            
+            # Ensure arrays have correct length
+            if len(omega0) != config.system_model.M:
+                raise ValueError(f"sine_accel_omega0 array length ({len(omega0)}) must match number of sources ({config.system_model.M})")
+            if len(kappa) != config.system_model.M:
+                raise ValueError(f"sine_accel_kappa array length ({len(kappa)}) must match number of sources ({config.system_model.M})")
+            
+            # Create state model with source-specific parameters and initial time
+            state_model = SineAccelStateModel(omega0, kappa, noise_std, device=device, initial_time=initial_time)
+            
+            logger.info(f"Using source-specific sine acceleration model with initial_time={initial_time}:")
+            for i, (om, kap) in enumerate(zip(omega0, kappa)):
+                logger.info(f"  Source {i}: ω₀={om}, κ={kap}, σ={noise_std}")
             
         elif trajectory_type == TrajectoryType.MULT_NOISE_NONLINEAR:
             # Get multiplicative noise model parameters
@@ -153,7 +174,7 @@ class ExtendedKalmanFilter1D:
             # Default to random walk model for other types
             # Use KF process noise instead of trajectory noise
             noise_std = kf_process_noise_std
-            state_model = SineAccelStateModel(0.0, 0.0, noise_std, device=device)
+            state_model = SineAccelStateModel(0.0, 0.0, noise_std, device=device, initial_time=initial_time)
             logger.info(f"Using random walk model with σ={noise_std}")
         
         # Get measurement noise and initial covariance
@@ -163,7 +184,7 @@ class ExtendedKalmanFilter1D:
         return state_model, kf_R, kf_P0
 
     @classmethod
-    def create_from_config(cls, config, trajectory_type=None, device=None):
+    def create_from_config(cls, config, trajectory_type=None, device=None, source_idx=0, initial_time=0.0):
         """
         Create ExtendedKalmanFilter1D instance directly from config.
         
@@ -171,15 +192,17 @@ class ExtendedKalmanFilter1D:
             config: Configuration object with kalman_filter and trajectory settings
             trajectory_type: Type of trajectory to model (defaults to config value)
             device: Device for tensor operations (cuda/cpu)
+            source_idx: Index of the source this filter tracks (default 0)
+            initial_time: Initial time value for oscillatory models (default 0.0)
             
         Returns:
             ExtendedKalmanFilter1D instance
         """
-        params = cls.from_config(config, trajectory_type, device=device)
-        return cls(state_model=params[0], R=params[1], P0=params[2], device=device)
+        params = cls.from_config(config, trajectory_type, device=device, initial_time=initial_time)
+        return cls(state_model=params[0], R=params[1], P0=params[2], device=device, source_idx=source_idx)
     
     @classmethod
-    def create_filters_from_config(cls, config, num_instances=1, trajectory_type=None, device=None):
+    def create_filters_from_config(cls, config, num_instances=1, trajectory_type=None, device=None, initial_time=0.0):
         """
         Create multiple ExtendedKalmanFilter1D instances directly from config.
         
@@ -188,12 +211,13 @@ class ExtendedKalmanFilter1D:
             num_instances: Number of filter instances to create
             trajectory_type: Type of trajectory to model (defaults to config value)
             device: Device for tensor operations (cuda/cpu)
+            initial_time: Initial time value for oscillatory models (default 0.0)
             
         Returns:
-            list: List of ExtendedKalmanFilter1D instances
+            list: List of ExtendedKalmanFilter1D instances, each with source_idx=i
         """
-        params = cls.from_config(config, trajectory_type, device=device)
-        filters = [cls(state_model=params[0], R=params[1], P0=params[2], device=device) for _ in range(num_instances)]
+        params = cls.from_config(config, trajectory_type, device=device, initial_time=initial_time)
+        filters = [cls(state_model=params[0], R=params[1], P0=params[2], device=device, source_idx=i) for i in range(num_instances)]
         return filters
     
     def initialize_state(self, x0):
@@ -222,15 +246,15 @@ class ExtendedKalmanFilter1D:
         """
         if self.x is None:
             raise ValueError("State must be initialized before prediction")
-        
+        print(f"state before prediction: {self.x}")
         # State prediction using non-linear function
-        x_pred = self.state_model.f(self.x)
+        x_pred = self.state_model.f(self.x, self.source_idx)
 
         # Get Jacobian at current state
-        F = self.state_model.F_jacobian(self.x)
+        F = self.state_model.F_jacobian(self.x, self.source_idx)
         
         # Get state-dependent process noise
-        self.Q = self.state_model.noise_variance(self.x)
+        self.Q = self.state_model.noise_variance(self.x, self.source_idx)
         
         # Covariance prediction using linearization
         # Use proper tensor operations to maintain gradients
@@ -239,6 +263,10 @@ class ExtendedKalmanFilter1D:
         # Update state and covariance
         self.x = x_pred
         self.P = P_pred
+        
+        # Advance time for oscillatory models
+        if hasattr(self.state_model, 'advance_time'):
+            self.state_model.advance_time()
         
         return x_pred
     

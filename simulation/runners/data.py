@@ -194,7 +194,7 @@ class TrajectoryDataHandler:
         elif trajectory_type == TrajectoryType.FULL_RANDOM:
             logger.info("Using FULL_RANDOM trajectory type: completely independent random angles for each source and step")
         elif trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
-            logger.info("Using SINE_ACCEL_NONLINEAR trajectory type: θ_{k+1} = θ_k + (ω0 + κ sin θ_k)T + η_k")
+            logger.info("Using SINE_ACCEL_NONLINEAR trajectory type: θ_{k+1} = θ_k + κ sin(ω0 * t) + η_k (oscillatory model)")
         elif trajectory_type == TrajectoryType.MULT_NOISE_NONLINEAR:
             logger.info("Using MULT_NOISE_NONLINEAR trajectory type: θ_{k+1} = θ_k + ω0 T + σ(θ_k) η_k")
         
@@ -226,20 +226,41 @@ class TrajectoryDataHandler:
                     np.random.uniform(-30, 30, size=num_sources)
                 )
                 
-                # Apply non-linear sine acceleration model: θ_{k+1} = θ_k + (ω0 + κ sin θ_k)T + η_k
+                # Get oscillatory model parameters (support both single values and arrays)
+                sa_omega0 = config.trajectory.sine_accel_omega0
+                sa_kappa = config.trajectory.sine_accel_kappa
+                sa_noise_sd = config.trajectory.sine_accel_noise_std
+                
+                # Convert single values to arrays for source-specific parameters
+                if isinstance(sa_omega0, (int, float)):
+                    sa_omega0 = [sa_omega0] * num_sources
+                if isinstance(sa_kappa, (int, float)):
+                    sa_kappa = [sa_kappa] * num_sources
+                
+                # Ensure arrays have correct length
+                if len(sa_omega0) != num_sources:
+                    raise ValueError(f"sine_accel_omega0 array length ({len(sa_omega0)}) must match number of sources ({num_sources})")
+                if len(sa_kappa) != num_sources:
+                    raise ValueError(f"sine_accel_kappa array length ({len(sa_kappa)}) must match number of sources ({num_sources})")
+                
+                # Convert to tensors for efficient computation
+                sa_omega0_tensor = torch.tensor(sa_omega0, dtype=torch.float32)
+                sa_kappa_tensor = torch.tensor(sa_kappa, dtype=torch.float32)
+                
+                # Apply oscillatory model: θ_{k+1} = θ_k + κ sin(ω0 * t) + η_k
+                # This creates oscillatory behavior instead of drifting in one direction
                 for t in range(1, trajectory_length):
                     theta_prev = angle_trajectories[i, t-1, :num_sources]
-                    # Convert to radians for trigonometric functions
-                    theta_prev_rad = theta_prev * (np.pi / 180.0)
                     
-                    # Calculate acceleration term (ω0 + κ sin θ_k)
-                    delta = (sa_omega0 + sa_kappa * torch.sin(theta_prev_rad)) * 1.0  # T = 1 s
+                    # Calculate oscillatory term: κ sin(ω0 * t) for each source
+                    # Each source has its own frequency and amplitude
+                    oscillation = sa_kappa_tensor * torch.sin(sa_omega0_tensor * t) * 1.0  # T = 1 s
                     
                     # Add noise
                     noise = torch.randn(num_sources) * sa_noise_sd
                     
-                    # Update angle
-                    theta_new = 0.99*theta_prev + delta + noise
+                    # Update angle: θ_{k+1} = θ_k + oscillation + noise
+                    theta_new = 0.99*theta_prev + oscillation + noise
                     
                     # Ensure angles stay within bounds
                     angle_trajectories[i, t, :num_sources] = torch.clamp(
@@ -952,25 +973,36 @@ class OnlineLearningTrajectoryGenerator:
             # Angles remain the same as self.last_true_angles (initialized once)
             pass # No change needed for static
         elif self.trajectory_config.trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
-            # Get parameters for sine acceleration non-linear model
-            sa_omega0 = self.trajectory_config.sine_accel_omega0 if hasattr(self.trajectory_config, 'sine_accel_omega0') else 0.0
-            sa_kappa = self.trajectory_config.sine_accel_kappa if hasattr(self.trajectory_config, 'sine_accel_kappa') else 3.0
-            sa_noise_sd = self.trajectory_config.sine_accel_noise_std if hasattr(self.trajectory_config, 'sine_accel_noise_std') else 0.1
+            # Get parameters for oscillatory model (support both single values and arrays)
+            sa_omega0 = self.trajectory_config.sine_accel_omega0 if hasattr(self.trajectory_config, 'sine_accel_omega0') else 0.2
+            sa_kappa = self.trajectory_config.sine_accel_kappa if hasattr(self.trajectory_config, 'sine_accel_kappa') else 0.1
+            sa_noise_sd = self.trajectory_config.sine_accel_noise_std if hasattr(self.trajectory_config, 'sine_accel_noise_std') else 0.01
             
-            # Apply non-linear sine acceleration model: θ_{k+1} = θ_k + (ω0 + κ sin θ_k)T + η_k
-            # Convert to radians for trigonometric functions only
-            theta_prev_rad = self.last_true_angles * (np.pi / 180.0)
+            # Convert single values to arrays for source-specific parameters
+            if isinstance(sa_omega0, (int, float)):
+                sa_omega0 = [sa_omega0] * self.current_M
+            if isinstance(sa_kappa, (int, float)):
+                sa_kappa = [sa_kappa] * self.current_M
             
-            # Calculate acceleration term (ω0 + κ sin θ_k) - ω0 and κ in degrees, result in degrees
-            delta = (sa_omega0 + sa_kappa * np.sin(theta_prev_rad)) * 1.0  # T = 1 s
+            # Ensure arrays have correct length
+            if len(sa_omega0) != self.current_M:
+                raise ValueError(f"sine_accel_omega0 array length ({len(sa_omega0)}) must match number of sources ({self.current_M})")
+            if len(sa_kappa) != self.current_M:
+                raise ValueError(f"sine_accel_kappa array length ({len(sa_kappa)}) must match number of sources ({self.current_M})")
+            
+            # Convert to numpy arrays for computation
+            sa_omega0_array = np.array(sa_omega0)
+            sa_kappa_array = np.array(sa_kappa)
+            
+            # Apply oscillatory model: θ_{k+1} = θ_k + κ sin(ω0 * t) + η_k
+            # Each source has its own frequency and amplitude
+            oscillation = sa_kappa_array * np.sin(sa_omega0_array * self.current_step_in_session) * 1.0  # T = 1 s
             
             # Add noise (in degrees)
             noise = (torch.randn(self.current_M) * sa_noise_sd).numpy()
-            print(f"noise: {noise}")
-            print(f"delta: {delta}")
-            print(f"self.last_true_angles: {0.99*self.last_true_angles}")
-            # Update angle (all in degrees)
-            next_angles = 0.99*self.last_true_angles + delta + noise
+            
+            # Update angle: θ_{k+1} = θ_k + oscillation + noise
+            next_angles = 0.99*self.last_true_angles + oscillation + noise
             
             # Ensure angles stay within bounds
             self.last_true_angles = np.clip(next_angles, self.angle_min, self.angle_max)

@@ -173,6 +173,14 @@ class OnlineLearning:
         self.learning_start_window = None  # Track when learning started
         self.training_window_indices = []  # Track which windows were used for training
         
+        # Get time_to_learn from configuration
+        online_config = self.config.online_learning
+        self.time_to_learn = getattr(online_config, 'time_to_learn', None)
+        if self.time_to_learn is None:
+            logger.warning("time_to_learn not specified in config, online learning will not start automatically")
+        else:
+            logger.info(f"Online learning will start at window {self.time_to_learn}")
+        
         logger.info("OnlineLearning handler initialized")
     
     def run_online_learning(self) -> Dict[str, Any]:
@@ -475,20 +483,21 @@ class OnlineLearning:
                     # Only update if there's an actual change
                     if abs(new_eta - current_eta) > 1e-6:
                         logger.info(f"Online Learning: Dynamically updating eta at window {window_idx}. From {current_eta:.4f} to {new_eta:.4f}")
-                        
-                                            # Set drift detected on first eta change only
                     if self.first_eta_change:
-                        self.drift_detected = True
                         self.first_eta_change = False
-                        logger.info(f"Drift detected due to first eta modification at window {window_idx}")
-                        
-                        # Initialize online EKF state with static model's current state
-                        online_last_ekf_predictions = last_ekf_predictions
-                        online_last_ekf_covariances = last_ekf_covariances
-                        logger.info(f"Initialized online EKF state with static model's state at window {window_idx}")
-                        
+                        logger.info(f"First eta modification at window {window_idx}")
                         # The dataset holds the generator, which updates the shared self.system_model.params.eta
                         online_learning_dataloader.dataset.update_eta(new_eta)
+                                            # Set drift detected on first eta change only
+                if self.time_to_learn is not None and window_idx == self.time_to_learn:
+                    self.drift_detected = True
+                    logger.info(f"Drift detected at window {window_idx} (configured time_to_learn)")
+                    # Initialize online EKF state with static model's current state
+                    online_last_ekf_predictions = last_ekf_predictions
+                    online_last_ekf_covariances = last_ekf_covariances
+                    logger.info(f"Initialized online EKF state with static model's state at window {window_idx}")
+                    
+                    
                 # --- End Dynamic Eta Update Logic ---
                 
                 # Unpack batch data
@@ -788,11 +797,11 @@ class OnlineLearning:
         
         # Set up optimizer for online training
         if not hasattr(self, 'online_optimizer'):
-            self.online_optimizer = optim.Adam(self.online_model.parameters(), lr=1e-4)
+            self.online_optimizer = optim.Adam(self.online_model.parameters(), lr=1e-3)
         
         # Initialize Extended Kalman Filters
         max_sources = self.config.system_model.M
-        ekf_filters = self._initialize_ekf_filters(max_sources)
+        ekf_filters = self._initialize_ekf_filters(max_sources, window_idx, 0)
         
         # Get current eta value from system model
         current_eta = self.system_model.params.eta
@@ -844,13 +853,19 @@ class OnlineLearning:
                         # ============ EKF Processing for Training ============
                         # Initialize EKF for this training step if first step
                         if step == 0 and gd_step == 0:
+                            # Calculate initial time for training EKF filters
+                            window_size = self.config.online_learning.window_size
+                            training_initial_time = window_idx * window_size + step
+                            
                             # Initialize training EKF filters (separate from evaluation EKF)
                             self.training_ekf_filters = []
                             for i in range(num_sources_this_step):
                                 training_ekf = ExtendedKalmanFilter1D.create_from_config(
                                     self.config, 
                                     trajectory_type=self.config.trajectory.trajectory_type,
-                                    device=device
+                                    device=device,
+                                    source_idx=i,  # Pass source index to use source-specific parameters
+                                    initial_time=training_initial_time  # Pass initial time for correct oscillatory behavior
                                 )
                                 # Initialize with true angles for stable training
                                 training_ekf.initialize_state(true_angles_this_step[i])
@@ -912,6 +927,9 @@ class OnlineLearning:
                         
                         # Backward pass
                         training_loss.backward()
+                        
+                        # Check if gradients were computed properly
+                        gradients_ok = self._check_gradients(self.online_model, step, gd_step)
                         
                         # Log training loss
                         if loss_config is not None:
@@ -990,6 +1008,43 @@ class OnlineLearning:
         
         return result
 
+    def _check_gradients(self, model, step: int, gd_step: int) -> bool:
+        """
+        Check if gradients were properly computed after backward pass.
+        
+        Args:
+            model: The model to check gradients for
+            step: Current training step
+            gd_step: Current gradient descent step
+            
+        Returns:
+            bool: True if gradients exist and are finite, False otherwise
+        """
+        has_gradients = False
+        total_norm = 0
+        num_params_with_grad = 0
+        
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                has_gradients = True
+                num_params_with_grad += 1
+                
+                # Check for NaN or inf gradients
+                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                    logger.error(f"NaN/Inf gradients detected in {name} at step {step}, GD {gd_step}")
+                    return False
+                
+                param_norm = param.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        
+        if has_gradients:
+            total_norm = total_norm ** (1. / 2)
+            logger.debug(f"Step {step}, GD {gd_step}: {num_params_with_grad} params have gradients, norm: {total_norm:.6f}")
+            return True
+        else:
+            logger.warning(f"No gradients computed in step {step}, GD {gd_step}")
+            return False
+
     def _validate_inputs(self, window_time_series: torch.Tensor, window_sources_num: List[int], 
                         window_labels: List[np.ndarray]) -> Tuple[int, str]:
         """
@@ -1019,28 +1074,39 @@ class OnlineLearning:
         
         return current_window_len, ""
 
-    def _initialize_ekf_filters(self, max_sources: int) -> List[ExtendedKalmanFilter1D]:
+    def _initialize_ekf_filters(self, max_sources: int, window_idx: int = 0, step_idx: int = 0) -> List[ExtendedKalmanFilter1D]:
         """
         Initialize Extended Kalman Filters for window evaluation.
         
         Args:
             max_sources: Maximum number of sources to track
+            window_idx: Index of the current window (used to calculate initial time)
+            step_idx: Index of the current step within the window (used to calculate initial time)
             
         Returns:
-            List of initialized EKF filter instances
+            List of initialized EKF filter instances, each with source-specific parameters
         """
+        # Calculate the initial time based on window and step indices
+        # This ensures the EKF filters start with the correct time for oscillatory models
+        window_size = self.config.online_learning.window_size
+        initial_time = window_idx * window_size + step_idx
+        
         ekf_filters = []
         
+        # Create EKF filters for each source with source-specific parameters
         for i in range(max_sources):
+            # Create EKF filter with source index i - the filter will use source-specific parameters
             ekf_filter = ExtendedKalmanFilter1D.create_from_config(
                 self.config, 
                 trajectory_type=self.config.trajectory.trajectory_type,
-                device=device
+                device=device,
+                source_idx=i,  # Pass source index to the filter
+                initial_time=initial_time  # Pass initial time for correct oscillatory behavior
             )
             ekf_filters.append(ekf_filter)
         
         current_eta = self.system_model.params.eta
-        logger.info(f"Initialized {max_sources} EKF instances for window evaluation (eta={current_eta:.4f})")
+        logger.info(f"Initialized {max_sources} EKF instances for window {window_idx}, step {step_idx} (initial_time={initial_time}, eta={current_eta:.4f})")
         
         return ekf_filters
 
@@ -1130,18 +1196,27 @@ class OnlineLearning:
                     model_state = model.state_dict()
                     trained_state = self.trained_model.state_dict()
                     weights_equal = all(torch.equal(model_state[key], trained_state[key]) for key in model_state.keys())
-                
+                    true_angles_tensor = torch.tensor(true_angles_this_step, device=device).unsqueeze(0)
+
                     if weights_equal and not model_is_trained:
                         logger.error("Model and trained model have the same weights - online model was not properly copied!")
                         raise RuntimeError("Online model and trained model have identical weights. This indicates the online model was not properly initialized as an independent copy. Cannot proceed with online learning.")
                     elif model_is_trained:
                         logger.info("online model is not initialized yet")
                     else:
-                        logger.info("Model and trained model have the same weights - online model is properly initialized")
-                    
+                        logger.info("Model and trained model dont have the same weights - online model is properly initialized")
+                        pretrained_model_angle_pred, _, _ = self.trained_model(step_data_tensor,num_sources_this_step)
+                        pretrained_model_angle_pred= pretrained_model_angle_pred.view(1, -1)[:, :num_sources_this_step]
+                        pretrained_model_loss = rmspe_criterion(pretrained_model_angle_pred,true_angles_tensor)
+                        model_perm = self._get_optimal_permutation(pretrained_model_angle_pred.cpu().numpy().flatten(), true_angles_this_step)
+                        pretrained_model_angle_pred = pretrained_model_angle_pred[:, torch.tensor(model_perm, device=device)]
+                        model_perm = self._get_optimal_permutation(angles_pred.cpu().numpy().flatten(), true_angles_this_step)
+                        angles_pred = angles_pred[:, torch.tensor(model_perm, device=device)]
+                        print(f" difference between pretrained model and true angle: {abs(pretrained_model_angle_pred.flatten() - true_angles_this_step)}")
+                        print(f" difference between online model and true angle: {abs(angles_pred.flatten() - true_angles_this_step)}")
                     # Calculate pre-EKF loss (raw model predictions)
                     pre_ekf_angles_pred = angles_pred.view(1, -1)[:, :num_sources_this_step]
-                    true_angles_tensor = torch.tensor(true_angles_this_step, device=device).unsqueeze(0)
+                    
                     
                     # Get optimal permutation for model predictions (need numpy for permutation)
                     angles_pred_np = angles_pred.cpu().numpy().flatten()[:num_sources_this_step]
@@ -1170,11 +1245,15 @@ class OnlineLearning:
                         print(f"Q: {ekf_filters[i].Q}")
                         print(f"R: {ekf_filters[i].R}")
                         print(f"x: {ekf_filters[i].x}")
-                        print(f"true_state: {true_angles_this_step[i]}")
+                        print(f"Source {i} parameters:")
+                        print(f"Time step: {step}")
+                        print(f"Ekf time step: {ekf_filters[i].state_model.current_time}")
+                        print(f"True_state: {true_angles_this_step[i]}")
                         predicted_angle, updated_angle, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y = ekf_filters[i].predict_and_update(
                             measurement= pre_ekf_angles_pred.flatten()[i],  # Flatten to get proper indexing
                             true_state= true_angles_this_step[i]
-                        )
+                        )      
+                        print(f"SubspaceNet angle: {pre_ekf_angles_pred.flatten()[i]}")
                         print(f"Predicted angle: {predicted_angle}")
                         print(f"Updated angle: {updated_angle}")
                         print(f"Innovation: {innovation}")
@@ -1184,6 +1263,7 @@ class OnlineLearning:
                         print(f"**********Predicting and updating for source {i}**********")
                         print(f"Pre-EKF angle: {pre_ekf_angles_pred.flatten()[i]}")
                         print(f"True angle: {true_angles_this_step[i]}")
+                        
                         print(f" difference between pre-EKF and true angle: {abs(pre_ekf_angles_pred.flatten()[i] - true_angles_this_step[i])}")
                         print(f" difference between predicted and true angle: {abs(predicted_angle - true_angles_this_step[i])}")
                         print(f" difference between updated and true angle: {abs(updated_angle - true_angles_this_step[i])}")
@@ -1454,7 +1534,7 @@ class OnlineLearning:
         
         # Initialize Extended Kalman Filters
         max_sources = self.config.system_model.M
-        ekf_filters = self._initialize_ekf_filters(max_sources)
+        ekf_filters = self._initialize_ekf_filters(max_sources, window_idx, 0)
         
         # Get current eta value from system model
         current_eta = self.system_model.params.eta

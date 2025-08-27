@@ -123,10 +123,10 @@ class TrajectoryConfig(BaseModel):
     save_trajectory: bool = False
     random_walk_std_dev: float = 1.0  # Standard deviation for random walk angles (degrees)
     
-    # Parameters for sine acceleration non-linear model
-    sine_accel_omega0: float = 0.0    # Base angular velocity (rad/s)
-    sine_accel_kappa: float = 3.0     # Sine acceleration coefficient (rad/s²)
-    sine_accel_noise_std: float = 0.1 # Noise standard deviation (rad)
+    # Parameters for sine acceleration non-linear model (now oscillatory with source-specific patterns)
+    sine_accel_omega0: Union[float, List[float]] = 0.2    # Frequency of oscillation (rad/s) - can be single value or array per source
+    sine_accel_kappa: Union[float, List[float]] = 0.1     # Amplitude of oscillation (rad) - can be single value or array per source
+    sine_accel_noise_std: float = 0.01 # Noise standard deviation (rad) - controls randomness
     
     # Parameters for multiplicative noise non-linear model
     mult_noise_omega0: float = 0.0    # Base angular velocity (rad/s)
@@ -175,6 +175,9 @@ class OnlineLearningConfig(BaseModel):
     
     # Loss configuration
     loss_config: OnlineLearningLossConfig = Field(default_factory=OnlineLearningLossConfig, description="Configuration for online learning loss function")
+    
+    # Online learning start configuration
+    time_to_learn: Optional[int] = Field(default=None, description="Window index at which to start online learning. If None, online learning will not start automatically based on window index.")
 
 
 class ScenarioSystemModelOverride(BaseModel):

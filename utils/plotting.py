@@ -1349,8 +1349,27 @@ def plot_online_learning_results(output_dir, window_losses, window_covariances, 
                 ax1.plot([last_training_x, first_online_x], [last_training_ekf, first_online_ekf], 'lightcoral', linestyle='-', linewidth=2, alpha=0.7)
                 ax1.plot([last_training_x, first_online_x], [last_training_subspace, first_online_subspace], 'lightblue', linestyle='-', linewidth=2, alpha=0.7)
         
-        # Set y-axis limit to 0.14 for loss plot only
-        ax1.set_ylim([None, 0.14])
+        # Set y-axis limits to include all data points with some padding
+        all_loss_values = []
+        all_loss_values.extend(np.array(window_losses)[1:])
+        all_loss_values.extend(np.array(window_pre_ekf_losses)[1:])
+        
+        if has_online_data:
+            all_loss_values.extend(np.array(online_window_losses))
+            all_loss_values.extend(np.array(online_pre_ekf_losses))
+        
+        if has_training_data:
+            all_loss_values.extend(np.array(training_window_losses))
+            all_loss_values.extend(np.array(training_pre_ekf_losses))
+        
+        if all_loss_values:
+            min_loss = min(all_loss_values)
+            max_loss = max(all_loss_values)
+            padding = (max_loss - min_loss) * 0.05  # 5% padding
+            ax1.set_ylim([min_loss - padding, max_loss + padding])
+        else:
+            # Fallback to original limit if no data
+            ax1.set_ylim([None, 0.14])
         
         # Add eta change markers (adjusted for starting from second sample)
         for idx, eta in zip(eta_changes, eta_values):

@@ -16,7 +16,7 @@ system_model:
   eta: 0.0  # steering vector uniform error variance
   bias: 0  # steering vector bias error
   sv_noise_var: 0.0  # steering vector additive gaussian error noise variance
-  doa_range: 180  # range of DOA values [-doa_range, doa_range]
+  doa_range: 90  # range of DOA values [-doa_range, doa_range]
   doa_resolution: 1  # resolution of DOA values in degrees
   max_range_ratio_to_limit: 0.5  # ratio of maximum range to Fraunhofer distance
   range_resolution: 1  # resolution of range values in meters
@@ -76,11 +76,10 @@ evaluation: {}
 trajectory:
   enabled: true
   trajectory_type: "sine_accel_nonlinear"  # Type of trajectory for online learning
-  # Sine acceleration non-linear model parameters
-  sine_accel_omega0: 0.4       # Base angular velocity (rad/s) - reduced to be more stable
-  sine_accel_kappa: 0.2           # Sine acceleration coefficient (rad/s²) - reduced to be more stable
-  sine_accel_noise_std:  0.03       # Noise standard deviation (rad) - reduced to be more stable
-  
+  # Sine acceleration non-linear model parameters (now oscillatory with source-specific patterns)
+  sine_accel_omega0: [0.2, 0.3, 0.15]  # Frequency of oscillation (rad/s) - different for each source
+  sine_accel_kappa: [4, -4, 1]  # Amplitude of oscillation (rad) - different for each source  
+  sine_accel_noise_std: 0.03   # Noise standard deviation (rad) - controls randomness
   save_trajectory: false
 
 kalman_filter:
@@ -102,13 +101,18 @@ online_learning:
   # Loss configuration for online learning
   loss_config:
     metric: "rmspe"           # Options: "rmspe", "rmape"
-    supervision: "supervised"  # Options: "supervised", "unsupervised"
+    supervision: "unsupervised"  # Options: "supervised", "unsupervised"
   
   # Dynamic Eta Update Parameters - ADDED
-  eta_update_interval_windows: 10 # Update eta every 10 windows
-  eta_increment: 0.08            # Increase eta by 0.02 each time
-  max_eta: 0.08            # Don't let eta go above 0.5
+  eta_update_interval_windows: 5 # Update eta every 10 windows
+  eta_increment: 0.00            # Increase eta by 0.02 each time
+  max_eta: 0.00            # Don't let eta go above 0.5
   min_eta: 0.0                  # Don't let eta go below 0.0
+  
+  # Online Learning Start Configuration
+  time_to_learn: 10  # Start online learning at window index 10 (0-based indexing)
+  # Set to null/None to disable automatic online learning start
+  # Set to a specific window index (0-based) to start online learning at that window
 
 # No scenarios defined here, as this config is for a single online learning run
 scenarios: null
