@@ -917,19 +917,19 @@ class OnlineLearningTrajectoryGenerator:
         angles = (torch.rand(self.current_M) * 60 - 30).numpy()  # Uniform in [-30, 30]
         angles = sorted(angles)
         
-        # Check if minimum 4° separation exists, otherwise push edges away from middle
+        # Check if minimum 7° separation exists, otherwise push edges away from middle
         if self.current_M > 1:
             min_sep = min(angles[i+1] - angles[i] for i in range(len(angles)-1))
-            if min_sep < 4.0:
+            if min_sep < 7.0:
                 # Push edges away from middle to ensure 4° separation
                 middle_idx = self.current_M // 2
                 
                 # Start from middle and expand outward
                 for i in range(1, self.current_M):
                     if middle_idx - i >= 0:  # Left side
-                        angles[middle_idx - i] = angles[middle_idx - i + 1] - 4.0
+                        angles[middle_idx - i] = angles[middle_idx - i + 1] - 7.0
                     if middle_idx + i < self.current_M:  # Right side
-                        angles[middle_idx + i] = angles[middle_idx + i - 1] + 4.0
+                        angles[middle_idx + i] = angles[middle_idx + i - 1] + 7.0
         
         self.last_true_angles = np.array(angles)
         # TODO: Add self.last_true_ranges for near-field if needed and make it dynamic based on field_type

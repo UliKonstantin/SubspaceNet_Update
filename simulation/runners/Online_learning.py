@@ -22,7 +22,7 @@ from simulation.runners.data import TrajectoryDataHandler, create_online_learnin
 from simulation.runners.training import Trainer, TrainingConfig, TrajectoryTrainer, OnlineTrainer
 from simulation.runners.evaluation import Evaluator
 from utils.plotting import plot_single_trajectory_results, plot_online_learning_results, plot_online_learning_trajectory
-from utils.utils import log_window_summary, save_model_state
+from utils.utils import log_window_summary, save_model_state, log_online_learning_window_summary
 from simulation.kalman_filter import KalmanFilter1D, BatchKalmanFilter1D, BatchExtendedKalmanFilter1D
 from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
 from DCD_MUSIC.src.metrics.rmape_loss import RMAPELoss
@@ -611,6 +611,10 @@ class OnlineLearning:
                 # Log both pre-EKF and EKF losses for comparison
                 logger.info(f"Window {window_idx}: Pre-EKF Loss = {window_result.loss_metrics.pre_ekf_loss:.6f}, EKF Loss = {window_result.loss_metrics.ekf_loss:.6f}, Cov = {window_result.window_metrics.avg_covariance:.6f} (eta={self.system_model.params.eta:.4f})")
                 
+                # Store trained model results for comparison
+                trained_subspacenet_loss = window_result.loss_metrics.pre_ekf_loss
+                trained_ekf_loss = window_result.loss_metrics.ekf_loss
+                
                 # Check if loss exceeds threshold (drift detected)
                 if window_result.loss_metrics.ekf_loss > loss_threshold:
                     logger.info(f"Drift detected in window {window_idx} (loss: {window_result.loss_metrics.ekf_loss:.6f} > threshold: {loss_threshold:.6f})")
@@ -661,6 +665,18 @@ class OnlineLearning:
                         
                         logger.info(f"Online model - Window {window_idx}: Loss = {online_window_result.loss_metrics.ekf_loss:.6f}, Cov = {online_window_result.window_metrics.avg_covariance:.6f}")
                         
+                        # Log online learning window summary (post-learning evaluation)
+                        log_online_learning_window_summary(
+                            subspacenet_loss=trained_subspacenet_loss,
+                            ekf_loss=trained_ekf_loss,
+                            online_ekf_loss=online_window_result.loss_metrics.ekf_loss,
+                            current_eta=self.system_model.params.eta,
+                            is_near_field=hasattr(self.trained_model, 'field_type') and self.trained_model.field_type.lower() == "near",
+                            trajectory_idx=trajectory_idx,
+                            window_idx=window_idx,
+                            is_learning=False
+                        )
+                        
                         # Update online EKF state for next window
                         # online_window_result.ekf_metrics.predictions is already in tensor format
                         online_last_ekf_predictions = online_window_result.ekf_metrics.predictions
@@ -699,6 +715,18 @@ class OnlineLearning:
                         training_avg_pre_ekf_angle_pred.append(training_result.loss_metrics.avg_pre_ekf_angle_pred)  # Store training averaged pre-EKF angle predictions
                         
                         logger.info(f"Online training - Window {window_idx}: EKF Loss = {training_result.loss_metrics.ekf_loss:.6f}, Cov = {training_result.window_metrics.avg_covariance:.6f}, Pre-EKF Loss = {training_result.loss_metrics.pre_ekf_loss:.6f}")
+                        
+                        # Log online learning window summary (learning phase)
+                        log_online_learning_window_summary(
+                            subspacenet_loss=trained_subspacenet_loss,
+                            ekf_loss=trained_ekf_loss,
+                            online_ekf_loss=training_result.loss_metrics.ekf_loss,
+                            current_eta=self.system_model.params.eta,
+                            is_near_field=hasattr(self.trained_model, 'field_type') and self.trained_model.field_type.lower() == "near",
+                            trajectory_idx=trajectory_idx,
+                            window_idx=window_idx,
+                            is_learning=True
+                        )
                         
                         # Update online EKF state for next window
                         # training_result.ekf_metrics.predictions is already in tensor format
@@ -1684,10 +1712,8 @@ class OnlineLearning:
             # Initialize EKF state if this is the first step
             num_sources_this_step = sources_num_per_step[step]
             true_angles_this_step = labels_per_step_list[step][:num_sources_this_step]
-            
             self._initialize_ekf_state(step, num_sources_this_step, true_angles_this_step, 
                                      ekf_filters, is_first_window, last_ekf_predictions, last_ekf_covariances)
-            
             # Process single step
             success, step_result = self._process_single_step(
                 step, time_series_steps, sources_num_per_step, labels_per_step_list,
