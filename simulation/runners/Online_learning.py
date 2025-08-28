@@ -31,6 +31,58 @@ from DCD_MUSIC.src.evaluation import get_model_based_method, evaluate_model_base
 from simulation.kalman_filter.extended import ExtendedKalmanFilter1D
 
 
+class KalmanInnovationLoss:
+    """
+    Loss function for Kalman gain times innovation.
+    
+    This loss encourages the model to produce predictions that result in
+    smaller Kalman gain times innovation values, which indicates better
+    measurement quality and filter performance.
+    """
+    
+    def __init__(self):
+        """Initialize the Kalman Innovation Loss."""
+        pass
+    
+    def __call__(self, kalman_gain_times_innovation: torch.Tensor) -> torch.Tensor:
+        """
+        Calculate the absolute value of Kalman gain times innovation.
+        
+        Args:
+            kalman_gain_times_innovation: Tensor of K*y values from EKF
+            
+        Returns:
+            Loss tensor (absolute value of K*y)
+        """
+        return torch.abs(kalman_gain_times_innovation)
+
+
+class YSInvYLoss:
+    """
+    Loss function for y*S^-1*y metric.
+    
+    This loss encourages the model to produce predictions that result in
+    smaller y*S^-1*y values, which indicates better measurement quality
+    and filter performance in terms of normalized innovation squared.
+    """
+    
+    def __init__(self):
+        """Initialize the Y*S^-1*Y Loss."""
+        pass
+    
+    def __call__(self, y_s_inv_y: torch.Tensor) -> torch.Tensor:
+        """
+        Calculate the absolute value of y*S^-1*y.
+        
+        Args:
+            y_s_inv_y: Tensor of y*S^-1*y values from EKF
+            
+        Returns:
+            Loss tensor (absolute value of y*S^-1*y)
+        """
+        return torch.abs(y_s_inv_y)
+
+
 logger = logging.getLogger(__name__)
 
 # Device setup for evaluation
@@ -817,11 +869,18 @@ class OnlineLearning:
         
         # Get loss configuration for online learning
         loss_config = getattr(self.config.online_learning, 'loss_config', None)
-        
+        windows_last_ekf_covariances = last_ekf_covariances
+        windows_last_ekf_predictions = last_ekf_predictions
         for gd_step in range(num_gd_steps):
-            step_training_loss = 0.0
-            step_count = 0
+            # Zero gradients at the start of each GD step
+            self.online_optimizer.zero_grad()
             
+            # Accumulate loss over entire window before backpropagation
+            # Each GD iteration processes the entire window and averages the losses
+            window_losses = []  # Store individual step losses for averaging
+            step_count = 0
+            last_ekf_covariances = windows_last_ekf_covariances
+            last_ekf_predictions = windows_last_ekf_predictions
             # Process each step for training in this gradient descent iteration
             for step in range(current_window_len):
                 try:
@@ -832,7 +891,10 @@ class OnlineLearning:
                     # Skip if no sources
                     if num_sources_this_step <= 0:
                         continue
-                    
+                    if step ==0:
+                        last_ekf_predictions = windows_last_ekf_predictions
+                        last_ekf_covariances = windows_last_ekf_covariances
+
                     # Get ground truth labels for this step
                     true_angles_this_step = labels_per_step_list[step][:num_sources_this_step]
                     
@@ -851,38 +913,42 @@ class OnlineLearning:
                         angles_pred_np = angles_pred_np[model_perm].flatten()
                         
                         # ============ EKF Processing for Training ============
-                        # Initialize EKF for this training step if first step
-                        if step == 0 and gd_step == 0:
-                            # Calculate initial time for training EKF filters
-                            window_size = self.config.online_learning.window_size
-                            training_initial_time = window_idx * window_size + step
-                            
-                            # Initialize training EKF filters (separate from evaluation EKF)
-                            self.training_ekf_filters = []
-                            for i in range(num_sources_this_step):
-                                training_ekf = ExtendedKalmanFilter1D.create_from_config(
-                                    self.config, 
-                                    trajectory_type=self.config.trajectory.trajectory_type,
-                                    device=device,
-                                    source_idx=i,  # Pass source index to use source-specific parameters
-                                    initial_time=training_initial_time  # Pass initial time for correct oscillatory behavior
-                                )
-                                self.training_ekf_filters.append(training_ekf)
-                            
-                            # Use the _initialize_ekf_state method to properly initialize state and covariance
-                            # This ensures we use the last predictions and covariances from the previous window
-                            self._initialize_ekf_state(
-                                step=0, 
-                                num_sources_this_step=num_sources_this_step, 
-                                true_angles_this_step=true_angles_this_step,
-                                ekf_filters=self.training_ekf_filters, 
-                                is_first_window=False,  # Not first window since we're in online training
-                                last_ekf_predictions=last_ekf_predictions, 
-                                last_ekf_covariances=last_ekf_covariances
+                        # Initialize EKF for this training step (create fresh filters for each step)
+                        # Calculate initial time for training EKF filters
+                        window_size = self.config.online_learning.window_size
+                        training_initial_time = window_idx * window_size + step
+                        
+                        # Initialize training EKF filters (separate from evaluation EKF)
+                        self.training_ekf_filters = []
+                        for i in range(num_sources_this_step):
+                            training_ekf = ExtendedKalmanFilter1D.create_from_config(
+                                self.config, 
+                                trajectory_type=self.config.trajectory.trajectory_type,
+                                device=device,
+                                source_idx=i,  # Pass source index to use source-specific parameters
+                                initial_time=training_initial_time  # Pass initial time for correct oscillatory behavior
                             )
+                            self.training_ekf_filters.append(training_ekf)
+                        
+                        # Use the _initialize_ekf_state method to properly initialize state and covariance
+                        # This ensures we use the last predictions and covariances from the previous window
+                        self._initialize_ekf_state(
+                            step=0, 
+                            num_sources_this_step=num_sources_this_step, 
+                            true_angles_this_step=true_angles_this_step,
+                            ekf_filters=self.training_ekf_filters, 
+                            is_first_window=False,  # Not first window since we're in online training
+                            last_ekf_predictions=last_ekf_predictions, 
+                            last_ekf_covariances=last_ekf_covariances
+                        )
+                        print(f"last_ekf_predictions: {last_ekf_predictions}")
+                        print(f"last_ekf_covariances: {last_ekf_covariances}")
                         
                         # Apply EKF to each source prediction using tensor inputs to preserve gradients
                         ekf_angles_pred = []
+                        ekf_covariances_pred = []
+                        kalman_gain_times_innovation_list = []  # Collect K*y for training
+                        y_s_inv_y_list = []  # Collect y*S^-1*y for training
                         for i in range(num_sources_this_step):
                             if i < len(self.training_ekf_filters) and i < angles_pred_tensor.size(2):
                                 ekf_filter = self.training_ekf_filters[i]
@@ -891,7 +957,7 @@ class OnlineLearning:
                                 tensor_measurement = angles_pred_tensor[0, 0, i]
                                 
                                 # EKF predict and update with tensor measurement
-                                _, updated_state, _, _, _, _ = ekf_filter.predict_and_update(
+                                _, updated_state, _, kalman_gain, kalman_gain_times_innovation, y_s_inv_y = ekf_filter.predict_and_update(
                                     measurement=tensor_measurement, 
                                     true_state=true_angles_this_step[i]
                                 )
@@ -902,7 +968,22 @@ class OnlineLearning:
                                 if not updated_state.requires_grad:
                                     raise RuntimeError(f"EKF updated_state tensor does not require gradients. This breaks the computation graph.")
                                 
+                                # Verify kalman_gain_times_innovation maintains gradients
+                                if not isinstance(kalman_gain_times_innovation, torch.Tensor):
+                                    raise RuntimeError(f"EKF kalman_gain_times_innovation is not a tensor: {type(kalman_gain_times_innovation)}. EKF must return tensors for gradient computation.")
+                                if not kalman_gain_times_innovation.requires_grad:
+                                    raise RuntimeError(f"EKF kalman_gain_times_innovation tensor does not require gradients. This breaks the computation graph.")
+                                
+                                # Verify y_s_inv_y maintains gradients
+                                if not isinstance(y_s_inv_y, torch.Tensor):
+                                    raise RuntimeError(f"EKF y_s_inv_y is not a tensor: {type(y_s_inv_y)}. EKF must return tensors for gradient computation.")
+                                if not y_s_inv_y.requires_grad:
+                                    raise RuntimeError(f"EKF y_s_inv_y tensor does not require gradients. This breaks the computation graph.")
+                                
                                 ekf_angles_pred.append(updated_state)
+                                ekf_covariances_pred.append(ekf_filter.P)
+                                kalman_gain_times_innovation_list.append(kalman_gain_times_innovation)
+                                y_s_inv_y_list.append(y_s_inv_y)
                             else:
                                 # No fallback - fail hard if EKF not available or index out of bounds
                                 if i >= len(self.training_ekf_filters):
@@ -913,9 +994,40 @@ class OnlineLearning:
                         
                         # Create EKF predictions tensor
                         ekf_angles_pred_tensor = torch.stack(ekf_angles_pred).unsqueeze(0)
-                        
+                        ekf_covariances_tensor = torch.stack(ekf_covariances_pred).unsqueeze(0)
+                        last_ekf_predictions = ekf_angles_pred_tensor
+                        last_ekf_covariances = ekf_covariances_tensor
                         # Calculate training loss based on configuration
-                        if loss_config is not None:
+                        if loss_config is not None and loss_config.training_loss_type == "kalman_innovation":
+                            # Use Kalman innovation loss for training
+                            kalman_innovation_criterion = KalmanInnovationLoss()
+                            
+                            # Calculate Kalman innovation loss (sum across all sources)
+                            training_loss = torch.tensor(0.0, device=device, requires_grad=True)
+                            for k_times_y in kalman_gain_times_innovation_list:
+                                training_loss = training_loss + kalman_innovation_criterion(k_times_y)
+                            
+                            logger.info(f"Training step {step}, GD {gd_step}: Kalman Innovation Loss = {training_loss.item():.6f}")
+                        elif loss_config is not None and loss_config.training_loss_type == "y_s_inv_y":
+                            # Use y*S^-1*y loss for training
+                            y_s_inv_y_criterion = YSInvYLoss()
+                            
+                            # Calculate y*S^-1*y loss (sum across all sources)
+                            training_loss = torch.tensor(0.0, device=device, requires_grad=True)
+                            for y_s_inv_y_val in y_s_inv_y_list:
+                                training_loss = training_loss + y_s_inv_y_criterion(y_s_inv_y_val)
+                            
+                            logger.info(f"Training step {step}, GD {gd_step}: Y*S^-1*Y Loss = {training_loss.item():.6f}")
+                        elif loss_config is not None and loss_config.training_loss_type == "unsupervised_rmape":
+                            # Use unsupervised RMAPE loss for training (compare predictions with EKF outputs)
+                            training_loss = rmape_criterion(angles_pred_tensor, ekf_angles_pred_tensor)
+                            logger.info(f"Training step {step}, GD {gd_step}: Unsupervised RMAPE Loss = {training_loss.item():.6f}")
+                        elif loss_config is not None and loss_config.training_loss_type == "unsupervised_rmspe":
+                            # Use unsupervised RMSPE loss for training (compare predictions with EKF outputs)
+                            training_loss = rmspe_criterion(angles_pred_tensor, ekf_angles_pred_tensor)
+                            logger.info(f"Training step {step}, GD {gd_step}: Unsupervised RMSPE Loss = {training_loss.item():.6f}")
+                        elif loss_config is not None:
+                            # Use configured loss (original behavior)
                             # Determine targets based on supervision mode
                             if loss_config.supervision == "supervised":
                                 # Use ground truth as targets
@@ -927,27 +1039,20 @@ class OnlineLearning:
                             
                             # Calculate configured loss
                             training_loss = self._calculate_configured_loss(angles_pred_tensor, targets, loss_config, rmspe_criterion, rmape_criterion)
-                        else:
-                            # Fallback to original RMAPE loss for backward compatibility
-                            training_loss = rmape_criterion(angles_pred_tensor, ekf_angles_pred_tensor)
-                        
-                        # Regular training loop structure
-                        step_training_loss += training_loss.item()
-                        step_count += 1
-                        
-                        # Backward pass
-                        training_loss.backward()
-                        
-                        # Check if gradients were computed properly
-                        gradients_ok = self._check_gradients(self.online_model, step, gd_step)
-                        
-                        # Log training loss
-                        if loss_config is not None:
+                            
                             metric_name = loss_config.metric.upper()
                             supervision_mode = loss_config.supervision
                             logger.info(f"Training step {step}, GD {gd_step}: {metric_name}({supervision_mode}) = {training_loss.item():.6f}")
                         else:
+                            # Fallback to original RMAPE loss for backward compatibility
+                            training_loss = rmape_criterion(angles_pred_tensor, ekf_angles_pred_tensor)
                             logger.info(f"Training step {step}, GD {gd_step}: RMAPE(angles_pred, ekf_angles_pred) = {training_loss.item():.6f}")
+                        
+                        # Store loss for window averaging (don't call backward yet)
+                        window_losses.append(training_loss)
+                        step_count += 1
+                        
+                        # Logging is already done within each loss calculation block above
                     
                     else:
                         # Near-field case - not supported
@@ -959,21 +1064,39 @@ class OnlineLearning:
                     logger.warning(f"Error during online training step {step} in GD iteration {gd_step}: {e}")
                     continue
             
-            # Update model parameters after processing all steps in this gradient descent iteration
-            if step_count > 0:
-                avg_step_loss = step_training_loss / step_count
+            # Calculate average loss over entire window and perform backpropagation
+            if step_count > 0 and len(window_losses) > 0:
+                # Average the losses over the window
+                avg_window_loss = torch.stack(window_losses).mean()
+                
+                # Debug logging to verify averaging
+                logger.debug(f"GD step {gd_step + 1}: Averaging {len(window_losses)} losses over {step_count} steps")
+                individual_losses = [f"{loss.item():.6f}" for loss in window_losses]
+                logger.debug(f"GD step {gd_step + 1}: Individual losses = {individual_losses}")
+                logger.debug(f"GD step {gd_step + 1}: Average loss = {avg_window_loss.item():.6f}")
+                
+                # Backward pass on the averaged loss
+                avg_window_loss.backward()
+                
+                # Check if gradients were computed properly
+                gradients_ok = self._check_gradients(self.online_model, step_count, gd_step)
+                
+                # Update model parameters
                 self.online_optimizer.step()
+                # Zero gradients after optimizer step to prepare for next GD iteration
                 self.online_optimizer.zero_grad()
-                total_training_loss += step_training_loss
-                num_training_steps += step_count
-                logger.info(f"Online training GD step {gd_step + 1}/{num_gd_steps}: Updated model with avg loss = {avg_step_loss:.6f} over {step_count} steps")
+                
+                total_training_loss += avg_window_loss.item()
+                num_training_steps += 1  # Count each GD step, not each individual step
+                logger.info(f"Online training GD step {gd_step + 1}/{num_gd_steps}: Updated model with window avg loss = {avg_window_loss.item():.6f} over {step_count} steps")
             else:
                 logger.warning(f"No valid training steps in GD iteration {gd_step} for window {window_idx}")
         
-        # Calculate overall average training loss
+        # Calculate overall average training loss across all GD iterations
+        # Note: num_training_steps now counts GD iterations, not individual steps
         if num_training_steps > 0:
             avg_training_loss = total_training_loss / num_training_steps
-            logger.info(f"Online training step {self.online_training_count}: Completed {num_gd_steps} GD iterations with overall avg loss = {avg_training_loss:.6f} over {num_training_steps} total steps")
+            logger.info(f"Online training step {self.online_training_count}: Completed {num_gd_steps} GD iterations with overall avg loss = {avg_training_loss:.6f} over {num_training_steps} GD steps")
         else:
             avg_training_loss = float('inf')  # Set default value if no training steps
             logger.warning(f"No valid training steps in window {window_idx}")
@@ -989,6 +1112,8 @@ class OnlineLearning:
         # Now evaluate the trained model with EKF using the same pattern as _evaluate_window
         # Process each step in window
         step_results_list = []
+        last_ekf_predictions = windows_last_ekf_predictions
+        last_ekf_covariances = windows_last_ekf_covariances
         for step in range(current_window_len):
             # Initialize EKF state if this is the first step
             num_sources_this_step = sources_num_per_step[step]
@@ -1150,22 +1275,23 @@ class OnlineLearning:
                     last_ekf_covariances.shape[1] >= num_sources_this_step):
                     
                     # Get the last predictions (last row of the tensor) and calculate their optimal permutation
-                    last_predictions_pre_perm = last_ekf_predictions[-1, :num_sources_this_step].cpu().numpy()
-                    last_perm = self._get_optimal_permutation(last_predictions_pre_perm, true_angles_this_step)
+                    last_predictions_pre_perm = last_ekf_predictions[-1, :num_sources_this_step]
+                    true_angles_tensor = torch.tensor(true_angles_this_step, device=last_predictions_pre_perm.device)
+                    last_perm = self._get_optimal_permutation_tensor(last_predictions_pre_perm, true_angles_tensor)
                     last_predictions = last_predictions_pre_perm[last_perm]
                     
                     # Get the last covariances (last row of the tensor) and apply the same permutation
-                    last_covariances_pre_perm = last_ekf_covariances[-1, :num_sources_this_step].cpu().numpy()
+                    last_covariances_pre_perm = last_ekf_covariances[-1, :num_sources_this_step]
                     last_covariances = last_covariances_pre_perm[last_perm]
                     
                     for i in range(num_sources_this_step):
-                        ekf_filters[i].initialize_state(last_predictions.flatten()[i])
-                        ekf_filters[i].P = last_covariances.flatten()[i]
+                        ekf_filters[i].initialize_state(last_predictions.flatten()[i].item())
+                        ekf_filters[i].P = last_covariances.flatten()[i].item()
                 else:
                     # Fallback to true angles if no valid last predictions
                     logger.warning("No valid last predictions or covariances available, falling back to true angles")
                     for i in range(num_sources_this_step):
-                        ekf_filters[i].initialize_state(true_angles_this_step[i])
+                        ekf_filters[i].initialize_state(true_angles_this_step.flatten()[i].flatten())
 
     def _process_single_step(self, step: int, time_series_steps: torch.Tensor, sources_num_per_step: List[int],
                            labels_per_step_list: List[np.ndarray], ekf_filters: List[ExtendedKalmanFilter1D],
@@ -1635,6 +1761,47 @@ class OnlineLearning:
         # Get optimal permutation
         optimal_perm = torch.tensor(perm, dtype=torch.long, device=device)[min_idx]
         return optimal_perm.cpu().numpy()
+
+    def _get_optimal_permutation_tensor(self, predictions: torch.Tensor, true_angles: torch.Tensor) -> torch.Tensor:
+        """
+        Calculate optimal permutation between predictions and true angles using RMSPE.
+        Tensor version that works directly with tensors.
+        
+        Args:
+            predictions: Tensor of predicted angles [num_sources] or [1, num_sources]
+            true_angles: Tensor of true angles [num_sources] or [1, num_sources]
+            
+        Returns:
+            optimal_perm: Tensor containing the optimal permutation indices
+        """
+        from itertools import permutations
+        
+        # Ensure inputs are 2D tensors
+        if predictions.dim() == 1:
+            pred_tensor = predictions.unsqueeze(0)
+        else:
+            pred_tensor = predictions
+            
+        if true_angles.dim() == 1:
+            true_tensor = true_angles.unsqueeze(0)
+        else:
+            true_tensor = true_angles
+        
+        num_sources = pred_tensor.shape[1]
+        perm = list(permutations(range(num_sources), num_sources))
+        num_of_perm = len(perm)
+        
+        # Calculate errors for all permutations
+        err_angle = (pred_tensor[:, perm] - torch.tile(true_tensor[:, None, :], (1, num_of_perm, 1)).to(torch.float32))
+        err_angle += torch.pi / 2
+        err_angle %= torch.pi
+        err_angle -= torch.pi / 2
+        rmspe_angle_all_permutations = torch.sqrt(torch.tensor(1.0 / num_sources, device=predictions.device)) * torch.linalg.norm(err_angle, dim=-1)
+        _, min_idx = torch.min(rmspe_angle_all_permutations, dim=-1)
+        
+        # Get optimal permutation
+        optimal_perm = torch.tensor(perm, dtype=torch.long, device=predictions.device)[min_idx]
+        return optimal_perm
 
 
     def _average_online_learning_results_across_trajectories(self, results_list):

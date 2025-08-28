@@ -1,8 +1,8 @@
-# Online Learning Configuration
-# This configuration runs ONLY online learning with a pre-trained model
+# Online Learning Configuration with Unsupervised RMSPE Loss
+# This configuration demonstrates how to use the unsupervised RMSPE loss for online learning
 # To use this config:
 # 1. Ensure model_path points to a valid model file (check 'ls -la experiments/results/checkpoints/')
-# 2. Run: python3 main.py online_learning -c configs/online_learning_config.yaml -m experiments/results/nonlinear_tracking_sineaccel_base_model/checkpoints/final_SubspaceNet_20250613_184942.pt -o experiments/results/online_learning_test_with_noise
+# 2. Run: python3 main.py online_learning -c configs/online_learning_unsupervised_rmspe_config.yaml -m experiments/results/nonlinear_tracking_sineaccel_base_model/checkpoints/final_SubspaceNet_20250613_184942.pt -o experiments/results/online_learning_unsupervised_rmspe_test
 
 system_model:
   N: 9  # number of antennas
@@ -69,7 +69,7 @@ simulation:
   # Use an existing model file found in the checkpoints directory
   model_path: "experiments/results/nonlinear_tracking_sineaccel_base_model/checkpoints/final_SubspaceNet_20250613_184942.pt"  # Latest model from june 6, 2025
   subspace_methods: []  # No classic methods needed for online learning
-  simulation_name: "online_learning_sineaccel_nonlinear"
+  simulation_name: "online_learning_unsupervised_rmspe_sineaccel_nonlinear"
 evaluation: {}
 
 # Enable trajectory with longer sequence for online learning
@@ -87,9 +87,7 @@ kalman_filter:
   measurement_noise_std_dev: 0.03  # standard deviation of measurement noise (degrees)
   initial_covariance: 0.001  # initial state covariance
 
-# Enable online learning with appropriate parameters
-# Note: Online learning now uses window-averaged backpropagation where losses are accumulated
-# over the entire window before performing gradient steps, providing more stable training.
+# Enable online learning with Unsupervised RMSPE loss
 online_learning:
   enabled: true  # Enable online learning
   window_size: 5  # Size of sliding window
@@ -109,35 +107,11 @@ online_learning:
   # Calibration error control
   use_nominal: true  # If true (default), nominal array configuration (no calibration errors) is used for sample generation
   
-  # Loss configuration
+  # Loss configuration - Using Unsupervised RMSPE loss for training
   loss_config:
-    metric: "rmspe"  # Loss metric to use: 'rmspe' or 'rmape'
-    supervision: "supervised"  # Supervision mode: 'supervised' (compare with ground truth) or 'unsupervised' (compare with pre-EKF predictions)
-    training_loss_type: "configured"  # Training loss type: 'configured' (use metric+supervision), 'kalman_innovation' (use K*innovation loss), or 'y_s_inv_y' (use y*S^-1*y loss)
-  
-  # Example for using Kalman innovation loss:
-  # loss_config:
-  #   metric: "rmape"  # Still used for evaluation, not training
-  #   supervision: "unsupervised"  # Still used for evaluation, not training  
-  #   training_loss_type: "kalman_innovation"  # Use K*innovation loss for training
-  
-  # Example for using Y*S^-1*Y loss:
-  # loss_config:
-  #   metric: "rmspe"  # Still used for evaluation, not training
-  #   supervision: "supervised"  # Still used for evaluation, not training  
-  #   training_loss_type: "y_s_inv_y"  # Use y*S^-1*y loss for training
-  
-  # Example for using unsupervised RMAPE loss:
-  # loss_config:
-  #   metric: "rmspe"  # Still used for evaluation, not training
-  #   supervision: "supervised"  # Still used for evaluation, not training  
-  #   training_loss_type: "unsupervised_rmape"  # Use unsupervised RMAPE loss for training
-  
-  # Example for using unsupervised RMSPE loss:
-  # loss_config:
-  #   metric: "rmspe"  # Still used for evaluation, not training
-  #   supervision: "supervised"  # Still used for evaluation, not training  
-  #   training_loss_type: "unsupervised_rmspe"  # Use unsupervised RMSPE loss for training
+    metric: "rmspe"  # Loss metric to use for evaluation: 'rmspe' or 'rmape'
+    supervision: "supervised"  # Supervision mode for evaluation: 'supervised' (compare with ground truth) or 'unsupervised' (compare with pre-EKF predictions)
+    training_loss_type: "unsupervised_rmspe"  # Training loss type: 'unsupervised_rmspe' (use RMSPE between predictions and EKF outputs)
   
   # Online learning start configuration
   time_to_learn: 35  # Window index at which to start online learning
@@ -156,4 +130,4 @@ logging:
 # No scenarios defined here, as this config is for a single online learning run
 scenarios: null
 train_base_model_only_once: true 
-scenario_config: null 
+scenario_config: null

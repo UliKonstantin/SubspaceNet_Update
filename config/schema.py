@@ -146,6 +146,7 @@ class OnlineLearningLossConfig(BaseModel):
     """Configuration for online learning loss function."""
     metric: Literal["rmspe", "rmape"] = Field(default="rmape", description="Loss metric to use: 'rmspe' or 'rmape'")
     supervision: Literal["supervised", "unsupervised"] = Field(default="unsupervised", description="Supervision mode: 'supervised' (compare with ground truth) or 'unsupervised' (compare with pre-EKF predictions)")
+    training_loss_type: Literal["configured", "kalman_innovation", "y_s_inv_y", "unsupervised_rmape", "unsupervised_rmspe"] = Field(default="configured", description="Training loss type: 'configured' (use metric+supervision), 'kalman_innovation' (use K*innovation loss), 'y_s_inv_y' (use y*S^-1*y loss), 'unsupervised_rmape' (use RMAPE between predictions and EKF outputs), or 'unsupervised_rmspe' (use RMSPE between predictions and EKF outputs)")
 
 
 class OnlineLearningConfig(BaseModel):

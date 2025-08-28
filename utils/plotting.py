@@ -1784,72 +1784,103 @@ def plot_online_learning_results(output_dir, window_losses, window_covariances, 
         ax4.legend(loc='upper right', framealpha=0.9, fontsize=9)
         ax4.grid(True, alpha=0.3)
         
-        # 5. Plot covariance vs window index (DUPLICATE of plot 3)
-        ax5 = fig.add_subplot(4, 2, 5)
-        x = np.arange(len(window_covariances))[1:]  # Start from second sample
-        ax5.plot(x, np.array(window_covariances)[1:], 'orange', marker='o', linewidth=2, label='Static Model Average Covariance')
-        
-        # Add online model covariance if available
-        if has_online_data and online_window_covariances is not None and len(online_window_covariances) > 0:
-            # Use actual online window indices if available, otherwise fall back to learning start window
-            if online_window_indices is not None and len(online_window_indices) > 0:
-                online_x = np.array(online_window_indices)  # Use all window indices
-            elif learning_start_window is not None:
-                online_x = np.arange(learning_start_window, learning_start_window + len(online_window_covariances))[1:]  # Start from second sample
-            else:
-                online_x = np.arange(len(online_window_covariances))[1:]  # Start from second sample
-            ax5.plot(online_x, np.array(online_window_covariances), 'gold', marker='d', linewidth=2, label='Online Model Average Covariance')
-        
-        # Add training model covariance if available
-        if has_training_data and training_window_covariances is not None and len(training_window_covariances) > 0:
-            # Use actual training window indices
-            training_x = np.array(training_window_indices)  # Use all window indices
-            ax5.plot(training_x, np.array(training_window_covariances), 'gold', marker='*', linewidth=2, label='Training Model Average Covariance', linestyle='--')
+        # 5. Plot absolute value of average Kalman gain times innovation vs window index
+        if ekf_kalman_gain_times_innovation is not None:
+            ax5 = fig.add_subplot(4, 2, 5)
+            # Calculate average K*y per window
+            avg_k_times_y = []
+            for window_k_times_y in ekf_kalman_gain_times_innovation:
+                window_avg = []
+                for step_k_times_y in window_k_times_y:
+                    if step_k_times_y:  # Check if there are any values in this step
+                        window_avg.extend(step_k_times_y)
+                if window_avg:
+                    avg_k_times_y.append(np.mean(window_avg))
+                else:
+                    avg_k_times_y.append(0)
             
-            # Connect training to online if both are available
-            if has_online_data and online_window_covariances is not None and len(online_window_covariances) > 0:
-                # Connect last training point to first online point
-                last_training_x = training_x[-1]  # Window 12
-                first_online_x = online_x[0]      # Window 13
-                last_training_cov = np.array(training_window_covariances)[-1]
-                first_online_cov = np.array(online_window_covariances)[0]
+            x = np.arange(len(avg_k_times_y))[1:]  # Start from second sample
+            ax5.plot(x, np.abs(np.array(avg_k_times_y)[1:]), 'orange', marker='v', linewidth=2, label='Static Model |Average K*Innovation|')
+            
+            # Add online model K*y if available
+            if has_online_data and online_ekf_kalman_gain_times_innovation is not None and len(online_ekf_kalman_gain_times_innovation) > 0:
+                # Calculate average online K*y per window
+                online_avg_k_times_y = []
+                for window_k_times_y in online_ekf_kalman_gain_times_innovation:
+                    window_avg = []
+                    for step_k_times_y in window_k_times_y:
+                        if step_k_times_y:  # Check if there are any values in this step
+                            window_avg.extend(step_k_times_y)
+                    if window_avg:
+                        online_avg_k_times_y.append(np.mean(window_avg))
+                    else:
+                        online_avg_k_times_y.append(0)
                 
-                # Draw connecting line
-                ax5.plot([last_training_x, first_online_x], [last_training_cov, first_online_cov], 'gold', linestyle='-', linewidth=2, alpha=0.7)
-        
-        # Add eta change markers (adjusted for starting from second sample)
-        for idx, eta in zip(eta_changes, eta_values):
-            if idx >= 1:  # Only show markers from second sample onwards
-                ax5.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
-                ax5.text(idx, max(np.array(window_covariances)[1:]), f'η={eta:.3f}', rotation=90, verticalalignment='top')
-        
-        # Add training end marker if available
-        if training_end_window is not None and training_end_window >= 1:
-            ax5.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
-            ax5.text(training_end_window, max(np.array(window_covariances)[1:]), 'Training End', rotation=90, verticalalignment='top', 
-                    color='purple', fontweight='bold', fontsize=10)
-        
-        # Add training start marker if available
-        if training_start_window is not None and training_start_window >= 1:
-            ax5.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
-            ax5.text(training_start_window, max(np.array(window_covariances)[1:]), 'Training Start', rotation=90, verticalalignment='top', 
-                    color='orange', fontweight='bold', fontsize=10)
-        
-        # Highlight windows where model was updated (adjusted for starting from second sample)
-        if window_updates:
-            update_indices = [i for i, updated in enumerate(window_updates) if updated and i >= 1]
-            update_covs = [window_covariances[i] for i in update_indices]
-            ax5.scatter(update_indices, update_covs, color='r', s=80, marker='o', label='Model Updated')
-        
-        # Add labels and title
-        ax5.set_xlabel('Window Index')
-        ax5.set_ylabel('Average Covariance')
-        title = 'Covariance vs Window Index (Starting from Window 1) - DUPLICATE\nP_k|k = (I - K_k H) P_k|k-1'
-        if has_online_data:
-            title += '\n(Static + Online Models)'
-        ax5.set_title(title)
-        ax5.legend()
-        ax5.grid(True, alpha=0.3)
+                # Use actual online window indices if available, otherwise fall back to learning start window
+                if online_window_indices is not None and len(online_window_indices) > 0:
+                    online_x = np.array(online_window_indices)  # Use all window indices
+                elif learning_start_window is not None:
+                    online_x = np.arange(learning_start_window, learning_start_window + len(online_avg_k_times_y))[1:]  # Start from second sample
+                else:
+                    online_x = np.arange(len(online_avg_k_times_y))[1:]  # Start from second sample
+                ax5.plot(online_x, np.abs(np.array(online_avg_k_times_y)), 'red', marker='s', linewidth=2, label='Online Model |Average K*Innovation|')
+            
+            # Add training model K*y if available
+            if has_training_data and training_ekf_kalman_gain_times_innovation is not None and len(training_ekf_kalman_gain_times_innovation) > 0:
+                # Calculate average training K*y per window
+                training_avg_k_times_y = []
+                for window_k_times_y in training_ekf_kalman_gain_times_innovation:
+                    window_avg = []
+                    for step_k_times_y in window_k_times_y:
+                        if step_k_times_y:  # Check if there are any values in this step
+                            window_avg.extend(step_k_times_y)
+                    if window_avg:
+                        training_avg_k_times_y.append(np.mean(window_avg))
+                    else:
+                        training_avg_k_times_y.append(0)
+                
+                # Use actual training window indices
+                training_x = np.array(training_window_indices)  # Use all window indices
+                ax5.plot(training_x, np.abs(np.array(training_avg_k_times_y)), 'brown', marker='*', linewidth=2, label='Training Model |Average K*Innovation|', linestyle='--')
+                
+                # Connect training to online if both are available
+                if has_online_data and online_avg_k_times_y is not None and len(online_avg_k_times_y) > 0:
+                    # Connect last training point to first online point
+                    last_training_x = training_x[-1]  # Window 12
+                    first_online_x = online_x[0]      # Window 13
+                    last_training_k_times_y = np.abs(np.array(training_avg_k_times_y)[-1])
+                    first_online_k_times_y = np.abs(np.array(online_avg_k_times_y)[0])
+                    
+                    # Draw connecting line
+                    ax5.plot([last_training_x, first_online_x], [last_training_k_times_y, first_online_k_times_y], 'brown', linestyle='-', linewidth=2, alpha=0.7)
+            
+            # Add eta change markers (adjusted for starting from second sample)
+            for idx, eta in zip(eta_changes, eta_values):
+                if idx >= 1:  # Only show markers from second sample onwards
+                    ax5.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
+                    ax5.text(idx, ax5.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
+            
+            # Add training end marker if available
+            if training_end_window is not None and training_end_window >= 1:
+                ax5.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+                ax5.text(training_end_window, ax5.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
+                        color='purple', fontweight='bold', fontsize=10)
+            
+            # Add training start marker if available
+            if training_start_window is not None and training_start_window >= 1:
+                ax5.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+                ax5.text(training_start_window, ax5.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
+                        color='orange', fontweight='bold', fontsize=10)
+            
+            # Add labels and title
+            ax5.set_xlabel('Window Index')
+            ax5.set_ylabel('|Average K*Innovation|')
+            title = 'Absolute Average Kalman Gain × Innovation vs Window Index\n|K_k × ν_k| = |K_k × (z_k - H x̂_k|k-1)|'
+            if has_online_data:
+                title += '\n(Static + Online Models)'
+            ax5.set_title(title)
+            ax5.legend()
+            ax5.grid(True, alpha=0.3)
         
         # 6. Plot average Kalman gain vs window index
         if ekf_kalman_gains is not None:
