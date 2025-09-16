@@ -6,7 +6,7 @@ system_model:
   N: 9  # number of antennas
   M: 3   # number of sources
   T: 200  # number of snapshots
-  snr: 5 # signal-to-noise ratio in dB
+  snr: 3 # signal-to-noise ratio in dB
   field_type: "far"  # "near" or "far"
   signal_nature: "non-coherent"  # "non-coherent" or "coherent"
   signal_type: "narrowband"  # "narrowband" only supported currently
@@ -53,7 +53,7 @@ training:
   gamma: 0.5
   training_objective: "angle"  # angle, range, (angle, range)
   use_wandb: False
-  simulation_name: "base_model_random_data_snr_5"  # Base name - SNR will be filled from system_model.snr
+  simulation_name: "base_model_random_data_snr_3"  # Base name - SNR will be filled from system_model.snr
   save_checkpoint: true  # whether to save model checkpoints during training
   model_path: null 
 

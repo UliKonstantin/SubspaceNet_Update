@@ -945,80 +945,72 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
             
         result = scenario_results[snr]
         
-        # Extract online learning results
-        online_results = None
-        pretrained_results = None
-        
-        if 'online_learning_results' in result:
-            online_learning_data = result['online_learning_results']
-            
-            # Get online model trajectory results
-            if 'online_trajectory_results' in online_learning_data:
-                online_results = online_learning_data['online_trajectory_results']
-            
-            # Get pretrained model trajectory results  
-            if 'pretrained_trajectory_results' in online_learning_data:
-                pretrained_results = online_learning_data['pretrained_trajectory_results']
-        
-        # Calculate average dB loss for online model (using last 10 windows)
+        # Extract averaged results (use the already calculated averages)
         online_avg_db = None
-        if online_results and isinstance(online_results, list) and len(online_results) > 0:
-            # online_results is a list of TrajectoryResults objects
-            trajectory_results = online_results[0]  # Get the first trajectory result
-            
-            # Use last 10 windows for averaging
-            total_windows = len(trajectory_results.window_results)
-            if total_windows >= 10:
-                # Take last 10 windows
-                start_window = total_windows - 10
-                post_learning_db_losses = []
-                for window_result in trajectory_results.window_results[start_window:]:
-                    if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'main_loss_db'):
-                        post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
-                
-                if post_learning_db_losses:
-                    online_avg_db = np.mean(post_learning_db_losses)
-                    logger.info(f"SNR {snr}: Online model - last {len(post_learning_db_losses)} windows, avg dB loss = {online_avg_db:.2f}")
-            else:
-                # If less than 10 windows, use all available windows
-                post_learning_db_losses = []
-                for window_result in trajectory_results.window_results:
-                    if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'main_loss_db'):
-                        post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
-                
-                if post_learning_db_losses:
-                    online_avg_db = np.mean(post_learning_db_losses)
-                    logger.info(f"SNR {snr}: Online model - all {len(post_learning_db_losses)} windows, avg dB loss = {online_avg_db:.2f}")
-        
-        # Calculate average dB loss for pretrained model (using last 10 windows)
         pretrained_avg_db = None
-        if pretrained_results and isinstance(pretrained_results, list) and len(pretrained_results) > 0:
-            # pretrained_results is a list of TrajectoryResults objects
-            pretrained_trajectory_results = pretrained_results[0]  # Get the first trajectory result
+        
+        # First, try to get the averaged results if available
+        if 'averaged_results' in result:
+            averaged_data = result['averaged_results']
             
-            # Use last 10 windows for averaging (same as online model for fair comparison)
-            total_windows = len(pretrained_trajectory_results.window_results)
-            if total_windows >= 10:
-                # Take last 10 windows
-                start_window = total_windows - 10
-                post_learning_db_losses = []
-                for window_result in pretrained_trajectory_results.window_results[start_window:]:
-                    if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'main_loss_db'):
-                        post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
+            # Get averaged online model dB losses (use last 10 windows for consistency)
+            if 'averaged_online_trajectory' in averaged_data:
+                online_metrics = averaged_data['averaged_online_trajectory']
+                online_db_losses = online_metrics.get('main_losses_db', [])
+                if online_db_losses:
+                    # Use last 10 windows or all if fewer than 10
+                    num_windows_to_use = min(10, len(online_db_losses))
+                    online_avg_db = np.mean(online_db_losses[-num_windows_to_use:])
+                    logger.info(f"SNR {snr}: Online model - averaged from last {num_windows_to_use} windows, avg dB loss = {online_avg_db:.2f}")
+            
+            # Get averaged pretrained model dB losses (use last 10 windows for consistency)
+            if 'averaged_pretrained_trajectory' in averaged_data:
+                pretrained_metrics = averaged_data['averaged_pretrained_trajectory']
+                pretrained_db_losses = pretrained_metrics.get('main_losses_db', [])
+                if pretrained_db_losses:
+                    # Use last 10 windows or all if fewer than 10
+                    num_windows_to_use = min(10, len(pretrained_db_losses))
+                    pretrained_avg_db = np.mean(pretrained_db_losses[-num_windows_to_use:])
+                    logger.info(f"SNR {snr}: Pretrained model - averaged from last {num_windows_to_use} windows, avg dB loss = {pretrained_avg_db:.2f}")
+        
+        # Fallback to individual trajectory results if averaged results not available
+        if online_avg_db is None or pretrained_avg_db is None:
+            logger.warning(f"SNR {snr}: Averaged results not available, falling back to individual trajectory extraction")
+            
+            if 'online_learning_results' in result:
+                online_learning_data = result['online_learning_results']
                 
-                if post_learning_db_losses:
-                    pretrained_avg_db = np.mean(post_learning_db_losses)
-                    logger.info(f"SNR {snr}: Pretrained model - last {len(post_learning_db_losses)} windows, avg dB loss = {pretrained_avg_db:.2f}")
-            else:
-                # If less than 10 windows, use all available windows
-                post_learning_db_losses = []
-                for window_result in pretrained_trajectory_results.window_results:
-                    if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'main_loss_db'):
-                        post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
+                # Get online model trajectory results
+                if online_avg_db is None and 'online_trajectory_results' in online_learning_data:
+                    online_results = online_learning_data['online_trajectory_results']
+                    if online_results and isinstance(online_results, list) and len(online_results) > 0:
+                        trajectory_results = online_results[0]  # Get the first trajectory result
+                        total_windows = len(trajectory_results.window_results)
+                        num_windows_to_use = min(10, total_windows)
+                        start_window = max(0, total_windows - num_windows_to_use)
+                        post_learning_db_losses = []
+                        for window_result in trajectory_results.window_results[start_window:]:
+                            if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'main_loss_db'):
+                                post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
+                        if post_learning_db_losses:
+                            online_avg_db = np.mean(post_learning_db_losses)
+                            logger.info(f"SNR {snr}: Online model (fallback) - last {len(post_learning_db_losses)} windows, avg dB loss = {online_avg_db:.2f}")
                 
-                if post_learning_db_losses:
-                    pretrained_avg_db = np.mean(post_learning_db_losses)
-                    logger.info(f"SNR {snr}: Pretrained model - all {len(post_learning_db_losses)} windows, avg dB loss = {pretrained_avg_db:.2f}")
+                # Get pretrained model trajectory results  
+                if pretrained_avg_db is None and 'pretrained_trajectory_results' in online_learning_data:
+                    pretrained_results = online_learning_data['pretrained_trajectory_results']
+                    if pretrained_results and isinstance(pretrained_results, list) and len(pretrained_results) > 0:
+                        pretrained_trajectory_results = pretrained_results[0]  # Get the first trajectory result
+                        total_windows = len(pretrained_trajectory_results.window_results)
+                        num_windows_to_use = min(10, total_windows)
+                        start_window = max(0, total_windows - num_windows_to_use)
+                        post_learning_db_losses = []
+                        for window_result in pretrained_trajectory_results.window_results[start_window:]:
+                            if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'main_loss_db'):
+                                post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
+                        if post_learning_db_losses:
+                            pretrained_avg_db = np.mean(post_learning_db_losses)
+                            logger.info(f"SNR {snr}: Pretrained model (fallback) - last {len(post_learning_db_losses)} windows, avg dB loss = {pretrained_avg_db:.2f}")
         
         # Store results
         online_avg_db_losses.append(online_avg_db if online_avg_db is not None else np.nan)
@@ -1034,10 +1026,10 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
     plt.plot(snr_values, pretrained_avg_db_losses, 's-', label='Pretrained Model', linewidth=2, markersize=8)
     
     # Customize the plot
-    plt.xlabel('SNR (dB)', fontsize=12)
-    plt.ylabel('Average Main Loss (dB)', fontsize=12)
-    plt.title('Average Main Loss vs SNR (Post-Learning)', fontsize=14, fontweight='bold')
-    plt.legend(fontsize=11)
+    plt.xlabel('SNR (dB)', fontsize=18)
+    plt.ylabel('Average RMSPE (Supervised) (dB)', fontsize=18)
+    plt.title('Averaged RMSPE (Supervised) vs SNR', fontsize=20, fontweight='bold')
+    plt.legend(fontsize=16)
     plt.grid(True, alpha=0.3)
     
     # Set custom x-axis ticks with 5dB spacing
@@ -1050,7 +1042,7 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
     
     # Generate ticks with 5dB spacing
     x_ticks = list(range(start_tick, end_tick + 1, 5))
-    plt.xticks(x_ticks)
+    plt.xticks(x_ticks, fontsize=16)
     
     # Set custom y-axis ticks with 5dB spacing
     min_loss = min(min(online_avg_db_losses), min(pretrained_avg_db_losses))
@@ -1062,7 +1054,7 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
     
     # Generate y-axis ticks with 5dB spacing
     y_ticks = list(range(start_y_tick, end_y_tick + 1, 5))
-    plt.yticks(y_ticks)
+    plt.yticks(y_ticks, fontsize=16)
     
     # Set axis limits with some padding
     plt.xlim(min_snr - 2.5, max_snr + 2.5)
@@ -1156,8 +1148,8 @@ def plot_online_learning_results_structured(output_dir, pretrained_trajectory_re
                 color='purple', fontweight='bold', fontsize=10)
     
     plt.xlabel('Window Index')
-    plt.ylabel('Main Loss')
-    plt.title(f'Main Loss Comparison: {main_loss_config.replace("_", " ").title()}')
+    plt.ylabel('RMSPE (Supervised)')
+    plt.title('RMSPE (Supervised) Comparison')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
@@ -1186,8 +1178,8 @@ def plot_online_learning_results_structured(output_dir, pretrained_trajectory_re
                 color='purple', fontweight='bold', fontsize=10)
     
     plt.xlabel('Window Index')
-    plt.ylabel('Training Reference Loss')
-    plt.title(f'Training Reference Loss Comparison: {training_reference_loss_config.replace("_", " ").title()}')
+    plt.ylabel('MSIE (Unsupervised)')
+    plt.title('MSIE (Unsupervised) Comparison')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
@@ -1199,6 +1191,286 @@ def plot_online_learning_results_structured(output_dir, pretrained_trajectory_re
     plt.close()
     
     print(f"Structured online learning comparison plot saved to: {plot_path}")
+
+
+def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metrics, averaged_online_metrics, main_loss_config, training_reference_loss_config, training_start_window=None, training_end_window=None, eta_change_windows=None):
+    """
+    Plot online learning results using directly averaged metrics (no TrajectoryResults conversion).
+    
+    Args:
+        output_dir: Output directory for saving plots
+        averaged_pretrained_metrics: Dictionary with averaged metrics from pretrained model
+        averaged_online_metrics: Dictionary with averaged metrics from online model
+        main_loss_config: Configuration string for main loss (e.g., "supervised_rmspe")
+        training_reference_loss_config: Configuration string for training reference loss (e.g., "multimoment")
+        training_start_window: Window index where training started (optional)
+        training_end_window: Window index where training ended (optional)
+        eta_change_windows: List of window indices where eta changed (optional)
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    
+    logger = logging.getLogger(__name__)
+    logger.info("Creating averaged online learning results plot...")
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Extract data directly from averaged metrics
+    pretrained_window_indices = averaged_pretrained_metrics.get("window_indices", [])
+    pretrained_main_losses = averaged_pretrained_metrics.get("main_losses", [])
+    pretrained_training_losses = averaged_pretrained_metrics.get("training_reference_losses", [])
+    pretrained_eta_values = averaged_pretrained_metrics.get("window_eta_values", [])
+    
+    online_window_indices = averaged_online_metrics.get("window_indices", [])
+    online_main_losses = averaged_online_metrics.get("main_losses", [])
+    online_training_losses = averaged_online_metrics.get("training_reference_losses", [])
+    online_eta_values = averaged_online_metrics.get("window_eta_values", [])
+    
+    # Create the plot with 2 subplots
+    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+    
+    # Plot 1: Main Loss Comparison
+    ax1 = axes[0]
+    if pretrained_main_losses and pretrained_window_indices:
+        ax1.plot(pretrained_window_indices, pretrained_main_losses, 'b-', linewidth=3, 
+                label='Averaged Pretrained Model', marker='o', markersize=6)
+    if online_main_losses and online_window_indices:
+        ax1.plot(online_window_indices, online_main_losses, 'r-', linewidth=3, 
+                label='Averaged Online Model', marker='s', markersize=6)
+    
+    # Add eta change markers
+    if eta_change_windows:
+        for eta_window in eta_change_windows:
+            if eta_window >= 1:
+                ax1.axvline(x=eta_window, color='red', linestyle='--', alpha=0.3, linewidth=1)
+                ax1.text(eta_window, ax1.get_ylim()[1] * 0.8, f'η Change', rotation=90, 
+                        verticalalignment='top', color='red', fontsize=12)
+    
+    # Add training markers
+    if training_start_window is not None and training_start_window >= 1:
+        ax1.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+        ax1.text(training_start_window, ax1.get_ylim()[1] * 0.9, 'Training Start', rotation=90, 
+                verticalalignment='top', color='orange', fontweight='bold', fontsize=12)
+    
+    if training_end_window is not None and training_end_window >= 1:
+        ax1.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+        ax1.text(training_end_window, ax1.get_ylim()[1] * 0.9, 'Training End', rotation=90, 
+                verticalalignment='top', color='purple', fontweight='bold', fontsize=12)
+    
+    ax1.set_xlabel('Window Index', fontsize=16)
+    ax1.set_ylabel('RMSPE (Supervised)', fontsize=16)
+    ax1.set_title('RMSPE (Supervised)', fontsize=18, fontweight='bold')
+    ax1.legend(fontsize=14)
+    ax1.grid(True, alpha=0.3)
+    ax1.tick_params(axis='both', which='major', labelsize=14)
+    ax1.set_xlim(0, 60)  # Set exact x-axis range 0-60
+    
+    # Plot 2: Training Reference Loss Comparison
+    ax2 = axes[1]
+    if pretrained_training_losses and pretrained_window_indices:
+        ax2.plot(pretrained_window_indices, pretrained_training_losses, 'b-', linewidth=3, 
+                label=f'Averaged Pretrained Model ({training_reference_loss_config})', marker='o', markersize=6)
+    if online_training_losses and online_window_indices:
+        ax2.plot(online_window_indices, online_training_losses, 'r-', linewidth=3, 
+                label=f'Averaged Online Model ({training_reference_loss_config})', marker='s', markersize=6)
+    
+    # Add eta change markers
+    if eta_change_windows:
+        for eta_window in eta_change_windows:
+            if eta_window >= 1:
+                ax2.axvline(x=eta_window, color='red', linestyle='--', alpha=0.3, linewidth=1)
+                ax2.text(eta_window, ax2.get_ylim()[1] * 0.8, f'η Change', rotation=90, 
+                        verticalalignment='top', color='red', fontsize=12)
+    
+    # Add training markers
+    if training_start_window is not None and training_start_window >= 1:
+        ax2.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+        ax2.text(training_start_window, ax2.get_ylim()[1] * 0.9, 'Training Start', rotation=90, 
+                verticalalignment='top', color='orange', fontweight='bold', fontsize=12)
+    
+    if training_end_window is not None and training_end_window >= 1:
+        ax2.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+        ax2.text(training_end_window, ax2.get_ylim()[1] * 0.9, 'Training End', rotation=90, 
+                verticalalignment='top', color='purple', fontweight='bold', fontsize=12)
+    
+    ax2.set_xlabel('Window Index', fontsize=16)
+    ax2.set_ylabel('MSIE (Unsupervised)', fontsize=16)
+    ax2.set_title('MSIE (Unsupervised)', fontsize=18, fontweight='bold')
+    ax2.legend(fontsize=14)
+    ax2.grid(True, alpha=0.3)
+    ax2.tick_params(axis='both', which='major', labelsize=14)
+    ax2.set_xlim(0, 60)  # Set exact x-axis range 0-60
+    
+    plt.tight_layout()
+    
+    # Save the plot
+    plot_path = os.path.join(output_dir, 'averaged_online_learning_comparison.png')
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    logger.info(f"Averaged online learning comparison plot saved to: {plot_path}")
+    return plot_path
+
+
+def plot_performance_improvement_table(scenario_results: dict, output_dir: Path) -> Path:
+    """
+    Plot a table showing performance improvement of online model vs pretrained model across SNR values.
+    
+    Args:
+        scenario_results: Dictionary mapping SNR values to their results (same as plot_scenario_results)
+        output_dir: Output directory for saving the plot
+        
+    Returns:
+        Path to saved plot
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    
+    logger = logging.getLogger(__name__)
+    logger.info("Creating performance improvement table...")
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Extract and sort SNR values
+    snr_values = sorted([float(snr) for snr in scenario_results.keys()])
+    
+    # Initialize data structures for the table
+    rmspe_improvements = []
+    msie_improvements = []
+    
+    for snr in snr_values:
+        if snr not in scenario_results:
+            logger.warning(f"SNR {snr} not found in results, using NaN...")
+            rmspe_improvements.append(np.nan)
+            msie_improvements.append(np.nan)
+            continue
+            
+        result = scenario_results[snr]
+        
+        # Initialize improvements as NaN
+        rmspe_improvement = np.nan
+        msie_improvement = np.nan
+        
+        # Try to get averaged results first
+        if 'averaged_results' in result:
+            averaged_data = result['averaged_results']
+            
+            # Get averaged metrics for both models
+            if ('averaged_pretrained_trajectory' in averaged_data and 
+                'averaged_online_trajectory' in averaged_data):
+                
+                pretrained_metrics = averaged_data['averaged_pretrained_trajectory']
+                online_metrics = averaged_data['averaged_online_trajectory']
+                
+                # Get last 15 windows for RMSPE (main losses)
+                pretrained_rmspe = pretrained_metrics.get('main_losses', [])
+                online_rmspe = online_metrics.get('main_losses', [])
+                
+                if pretrained_rmspe and online_rmspe:
+                    # Use last 15 windows or all if fewer than 15
+                    num_windows = min(15, len(pretrained_rmspe), len(online_rmspe))
+                    pretrained_last15 = pretrained_rmspe[-num_windows:]
+                    online_last15 = online_rmspe[-num_windows:]
+                    
+                    # Calculate L2 distance (average improvement)
+                    # Positive means online model is better (lower loss)
+                    improvements = [pre - onl for pre, onl in zip(pretrained_last15, online_last15)]
+                    rmspe_improvement = np.mean(improvements)
+                    logger.info(f"SNR {snr}: RMSPE improvement = {rmspe_improvement:.6f} (last {num_windows} windows)")
+                
+                # Get last 15 windows for MSIE (training reference losses)
+                pretrained_msie = pretrained_metrics.get('training_reference_losses', [])
+                online_msie = online_metrics.get('training_reference_losses', [])
+                
+                if pretrained_msie and online_msie:
+                    # Use last 15 windows or all if fewer than 15
+                    num_windows = min(15, len(pretrained_msie), len(online_msie))
+                    pretrained_last15 = pretrained_msie[-num_windows:]
+                    online_last15 = online_msie[-num_windows:]
+                    
+                    # Calculate L2 distance (average improvement)
+                    improvements = [pre - onl for pre, onl in zip(pretrained_last15, online_last15)]
+                    msie_improvement = np.mean(improvements)
+                    logger.info(f"SNR {snr}: MSIE improvement = {msie_improvement:.6f} (last {num_windows} windows)")
+        
+        # Store the improvements
+        rmspe_improvements.append(rmspe_improvement)
+        msie_improvements.append(msie_improvement)
+    
+    # Create the table plot with minimal margins
+    fig, ax = plt.subplots(figsize=(8, 12))
+    ax.axis('off')  # Turn off axes for table
+    
+    # Remove all margins and set tight spacing
+    fig.subplots_adjust(left=0, right=1, top=0.85, bottom=0.02)
+    
+    # Prepare table data (SNR as rows, loss types as columns)
+    snr_labels = [f'SNR {int(snr)}' for snr in snr_values]
+    table_headers = ['SNR (dB)', 'RMSPE (Supervised)', 'MSIE (Unsupervised)']
+    
+    # Format the improvement values with degree conversion
+    table_data = []
+    for i, snr in enumerate(snr_values):
+        # Convert to degrees and add degree symbol
+        rmspe_val = f'{(rmspe_improvements[i] / np.pi) * 180:.3f}°' if not np.isnan(rmspe_improvements[i]) else 'N/A'
+        msie_val = f'{(msie_improvements[i] / np.pi) * 180:.3f}°' if not np.isnan(msie_improvements[i]) else 'N/A'
+        table_data.append([snr_labels[i], rmspe_val, msie_val])
+    
+    # Create the table positioned to avoid overlap with titles
+    table = ax.table(cellText=table_data, colLabels=table_headers,
+                    cellLoc='center', loc='center',
+                    colWidths=[0.25, 0.375, 0.375])
+    
+    # Style the table
+    table.auto_set_font_size(False)
+    table.set_fontsize(12)
+    table.scale(1.2, 2.5)  # Make table bigger
+    
+    # Style header row
+    for i in range(len(table_headers)):
+        table[(0, i)].set_facecolor('#4472C4')
+        table[(0, i)].set_text_props(weight='bold', color='white')
+        table[(0, i)].set_fontsize(16)  # Increased header font size
+    
+    # Style data rows with color coding based on improvement
+    for i in range(len(table_data)):
+        for j in range(len(table_headers)):
+            if j == 0:  # First column (SNR labels)
+                table[(i+1, j)].set_facecolor('#E7E6E6')  # Light gray for SNR labels
+                table[(i+1, j)].set_text_props(weight='bold')
+                table[(i+1, j)].set_fontsize(14)
+            else:  # Data columns (RMSPE and MSIE)
+                # Color code based on improvement value
+                improvement = rmspe_improvements[i] if j == 1 else msie_improvements[i]
+                
+                if not np.isnan(improvement):
+                    if improvement > 0:  # Online model is better
+                        table[(i+1, j)].set_facecolor('#C6EFCE')  # Light green
+                    elif improvement < 0:  # Pretrained model is better
+                        table[(i+1, j)].set_facecolor('#FFC7CE')  # Light red
+                    else:  # No difference
+                        table[(i+1, j)].set_facecolor('#FFFFFF')  # White
+                else:
+                    table[(i+1, j)].set_facecolor('#F2F2F2')  # Light gray for N/A
+                
+                table[(i+1, j)].set_fontsize(13)  # Increased data cell font size
+    
+    # Add title and subtitle with proper spacing to avoid overlap
+    plt.suptitle('Performance Improvement of Online Model', fontsize=20, fontweight='bold', y=0.95)
+    ax.text(0.5, 0.82, 'Average L2 Distance (Pretrained - Online) over Last 15 Windows', 
+            ha='center', va='center', transform=ax.transAxes, fontsize=14, style='italic')
+    
+    # Save the plot with absolute minimal whitespace
+    plot_path = output_dir / 'performance_improvement_table.png'
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight', pad_inches=0.02)
+    plt.close()
+    
+    logger.info(f"Performance improvement table saved to: {plot_path}")
+    return plot_path
 
 
 def plot_online_learning_results(output_dir, window_losses, window_covariances, window_eta_values, window_updates, window_pre_ekf_losses, window_labels, ekf_covariances, ekf_kalman_gains=None, ekf_kalman_gain_times_innovation=None, ekf_y_s_inv_y=None, online_window_losses=None, online_window_covariances=None, online_pre_ekf_losses=None, online_ekf_innovations=None, online_ekf_kalman_gains=None, online_ekf_kalman_gain_times_innovation=None, online_ekf_y_s_inv_y=None, online_window_indices=None, training_window_losses=None, training_window_covariances=None, training_pre_ekf_losses=None, training_ekf_innovations=None, training_ekf_kalman_gains=None, training_ekf_kalman_gain_times_innovation=None, training_ekf_y_s_inv_y=None, training_window_indices=None, learning_start_window=None, window_delta_rmspe_losses=None, window_delta_rmape_losses=None, online_delta_rmspe_losses=None, online_delta_rmape_losses=None, training_delta_rmspe_losses=None, training_delta_rmape_losses=None, window_pre_ekf_angles_pred=None, online_pre_ekf_angles_pred=None, training_pre_ekf_angles_pred=None, window_ekf_predictions=None, online_ekf_predictions=None, training_ekf_predictions=None, window_avg_ekf_angle_pred=None, window_avg_pre_ekf_angle_pred=None, online_avg_ekf_angle_pred=None, online_avg_pre_ekf_angle_pred=None, training_avg_ekf_angle_pred=None, training_avg_pre_ekf_angle_pred=None):

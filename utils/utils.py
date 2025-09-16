@@ -200,3 +200,233 @@ def log_online_learning_window_summary(
         print(f"{'WINNER':<20} {best_method:<20} {best_loss_degrees:<25.6f} {status_text + ', w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
         print(f"{'Mode':<20} {'NEAR FIELD':<20} {'(No SubspaceNet comparison)':<25} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
         print("-" * 100)
+
+
+def average_online_learning_results_across_trajectories(results_list: list) -> dict:
+    """
+    Average online learning results across multiple trajectories.
+    
+    This method takes a list of trajectory results and computes averaged metrics
+    across all trajectories for more robust analysis.
+    
+    Args:
+        results_list: List of dictionaries containing results from each trajectory.
+                     Each dictionary should have the structure returned by 
+                     _run_single_trajectory_online_learning()
+    
+    Returns:
+        Dictionary with averaged results containing:
+        - averaged_pretrained_trajectory: Averaged metrics from pretrained model
+        - averaged_online_trajectory: Averaged metrics from online model  
+        - summary_statistics: Overall statistics across trajectories
+        - trajectory_count: Number of trajectories averaged
+    """
+    import numpy as np
+    from dataclasses import dataclass
+    from typing import List, Optional
+    
+    logger = logging.getLogger(__name__)
+    
+    if not results_list:
+        logger.warning("Empty results list provided for averaging")
+        return {"status": "error", "message": "No results to average"}
+    
+    logger.info(f"Averaging results across {len(results_list)} trajectories")
+    
+    # Extract trajectory results from each result
+    pretrained_trajectories = []
+    online_trajectories = []
+    metadata_list = []
+    
+    for result in results_list:
+        if result.get("status") != "success":
+            logger.warning(f"Skipping failed trajectory result: {result.get('message', 'Unknown error')}")
+            continue
+            
+        ol_results = result["online_learning_results"]
+        pretrained_trajectories.append(ol_results["pretrained_model_trajectory_results"])
+        online_trajectories.append(ol_results["online_model_trajectory_results"])
+        
+        # Extract metadata
+        metadata = {
+            "drift_detected_count": ol_results.get("drift_detected_count", 0),
+            "model_updated_count": ol_results.get("model_updated_count", 0),
+            "window_count": ol_results.get("window_count", 0),
+            "window_size": ol_results.get("window_size", 0),
+            "stride": ol_results.get("stride", 0),
+            "loss_threshold": ol_results.get("loss_threshold", 0.0),
+        }
+        metadata_list.append(metadata)
+    
+    if not pretrained_trajectories:
+        logger.error("No valid trajectory results found for averaging")
+        return {"status": "error", "message": "No valid trajectory results"}
+    
+    # Average pretrained model trajectories
+    averaged_pretrained = _average_trajectory_results(pretrained_trajectories, "pretrained")
+    
+    # Average online model trajectories  
+    averaged_online = _average_trajectory_results(online_trajectories, "online")
+    
+    # Calculate summary statistics
+    summary_stats = _calculate_trajectory_summary_statistics(metadata_list)
+    
+    logger.info(f"Successfully averaged results from {len(pretrained_trajectories)} trajectories")
+    
+    return {
+        "status": "success",
+        "averaged_results": {
+            "averaged_pretrained_trajectory": averaged_pretrained,
+            "averaged_online_trajectory": averaged_online,
+            "summary_statistics": summary_stats,
+            "trajectory_count": len(pretrained_trajectories)
+        }
+    }
+
+
+def _average_trajectory_results(trajectory_list: list, model_type: str) -> dict:
+    """
+    Average trajectory results for a specific model type (pretrained or online).
+    
+    Args:
+        trajectory_list: List of TrajectoryResults objects
+        model_type: Type of model ("pretrained" or "online")
+        
+    Returns:
+        Dictionary with averaged trajectory metrics
+    """
+    import numpy as np
+    
+    logger = logging.getLogger(__name__)
+    
+    if not trajectory_list:
+        return {}
+    
+    # Get the number of windows from the first trajectory
+    num_windows = len(trajectory_list[0].window_results)
+    
+    # Initialize averaged metrics (focus on meaningful metrics, not angle predictions)
+    averaged_metrics = {
+        "window_indices": [],
+        "window_eta_values": [],
+        "main_losses": [],
+        "main_losses_db": [],
+        "training_reference_losses": [],
+        "avg_covariances": [],
+        "ekf_gain_rmspe": [],
+        "ekf_gain_rmape": [],
+        "avg_innovations": [],
+        "avg_kalman_gains": [],
+        "avg_kalman_gain_times_innovation": [],
+        "avg_y_s_inv_y": [],
+    }
+    
+    # Average across all windows
+    for window_idx in range(num_windows):
+        # Collect metrics from all trajectories for this window
+        window_main_losses = []
+        window_main_losses_db = []
+        window_training_ref_losses = []
+        window_covariances = []
+        window_ekf_gains_rmspe = []
+        window_ekf_gains_rmape = []
+        window_eta_values = []
+        window_indices = []
+        window_innovations = []
+        window_kalman_gains = []
+        window_kalman_gain_times_innovation = []
+        window_y_s_inv_y = []
+        
+        valid_trajectories = 0
+        
+        for traj in trajectory_list:
+            if window_idx < len(traj.window_results):
+                window_result = traj.window_results[window_idx]
+                
+                if window_result.is_valid:
+                    # Loss metrics
+                    window_main_losses.append(window_result.loss_metrics.main_loss)
+                    window_main_losses_db.append(window_result.loss_metrics.main_loss_db)
+                    window_training_ref_losses.append(window_result.loss_metrics.online_training_reference_loss)
+                    
+                    # Window metrics
+                    window_covariances.append(window_result.window_metrics.avg_covariance)
+                    
+                    # EKF gains
+                    window_ekf_gains_rmspe.append(window_result.loss_metrics.ekf_gain_rmspe)
+                    window_ekf_gains_rmape.append(window_result.loss_metrics.ekf_gain_rmape)
+                    
+                    # Eta values and indices
+                    window_eta_values.append(traj.window_eta_values[window_idx])
+                    window_indices.append(traj.window_indices[window_idx])
+                    
+                    # EKF metrics averages (focus on performance metrics, not angle predictions)
+                    if window_result.window_metrics.avg_ekf_innovations is not None:
+                        window_innovations.append(np.mean(window_result.window_metrics.avg_ekf_innovations))
+                    if window_result.window_metrics.avg_ekf_kalman_gains is not None:
+                        window_kalman_gains.append(np.mean(window_result.window_metrics.avg_ekf_kalman_gains))
+                    if window_result.window_metrics.avg_ekf_kalman_gain_times_innovation is not None:
+                        window_kalman_gain_times_innovation.append(np.mean(window_result.window_metrics.avg_ekf_kalman_gain_times_innovation))
+                    if window_result.window_metrics.avg_ekf_y_s_inv_y is not None:
+                        window_y_s_inv_y.append(np.mean(window_result.window_metrics.avg_ekf_y_s_inv_y))
+                    
+                    valid_trajectories += 1
+        
+        # Calculate averages for this window
+        if valid_trajectories > 0:
+            averaged_metrics["window_indices"].append(int(np.mean(window_indices)) if window_indices else window_idx)
+            averaged_metrics["window_eta_values"].append(np.mean(window_eta_values) if window_eta_values else 0.0)
+            averaged_metrics["main_losses"].append(np.mean(window_main_losses) if window_main_losses else 0.0)
+            averaged_metrics["main_losses_db"].append(np.mean(window_main_losses_db) if window_main_losses_db else 0.0)
+            averaged_metrics["training_reference_losses"].append(np.mean(window_training_ref_losses) if window_training_ref_losses else 0.0)
+            averaged_metrics["avg_covariances"].append(np.mean(window_covariances) if window_covariances else 0.0)
+            averaged_metrics["ekf_gain_rmspe"].append(np.mean(window_ekf_gains_rmspe) if window_ekf_gains_rmspe else 0.0)
+            averaged_metrics["ekf_gain_rmape"].append(np.mean(window_ekf_gains_rmape) if window_ekf_gains_rmape else 0.0)
+            
+            # Average step-level performance metrics
+            averaged_metrics["avg_innovations"].append(np.mean(window_innovations) if window_innovations else 0.0)
+            averaged_metrics["avg_kalman_gains"].append(np.mean(window_kalman_gains) if window_kalman_gains else 0.0)
+            averaged_metrics["avg_kalman_gain_times_innovation"].append(np.mean(window_kalman_gain_times_innovation) if window_kalman_gain_times_innovation else 0.0)
+            averaged_metrics["avg_y_s_inv_y"].append(np.mean(window_y_s_inv_y) if window_y_s_inv_y else 0.0)
+        else:
+            logger.warning(f"No valid trajectories found for {model_type} model at window {window_idx}")
+    
+    logger.info(f"Averaged {model_type} model results across {len(trajectory_list)} trajectories, {num_windows} windows")
+    
+    return averaged_metrics
+
+
+def _calculate_trajectory_summary_statistics(metadata_list: list) -> dict:
+    """
+    Calculate summary statistics across all trajectories.
+    
+    Args:
+        metadata_list: List of metadata dictionaries from each trajectory
+        
+    Returns:
+        Dictionary with summary statistics
+    """
+    import numpy as np
+    
+    if not metadata_list:
+        return {}
+    
+    # Extract statistics
+    drift_counts = [meta["drift_detected_count"] for meta in metadata_list]
+    model_update_counts = [meta["model_updated_count"] for meta in metadata_list]
+    window_counts = [meta["window_count"] for meta in metadata_list]
+    loss_thresholds = [meta["loss_threshold"] for meta in metadata_list]
+    
+    summary = {
+        "total_trajectories": len(metadata_list),
+        "avg_drift_detected": np.mean(drift_counts),
+        "std_drift_detected": np.std(drift_counts),
+        "avg_model_updates": np.mean(model_update_counts),
+        "std_model_updates": np.std(model_update_counts),
+        "avg_window_count": np.mean(window_counts),
+        "avg_loss_threshold": np.mean(loss_thresholds),
+        "total_drift_detected": sum(drift_counts),
+        "total_model_updates": sum(model_update_counts),
+    }
+    
+    return summary

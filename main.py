@@ -360,7 +360,9 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
             
             # Plot scenario results if it's an SNR scenario
             if scenario.lower() == 'snr' and mode == 'online_learning':
+                from utils.plotting import plot_scenario_results, plot_performance_improvement_table
                 plot_scenario_results(results, sim.output_dir)
+                plot_performance_improvement_table(results, sim.output_dir)
         else:
             if mode == 'full':
                 logger.info("Running full simulation (training, evaluation, and online learning)")
