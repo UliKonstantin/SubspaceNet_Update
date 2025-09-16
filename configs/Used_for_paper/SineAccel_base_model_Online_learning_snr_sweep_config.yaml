@@ -1,0 +1,172 @@
+###############################################################################
+# Hybrid Config: Default Training + Nonlinear Tracking parameters
+###############################################################################
+#command : python3 main.py simulate -c configs/Used_for_paper/SineAccel_base_model_Online_learning_snr_sweep_config.yaml -o experiments/results/online_learning_snr_sweep -s snr --mode online_learning
+system_model:
+  N: 9  # number of antennas
+  M: 3   # number of sources
+  T: 200  # number of snapshots
+  snr: 10  # signal-to-noise ratio in dB
+  field_type: "far"  # "near" or "far"
+  signal_nature: "non-coherent"  # "non-coherent" or "coherent"
+  signal_type: "narrowband"  # "narrowband" only supported currently
+  wavelength: 0.06  # carrier wavelength in meters
+  eta: 0.0  # steering vector uniform error variance
+  bias: 0  # steering vector bias error
+  sv_noise_var: 0.0  # steering vector additive gaussian error noise variance
+  doa_range: 60  # range of DOA values [-doa_range, doa_range]
+  doa_resolution: 1  # resolution of DOA values in degrees
+  max_range_ratio_to_limit: 0.5  # ratio of maximum range to Fraunhofer distance
+  range_resolution: 1  # resolution of range values in meters
+
+dataset:
+  samples_size: 256  # overall dataset size
+  test_validation_train_split: [0.2, 0.2, 0.6]  # proportions for [test, validation, train] datasets
+  create_data: true  # whether to create new data or use existing data
+  save_dataset: false  # whether to save the dataset
+  true_doa_train: null  # predefined angles for training (null for random)
+  true_range_train: null  # predefined ranges for training (null for random)
+  true_doa_test: null  # predefined angles for testing (null for random)
+  true_range_test: null  # predefined ranges for testing (null for random)
+
+model:
+  type: "SubspaceNet"  # SubspaceNet, DCD-MUSIC
+  params:
+    diff_method: "esprit"  # esprit, music_1D, music_2D, beamformer
+    train_loss_type: "rmspe"  # music_spectrum, rmspe
+    tau: 8  # number of autocorrelation lags
+    field_type: "Far"  # Far, Near
+    regularization: "null"  # aic, mdl, threshold, null
+    variant: "small"  # big, small
+    norm_layer: false
+    batch_norm: false
+
+training:
+  enabled: false  # whether training is enabled
+  epochs: 3
+  batch_size: 256
+  optimizer: "Adam"  # Adam, SGD
+  scheduler: "ReduceLROnPlateau"  # StepLR, ReduceLROnPlateau
+  learning_rate: 0.001
+  weight_decay: 1e-9
+  step_size: 50
+  gamma: 0.5
+  training_objective: "angle"  # angle, range, (angle, range)
+  use_wandb: False
+  simulation_name: "random_samples_base_model_snr_scenario"  # Base name - parameters will be added automatically
+  save_checkpoint: true  # whether to save model checkpoints during training
+
+# CRITICAL: Model loading must happen before online learning
+# Keep load_model true and provide a valid model path
+simulation:
+  train_model: false
+  evaluate_model: false
+  load_model: true  # IMPORTANT: Must be true to load model before online learning
+  save_model: true
+  plot_results: true
+  save_plots: true
+  # Model path will be overridden by evaluation.model_paths array during scenario sweep
+  model_path: null
+  subspace_methods: []  # No classic methods needed for online learning
+  simulation_name: "online_learning_sineaccel_nonlinear_snr_sweep"
+  output_dir: "experiments/results/online_learning_snr_sweep"  # Output directory for SNR scenario sweep
+
+# Enable trajectory with longer sequence for online learning
+trajectory:
+  enabled: true
+  trajectory_type: "sine_accel_nonlinear"  # Type of trajectory for online learning
+  # Sine acceleration non-linear model parameters (now oscillatory with source-specific patterns)
+  sine_accel_omega0: [-0.15, 0.25, 0.15]  # Frequency of oscillation (rad/s) - different for each source
+  sine_accel_kappa: [3, -3, 2]  # Amplitude of oscillation (rad) - different for each source  
+  sine_accel_noise_std: 0.03   # Noise standard deviation (rad) - controls randomness
+  save_trajectory: false
+
+kalman_filter:
+  process_noise_std_dev: 0.03  # standard deviation of process noise (degrees), null to use trajectory.random_walk_std_dev
+  measurement_noise_std_dev: 0.03  # standard deviation of measurement noise (degrees)
+  initial_covariance: 0.001  # initial state covariance
+
+#evaluation: 
+#  save_results: true
+#  results_format: "json"
+#  detailed_metrics: true
+#  plot_performance_curve: true
+
+# Scenario configuration for the simulate command
+scenario_config:
+  type: "snr"
+  #values: [-5,-4,-3,-2,-1,0]
+  values: [5,6,7,8,9,10] #[-5,-4,-3,-2,-1,0,1,2,3,4,5,6,7,8,9,10]
+  model_paths: [
+    #"experiments/results/base_model_random_data_snr_-5_SubspaceNet_esprit_N9_M3_SNR-5.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250908_133942.pt",
+    #"experiments/results/base_model_random_data_snr_-4_SubspaceNet_esprit_N9_M3_SNR-4.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_161440.pt", 
+    #"experiments/results/base_model_random_data_snr_-3_SubspaceNet_esprit_N9_M3_SNR-3.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_163716.pt",
+    #"experiments/results/base_model_random_data_snr_-2_SubspaceNet_esprit_N9_M3_SNR-2.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_171354.pt",
+    #"experiments/results/base_model_random_data_snr_-1_SubspaceNet_esprit_N9_M3_SNR-1.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_190908.pt",
+    #"experiments/results/base_model_random_data_snr_0_SubspaceNet_esprit_N9_M3_SNR0.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250908_145244.pt",
+    #"experiments/results/base_model_random_data_snr_1_SubspaceNet_esprit_N9_M3_SNR1.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_195511.pt",
+    #"experiments/results/base_model_random_data_snr_2_SubspaceNet_esprit_N9_M3_SNR2.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250915_075250.pt",
+    #"experiments/results/base_model_random_data_snr_3_SubspaceNet_esprit_N9_M3_SNR3.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250915_095755.pt",
+    #"experiments/results/base_model_random_data_snr_4_SubspaceNet_esprit_N9_M3_SNR4.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250915_133205.pt",
+    "experiments/results/base_model_random_data_snr_5_SubspaceNet_esprit_N9_M3_SNR5.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_112213.pt",
+    "experiments/results/base_model_random_data_snr_6_SubspaceNet_esprit_N9_M3_SNR6.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_105533.pt",
+    "experiments/results/base_model_random_data_snr_7_SubspaceNet_esprit_N9_M3_SNR7.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_101356.pt",
+    "experiments/results/base_model_random_data_snr_8_SubspaceNet_esprit_N9_M3_SNR8.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_095517.pt",
+    "experiments/results/base_model_random_data_snr_9_SubspaceNet_esprit_N9_M3_SNR9.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_093636.pt",
+    #"experiments/results/nonlinear_tracking_sineaccel_base_model_snr_10/checkpoints/final_SubspaceNet_20250613_184942.pt"
+    "experiments/results/base_model_random_data_snr_10_SubspaceNet_esprit_N9_M3_SNR10.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_084930.pt"
+  ]
+  # Model paths for each SNR value (must match values order)
+  #model_paths: [
+  #  "experiments/results/base_model_random_data_snr_-5_SubspaceNet_esprit_N9_M3_SNR-5.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250908_133942.pt",
+  #  "experiments/results/base_model_random_data_snr_-4_SubspaceNet_esprit_N9_M3_SNR-4.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_161440.pt", 
+  #  "experiments/results/base_model_random_data_snr_-3_SubspaceNet_esprit_N9_M3_SNR-3.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_163716.pt",
+  #  "experiments/results/base_model_random_data_snr_-2_SubspaceNet_esprit_N9_M3_SNR-2.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_171354.pt",
+  #  "experiments/results/base_model_random_data_snr_-1_SubspaceNet_esprit_N9_M3_SNR-1.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_190908.pt",
+  #  "experiments/results/base_model_random_data_snr_0_SubspaceNet_esprit_N9_M3_SNR0.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250908_145244.pt"
+  #]
+  retrain_model: false
+# Enable online learning with appropriate parameters
+# Note: Online learning now uses window-averaged backpropagation where losses are accumulated
+# over the entire window before performing gradient steps, providing more stable training.
+online_learning:
+  enabled: true  # Enable online learning
+  window_size: 5  # Size of sliding window
+  stride: 5  # Step size for sliding window
+  loss_threshold: 0.2  # Threshold for detecting drift and triggering online learning
+  max_iterations: 10  # Maximum iterations for online training
+  learning_rate: 0.001  # Learning rate for online training (smaller than main training)
+  trajectory_length: 300  # Length of trajectory specifically for online learning
+  dataset_size: 1  # Number of trajectories for online learning
+  
+  # Dynamic Eta Update Parameters
+  eta_update_interval_windows: 20  # Update eta every N windows. If null or 0, eta is not periodically updated
+  eta_increment: 0.3  # Amount to increment (if positive) or decrement (if negative) eta by when an update occurs
+  max_eta: 0.3  # Maximum allowed value for eta during dynamic updates
+  min_eta: 0.0  # Minimum allowed value for eta during dynamic updates
+  
+  # Calibration error control
+  use_nominal: true  # If true (default), nominal array configuration (no calibration errors) is used for sample generation
+  
+  # Loss configuration
+  loss_config:
+    metric: "rmspe"  # Loss metric to use: 'rmspe' or 'rmape'
+    supervision: "supervised"  # Supervision mode: 'supervised' (compare with ground truth) or 'unsupervised' (compare with pre-EKF predictions)
+    training_loss_type: "unsupervised_rmspe"  # Training loss type: 'configured' (use metric+supervision),unsupervised_rmspe, unsupervised_rmape, supervised_rmspe, supervised_rmape,multimoment, 'kalman_innovation' (use K*innovation loss), or 'y_s_inv_y' (use y*S^-1*y loss), 
+    #multimoment_alpha: 1      # Custom alpha (default: 1.0)
+    #multimoment_beta: 0       # Custom beta (default: 1.0)  
+    #multimoment_regularization_term: 0  # Custom regularization (default: 1.0)    
+  # Online learning start configuration
+  time_to_learn: 35  # Window index at which to start online learning
+
+# Logging configuration
+logging:
+  level: "INFO"  # Global logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  subspace_net_level: null  # Override for SubspaceNet loggers (null = use global level)
+  kalman_filter_level: "WARNING"  # Override for Kalman filter loggers (set to WARNING to reduce noise)
+  torch_level: "WARNING"  # PyTorch logging level (WARNING to reduce noise)
+  matplotlib_level: "WARNING"  # Matplotlib logging level (WARNING to reduce noise)
+  log_to_file: false  # Whether to log to a file in addition to console
+  log_file_path: null  # Path for log file (null = use default)
+  log_file_level: "DEBUG"  # Logging level for file output
+

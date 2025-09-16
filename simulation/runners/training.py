@@ -289,7 +289,8 @@ class TrajectoryTrainer:
             # Update progress bar
             progress_bar.set_postfix({
                 'loss': f"{avg_batch_loss:.4f}",
-                'acc': f"{avg_batch_accuracy*100:.1f}%"
+                'acc': f"{avg_batch_accuracy*100:.1f}%",
+                'loss in degrees': f"{avg_batch_loss*180/np.pi:.4f}"
             })
             
             # Update totals
@@ -617,6 +618,7 @@ class TrajectoryTrainer:
         report = f"[Epoch {epoch+1}/{self.config.epochs}] "
         report += f"Train loss: {train_loss:.6f}, Valid loss: {valid_loss:.6f}, "
         report += f"Train acc: {train_acc*100:.2f}%, Valid acc: {valid_acc*100:.2f}%"
+        report += f"Train loss in degrees: {train_loss*180/np.pi:.4f}, Valid loss in degrees: {valid_loss*180/np.pi:.4f}"
         
         # Add loss components if available
         if train_loss_components and valid_loss_components:

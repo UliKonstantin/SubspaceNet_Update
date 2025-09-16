@@ -8,7 +8,7 @@ system_model:
   N: 9  # number of antennas
   M: 3   # number of sources
   T: 200  # number of snapshots
-  snr: -10  # signal-to-noise ratio in dB
+  snr: 10  # signal-to-noise ratio in dB
   field_type: "far"  # "near" or "far"
   signal_nature: "non-coherent"  # "non-coherent" or "coherent"
   signal_type: "narrowband"  # "narrowband" only supported currently
@@ -67,7 +67,7 @@ simulation:
   plot_results: true
   save_plots: true
   # Use an existing model file found in the checkpoints directory
-  model_path: experiments/results/random_samples_training_base_models/snr_-10/checkpoints/best_SubspaceNet_20250907_193505.pt #"experiments/results/nonlinear_tracking_sineaccel_base_model_snr_10/checkpoints/final_SubspaceNet_20250613_184942.pt"  # Latest model from june 6, 2025
+  model_path: "experiments/results/nonlinear_tracking_sineaccel_base_model_snr_10/checkpoints/final_SubspaceNet_20250613_184942.pt"  # Latest model from june 6, 2025
   subspace_methods: []  # No classic methods needed for online learning
   simulation_name: "online_learning_sineaccel_nonlinear"
 evaluation: {}

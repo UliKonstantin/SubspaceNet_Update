@@ -21,11 +21,12 @@ from config.schema import Config
 from simulation.runners.data import TrajectoryDataHandler, create_online_learning_dataset
 from simulation.runners.training import Trainer, TrainingConfig, TrajectoryTrainer, OnlineTrainer
 from simulation.runners.evaluation import Evaluator
-from utils.plotting import plot_single_trajectory_results, plot_online_learning_results, plot_online_learning_trajectory
+from utils.plotting import plot_online_learning_results, plot_online_learning_trajectory
 from utils.utils import log_window_summary, save_model_state, log_online_learning_window_summary
 from simulation.kalman_filter import KalmanFilter1D, BatchKalmanFilter1D, BatchExtendedKalmanFilter1D
 from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
 from DCD_MUSIC.src.metrics.rmape_loss import RMAPELoss
+from DCD_MUSIC.src.metrics.multimoment_innovation_consistency_loss import MultiMomentInnovationConsistencyLoss
 from DCD_MUSIC.src.signal_creation import Samples
 from DCD_MUSIC.src.evaluation import get_model_based_method, evaluate_model_based
 from simulation.kalman_filter.extended import ExtendedKalmanFilter1D
@@ -90,9 +91,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @dataclass
-class EKFMetrics:
-    """Encapsulates EKF-specific metrics for a window evaluation."""
-    predictions: torch.Tensor  # Shape: [window_size, max_sources]
+class StepMetrics:
+    """Encapsulates step-level metrics for a window evaluation."""
     covariances: torch.Tensor  # Shape: [window_size, max_sources]
     innovations: torch.Tensor  # Shape: [window_size, max_sources]
     kalman_gains: torch.Tensor  # Shape: [window_size, max_sources]
@@ -101,14 +101,27 @@ class EKFMetrics:
 
 
 @dataclass
+class DOAMetrics:
+    """Encapsulates DOA (Direction of Arrival) prediction metrics for a window evaluation."""
+    ekf_predictions: torch.Tensor  # Shape: [window_size, max_sources] - EKF angle predictions
+    pre_ekf_predictions: torch.Tensor  # Shape: [window_size, max_sources] - Pre-EKF angle predictions
+    true_angles: torch.Tensor  # Shape: [window_size, max_sources] - Ground truth angles
+    avg_ekf_angle_pred: List[float] = None  # Averaged EKF angle predictions per source
+    avg_pre_ekf_angle_pred: List[float] = None  # Averaged pre-EKF angle predictions per source
+
+
+@dataclass
 class LossMetrics:
     """Encapsulates all loss-related metrics for a window evaluation."""
-    ekf_loss: float  # Average EKF-filtered loss across window
-    pre_ekf_loss: float  # Average pre-EKF loss across window
-    delta_rmspe_loss: float  # Average difference between EKF and pre-EKF predictions
-    delta_rmape_loss: float  # RMAPE difference between EKF and pre-EKF predictions
-    avg_ekf_angle_pred: List[float]  # Averaged EKF angle predictions per source
-    avg_pre_ekf_angle_pred: List[float]  # Averaged pre-EKF angle predictions per source
+    main_loss: float              # Primary loss (uses supervision + metric)
+    main_loss_db: float           # Primary loss in dB units (20 * log10(main_loss))
+    main_loss_config: str         # Configuration string for main loss (e.g., "supervised_rmspe")
+    online_training_reference_loss: float  # Training reference loss (uses training_loss_type)
+    online_training_reference_loss_config: str  # Configuration string for training reference loss (e.g., "multimoment")
+    pre_ekf_loss: float          # Raw model performance
+    ekf_gain_rmspe: float        # EKF improvement (RMSPE)
+    ekf_gain_rmape: float        # EKF improvement (RMAPE)
+    
 
 
 @dataclass
@@ -119,6 +132,43 @@ class WindowMetrics:
     avg_covariance: float  # Average covariance across all sources and steps
     eta_value: float  # Current eta value from system model
     is_near_field: bool  # Whether processing near-field or far-field
+    # Averaged metrics across time steps
+    avg_ekf_angle_pred: List[float] = None  # Averaged EKF angle predictions per source
+    avg_pre_ekf_angle_pred: List[float] = None  # Averaged pre-EKF angle predictions per source
+    avg_ekf_covariances: List[float] = None  # Averaged EKF covariances per source
+    avg_ekf_innovations: List[float] = None  # Averaged EKF innovations per source
+    avg_ekf_kalman_gains: List[float] = None  # Averaged EKF Kalman gains per source
+    avg_ekf_kalman_gain_times_innovation: List[float] = None  # Averaged EKF Kalman gain times innovation per source
+    avg_ekf_y_s_inv_y: List[float] = None  # Averaged EKF y_s_inv_y per source
+    avg_step_innovation_covariances: List[float] = None  # Averaged step innovation covariances per source
+
+
+@dataclass
+class TrajectoryResults:
+    """Encapsulates all results for a single trajectory using structured approach."""
+    # Window-level results
+    window_results: List['WindowEvaluationResult']
+    
+    # Basic trajectory tracking
+    window_indices: List[int]
+    window_eta_values: List[float]
+    
+    # Labels
+    window_labels: List[List[np.ndarray]]
+    
+    def __init__(self):
+        # Initialize all lists
+        self.window_results = []
+        self.window_indices = []
+        self.window_eta_values = []
+        self.window_labels = []
+    
+    def add_window_result(self, window_idx: int, window_result: 'WindowEvaluationResult', eta_value: float, labels: List[np.ndarray]):
+        """Add a window result to the trajectory results."""
+        self.window_results.append(window_result)
+        self.window_indices.append(window_idx)
+        self.window_eta_values.append(eta_value)
+        self.window_labels.append(labels)
 
 
 @dataclass
@@ -127,10 +177,9 @@ class WindowEvaluationResult:
     # Core metrics
     loss_metrics: LossMetrics
     window_metrics: WindowMetrics
-    ekf_metrics: EKFMetrics
+    step_metrics: StepMetrics
+    doa_metrics: DOAMetrics
     
-    # Raw data for further processing
-    pre_ekf_angles_pred_list: torch.Tensor  # Shape: [window_size, max_sources]
     
     # Success indicators
     is_valid: bool = True
@@ -139,20 +188,20 @@ class WindowEvaluationResult:
     def to_tuple(self) -> Tuple:
         """Convert to the original tuple format for backward compatibility."""
         return (
-            self.loss_metrics.ekf_loss,
+            self.loss_metrics.main_loss,
             self.window_metrics.avg_covariance,
-            self.ekf_metrics.predictions,
-            self.ekf_metrics.covariances,
+            self.doa_metrics.ekf_predictions,
+            self.step_metrics.covariances,
             self.loss_metrics.pre_ekf_loss,
-            self.ekf_metrics.innovations,
-            self.ekf_metrics.kalman_gains,
-            self.ekf_metrics.kalman_gain_times_innovation,
-            self.ekf_metrics.y_s_inv_y,
-            self.loss_metrics.delta_loss,
-            self.pre_ekf_angles_pred_list,
-            self.loss_metrics.delta_rmape_loss,
-            self.loss_metrics.avg_ekf_angle_pred,
-            self.loss_metrics.avg_pre_ekf_angle_pred
+            self.step_metrics.innovations,
+            self.step_metrics.kalman_gains,
+            self.step_metrics.kalman_gain_times_innovation,
+            self.step_metrics.y_s_inv_y,
+            self.loss_metrics.ekf_gain_rmspe,
+            self.doa_metrics.pre_ekf_predictions,
+            self.loss_metrics.ekf_gain_rmape,
+            self.window_metrics.avg_ekf_angle_pred,
+            self.window_metrics.avg_pre_ekf_angle_pred
         )
     
     @classmethod
@@ -160,29 +209,44 @@ class WindowEvaluationResult:
         """Create an error result with default values."""
         return cls(
             loss_metrics=LossMetrics(
-                ekf_loss=float('inf'),
+                main_loss=float('inf'),
+                main_loss_db=float('inf'),
+                main_loss_config="error",
+                online_training_reference_loss=float('inf'),
+                online_training_reference_loss_config="error",
                 pre_ekf_loss=float('inf'),
-                delta_loss=0.0,
-                delta_rmape_loss=0.0,
-                avg_ekf_angle_pred=[],
-                avg_pre_ekf_angle_pred=[]
+                ekf_gain_rmspe=0.0,
+                ekf_gain_rmape=0.0
             ),
             window_metrics=WindowMetrics(
                 window_size=0,
                 num_sources=0,
                 avg_covariance=float('nan'),
                 eta_value=0.0,
-                is_near_field=False
+                is_near_field=False,
+                avg_ekf_angle_pred=[],
+                avg_pre_ekf_angle_pred=[],
+                avg_ekf_covariances=[],
+                avg_ekf_innovations=[],
+                avg_ekf_kalman_gains=[],
+                avg_ekf_kalman_gain_times_innovation=[],
+                avg_ekf_y_s_inv_y=[],
+                avg_step_innovation_covariances=[]
             ),
-            ekf_metrics=EKFMetrics(
-                predictions=torch.empty(0, 0, dtype=torch.float64),
+            step_metrics=StepMetrics(
                 covariances=torch.empty(0, 0, dtype=torch.float64),
                 innovations=torch.empty(0, 0, dtype=torch.float64),
                 kalman_gains=torch.empty(0, 0, dtype=torch.float64),
                 kalman_gain_times_innovation=torch.empty(0, 0, dtype=torch.float64),
                 y_s_inv_y=torch.empty(0, 0, dtype=torch.float64)
             ),
-            pre_ekf_angles_pred_list=torch.empty(0, 0, dtype=torch.float64),
+            doa_metrics=DOAMetrics(
+                ekf_predictions=torch.empty(0, 0, dtype=torch.float64),
+                pre_ekf_predictions=torch.empty(0, 0, dtype=torch.float64),
+                true_angles=torch.empty(0, 0, dtype=torch.float64),
+                avg_ekf_angle_pred=[],
+                avg_pre_ekf_angle_pred=[]
+            ),
             is_valid=False,
             error_message=error_message
         )
@@ -215,7 +279,7 @@ class OnlineLearning:
         self.trained_model = trained_model
         self.output_dir = output_dir
         self.results = results
-        
+        print(self.system_model.params.snr)
         # Dual model online learning state variables
         self.drift_detected = False
         self.learning_done = False
@@ -278,9 +342,6 @@ class OnlineLearning:
                 # Run single trajectory online learning
                 trajectory_result = self._run_single_trajectory_online_learning(trajectory_idx)
                 
-                # Plot single trajectory results
-                if trajectory_result.get("status") != "error":
-                    plot_single_trajectory_results(trajectory_result["online_learning_results"], trajectory_idx, self.output_dir)
                 
                 if trajectory_result.get("status") == "error":
                     logger.error(f"Error in trajectory {trajectory_idx + 1}: {trajectory_result.get('message')}")
@@ -294,70 +355,67 @@ class OnlineLearning:
                 return {"status": "error", "message": "No successful trajectory results"}
                 
             # Average results across all trajectories
-            averaged_results_across_trajectories = self._average_online_learning_results_across_trajectories(all_results)
+            #averaged_results_across_trajectories = self._average_online_learning_results_across_trajectories(all_results)
             
             # Store averaged results
-            self.results["online_learning"] = averaged_results_across_trajectories
+            #self.results["online_learning"] = averaged_results_across_trajectories
             
 
-            plot_online_learning_results(self.output_dir,
-                window_losses=averaged_results_across_trajectories["window_losses"],
-                window_covariances=averaged_results_across_trajectories["window_covariances"],
-                window_eta_values=averaged_results_across_trajectories["window_eta_values"],
-                window_updates=averaged_results_across_trajectories["window_updates"],
-                window_pre_ekf_losses=averaged_results_across_trajectories["pre_ekf_losses"],
-                window_labels=averaged_results_across_trajectories["window_labels"],
-                ekf_covariances=averaged_results_across_trajectories["ekf_covariances"],
-                ekf_kalman_gains=averaged_results_across_trajectories["ekf_kalman_gains"],
-                ekf_kalman_gain_times_innovation=averaged_results_across_trajectories["ekf_kalman_gain_times_innovation"],
-                ekf_y_s_inv_y=averaged_results_across_trajectories["ekf_y_s_inv_y"],
-                # Online learning data
-                online_window_losses=averaged_results_across_trajectories.get("online_window_losses", []),
-                online_window_covariances=averaged_results_across_trajectories.get("online_window_covariances", []),
-                online_pre_ekf_losses=averaged_results_across_trajectories.get("online_pre_ekf_losses", []),
-                online_ekf_innovations=averaged_results_across_trajectories.get("online_ekf_innovations", []),
-                online_ekf_kalman_gains=averaged_results_across_trajectories.get("online_ekf_kalman_gains", []),
-                online_ekf_kalman_gain_times_innovation=averaged_results_across_trajectories.get("online_ekf_kalman_gain_times_innovation", []),
-                online_ekf_y_s_inv_y=averaged_results_across_trajectories.get("online_ekf_y_s_inv_y", []),
-                online_window_indices=averaged_results_across_trajectories.get("online_window_indices", []),
-                # Training data
-                training_window_losses=averaged_results_across_trajectories.get("training_window_losses", []),
-                training_window_covariances=averaged_results_across_trajectories.get("training_window_covariances", []),
-                training_pre_ekf_losses=averaged_results_across_trajectories.get("training_pre_ekf_losses", []),
-                training_ekf_innovations=averaged_results_across_trajectories.get("training_ekf_innovations", []),
-                training_ekf_kalman_gains=averaged_results_across_trajectories.get("training_ekf_kalman_gains", []),
-                training_ekf_kalman_gain_times_innovation=averaged_results_across_trajectories.get("training_ekf_kalman_gain_times_innovation", []),
-                training_ekf_y_s_inv_y=averaged_results_across_trajectories.get("training_ekf_y_s_inv_y", []),
-                training_window_indices=averaged_results_across_trajectories.get("training_window_indices", []),
-                learning_start_window=averaged_results_across_trajectories.get("learning_start_window", None),
-                window_delta_rmspe_losses=all_results[0].get("window_delta_rmspe_losses", []) if all_results else [],
-                window_delta_rmape_losses=all_results[0].get("window_delta_rmape_losses", []) if all_results else [],
-                online_delta_rmspe_losses=all_results[0].get("online_delta_rmspe_losses", []) if all_results else [],
-                online_delta_rmape_losses=all_results[0].get("online_delta_rmape_losses", []) if all_results else [],
-                training_delta_rmspe_losses=all_results[0].get("training_delta_rmspe_losses", []) if all_results else [],
-                training_delta_rmape_losses=all_results[0].get("training_delta_rmape_losses", []) if all_results else [],
-                # Pre-EKF angle predictions
-                window_pre_ekf_angles_pred=averaged_results_across_trajectories.get("window_pre_ekf_angles_pred", []),
-                online_pre_ekf_angles_pred=averaged_results_across_trajectories.get("online_pre_ekf_angles_pred", []),
-                training_pre_ekf_angles_pred=averaged_results_across_trajectories.get("training_pre_ekf_angles_pred", []),
-                # EKF predictions
-                window_ekf_predictions=averaged_results_across_trajectories.get("ekf_predictions", []),
-                online_ekf_predictions=averaged_results_across_trajectories.get("online_ekf_predictions", []),
-                training_ekf_predictions=averaged_results_across_trajectories.get("training_ekf_predictions", []),
-                # Averaged angle predictions
-                window_avg_ekf_angle_pred=averaged_results_across_trajectories.get("window_avg_ekf_angle_pred", []),
-                window_avg_pre_ekf_angle_pred=averaged_results_across_trajectories.get("window_avg_pre_ekf_angle_pred", []),
-                online_avg_ekf_angle_pred=averaged_results_across_trajectories.get("online_avg_ekf_angle_pred", []),
-                online_avg_pre_ekf_angle_pred=averaged_results_across_trajectories.get("online_avg_pre_ekf_angle_pred", []),
-                training_avg_ekf_angle_pred=averaged_results_across_trajectories.get("training_avg_ekf_angle_pred", []),
-                training_avg_pre_ekf_angle_pred=averaged_results_across_trajectories.get("training_avg_pre_ekf_angle_pred", [])
+            # Use structured plotting approach
+            from utils.plotting import plot_online_learning_results_structured
+            
+            # Extract trajectory results from all_results
+            pretrained_trajectory_results = [result["pretrained_model_trajectory_results"] for result in all_results]
+            online_trajectory_results = [result["online_model_trajectory_results"] for result in all_results]
+            
+            # Get loss configurations from the first result
+            if all_results and all_results[0]["pretrained_model_trajectory_results"].window_results:
+                first_window_result = all_results[0]["pretrained_model_trajectory_results"].window_results[0]
+                main_loss_config = first_window_result.loss_metrics.main_loss_config
+                training_reference_loss_config = first_window_result.loss_metrics.online_training_reference_loss_config
+            else:
+                main_loss_config = "unknown"
+                training_reference_loss_config = "unknown"
+            
+            # Get training and eta change info from results
+            training_start_window = None
+            training_end_window = None
+            eta_change_windows = []
+            if all_results and len(all_results) > 0:
+                # Get training info from first trajectory result
+                first_result = all_results[0]
+                training_start_window = first_result.get("training_start_window")
+                training_end_window = first_result.get("training_end_window")
+                eta_change_windows = first_result.get("eta_change_windows", [])
+            
+            plot_online_learning_results_structured(
+                self.output_dir,
+                pretrained_trajectory_results,
+                online_trajectory_results,
+                main_loss_config,
+                training_reference_loss_config,
+                training_start_window,
+                training_end_window,
+                eta_change_windows
             )
             
-            logger.info(f"Online learning completed over {dataset_size} trajectories: "
-                       f"{averaged_results_across_trajectories['drift_detected_count']:.1f} avg drifts detected, "
-                       f"{averaged_results_across_trajectories['model_updated_count']:.1f} avg model updates")
+            # Calculate summary statistics from structured results
+            total_drift_detected = sum(result.get("drift_detected_count", 0) for result in all_results)
+            total_model_updated = sum(result.get("model_updated_count", 0) for result in all_results)
+            avg_drift_detected = total_drift_detected / len(all_results) if all_results else 0
+            avg_model_updated = total_model_updated / len(all_results) if all_results else 0
             
-            return {"status": "success", "online_learning_results": self.results.get("online_learning", {})}
+            logger.info(f"Online learning completed over {dataset_size} trajectories: "
+                       f"{avg_drift_detected:.1f} avg drifts detected, "
+                       f"{avg_model_updated:.1f} avg model updates")
+            
+            return {"status": "success", "online_learning_results": {
+                "pretrained_trajectory_results": pretrained_trajectory_results,
+                "online_trajectory_results": online_trajectory_results,
+                "avg_drift_detected": avg_drift_detected,
+                "avg_model_updated": avg_model_updated,
+                "dataset_size": dataset_size
+            }}
             
         except Exception as e:
             logger.exception(f"Error running online learning: {e}")
@@ -422,6 +480,8 @@ class OnlineLearning:
             
             # Create on-demand dataset using the factory function
             logger.info("Online learning is enabled, creating on-demand dataset and dataloader.")
+                # SET BREAKPOINT HERE - Before creating dataset
+            print(f"Creating dataset with SNR: {system_model_params.snr}")
             online_learning_dataset = create_online_learning_dataset(
                 system_model_params=system_model_params,
                 config=self.config,
@@ -456,66 +516,25 @@ class OnlineLearning:
             loss_threshold = getattr(online_config, 'loss_threshold', 0.5)
             max_iterations = getattr(online_config, 'max_iterations', 10)
             
-            # Prepare for tracking results
-            window_losses = []
-            window_covariances = []
+            # Initialize trajectory results structure
+            trajectory_results = TrajectoryResults()
             window_update_flags = []
-            window_eta_values = []
-            window_ekf_predictions = []
-            window_ekf_covariances = []
-            window_ekf_innovations = []  # New list to track innovations
-            window_ekf_kalman_gains = []  # New list to track Kalman gains
-            window_ekf_kalman_gain_times_innovation = []  # New list to track K*y
-            window_ekf_y_s_inv_y = []  # New list to track y*(S^-1)*y
-            window_pre_ekf_losses = []
-            window_labels = []  # Store labels for each window
-            window_delta_rmspe_losses = []  # Track delta losses for static model
-            window_delta_rmape_losses = []  # Track delta RMAPE losses for static model
-            window_pre_ekf_angles_pred = []  # Track pre-EKF angle predictions for static model
-            window_avg_ekf_angle_pred = []  # Track averaged EKF angle predictions for static model
-            window_avg_pre_ekf_angle_pred = []  # Track averaged pre-EKF angle predictions for static model
             drift_detected_count = 0
             model_updated_count = 0
             last_ekf_predictions = None  # Track last window's EKF predictions
             last_ekf_covariances = None  # Track last window's EKF covariances
             
-            # Online model tracking variables
-            online_window_losses = []
-            online_window_covariances = []
-            online_window_pre_ekf_losses = []
-            online_ekf_predictions = []
-            online_ekf_covariances = []
-            online_ekf_innovations = []
-            online_ekf_kalman_gains = []
-            online_ekf_kalman_gain_times_innovation = []
-            online_ekf_y_s_inv_y = []
-            online_window_indices = []  # Track which windows online model was evaluated on
-            online_delta_rmspe_losses = []  # Track delta losses for online model
-            online_delta_rmape_losses = []  # Track delta RMAPE losses for online model
-            online_pre_ekf_angles_pred = []  # Track pre-EKF angle predictions for online model
-            online_avg_ekf_angle_pred = []  # Track averaged EKF angle predictions for online model
-            online_avg_pre_ekf_angle_pred = []  # Track averaged pre-EKF angle predictions for online model
-            
-            # Training data tracking variables
-            training_window_losses = []
-            training_window_covariances = []
-            training_window_pre_ekf_losses = []
-            training_ekf_predictions = []
-            training_ekf_covariances = []
-            training_ekf_innovations = []
-            training_ekf_kalman_gains = []
-            training_ekf_kalman_gain_times_innovation = []
-            training_ekf_y_s_inv_y = []
-            training_window_indices = []
-            training_delta_rmspe_losses = []  # Track delta losses for training model
-            training_delta_rmape_losses = []  # Track delta RMAPE losses for training model
-            training_pre_ekf_angles_pred = []  # Track pre-EKF angle predictions for training model
-            training_avg_ekf_angle_pred = []  # Track averaged EKF angle predictions for training model
-            training_avg_pre_ekf_angle_pred = []  # Track averaged pre-EKF angle predictions for training model
+            # Initialize online model results structure
+            online_trajectory_results = TrajectoryResults()
             
             # EKF state tracking for online learning
             online_last_ekf_predictions = None
             online_last_ekf_covariances = None
+            
+            # Track training and eta change events
+            eta_change_windows = []  # List of window indices where eta changed
+            training_start_window = None  # Window where training started
+            training_end_window = None  # Window where training ended
             
             # Process each window of online data
             for window_idx, (time_series_batch, sources_num_batch, labels_batch) in enumerate(tqdm(online_learning_dataloader, desc="Online Learning")):
@@ -535,6 +554,8 @@ class OnlineLearning:
                     # Only update if there's an actual change
                     if abs(new_eta - current_eta) > 1e-6:
                         logger.info(f"Online Learning: Dynamically updating eta at window {window_idx}. From {current_eta:.4f} to {new_eta:.4f}")
+                        # Track eta change window
+                        eta_change_windows.append(window_idx)
                     if self.first_eta_change:
                         self.first_eta_change = False
                         logger.info(f"First eta modification at window {window_idx}")
@@ -584,40 +605,25 @@ class OnlineLearning:
                     last_ekf_covariances=last_ekf_covariances
                 )
                
-                # Update tracking variables
-                window_losses.append(window_result.loss_metrics.ekf_loss)
-                window_covariances.append(window_result.window_metrics.avg_covariance)
-                window_eta_values.append(self.system_model.params.eta)
-                window_ekf_predictions.append(window_result.ekf_metrics.predictions)
-                window_ekf_covariances.append(window_result.ekf_metrics.covariances)
-                window_ekf_innovations.append(window_result.ekf_metrics.innovations)  # Store innovations
-                window_ekf_kalman_gains.append(window_result.ekf_metrics.kalman_gains)
-                window_ekf_kalman_gain_times_innovation.append(window_result.ekf_metrics.kalman_gain_times_innovation)
-                window_ekf_y_s_inv_y.append(window_result.ekf_metrics.y_s_inv_y)  # Store y*(S^-1)*y
-                window_pre_ekf_losses.append(window_result.loss_metrics.pre_ekf_loss)
-                window_labels.append(labels_single_window_list_of_arrays)
-                window_delta_rmspe_losses.append(window_result.loss_metrics.delta_rmspe_loss)  # Store delta loss
-                window_delta_rmape_losses.append(window_result.loss_metrics.delta_rmape_loss)  # Store delta RMAPE loss
-                window_pre_ekf_angles_pred.append(window_result.pre_ekf_angles_pred_list)  # Store pre-EKF angle predictions
-                window_avg_ekf_angle_pred.append(window_result.loss_metrics.avg_ekf_angle_pred)  # Store averaged EKF angle predictions
-                window_avg_pre_ekf_angle_pred.append(window_result.loss_metrics.avg_pre_ekf_angle_pred)  # Store averaged pre-EKF angle predictions
+                # Add window result to trajectory results
+                trajectory_results.add_window_result(window_idx, window_result, self.system_model.params.eta, labels_single_window_list_of_arrays)
                 
                 # Update last predictions and covariances for next window
-                last_ekf_predictions = window_result.ekf_metrics.predictions
-                last_ekf_covariances = window_result.ekf_metrics.covariances
+                last_ekf_predictions = window_result.doa_metrics.ekf_predictions
+                last_ekf_covariances = window_result.step_metrics.covariances
                 
-                logger.info(f"Window {window_idx}: Loss = {window_result.loss_metrics.ekf_loss:.6f}, Cov = {window_result.window_metrics.avg_covariance:.6f} (current eta={self.system_model.params.eta:.4f})")
+                logger.info(f"Window {window_idx}: Main Loss = {window_result.loss_metrics.main_loss:.6f} ({window_result.loss_metrics.main_loss_config}), Cov = {window_result.window_metrics.avg_covariance:.6f} (current eta={self.system_model.params.eta:.4f})")
                 
-                # Log both pre-EKF and EKF losses for comparison
-                logger.info(f"Window {window_idx}: Pre-EKF Loss = {window_result.loss_metrics.pre_ekf_loss:.6f}, EKF Loss = {window_result.loss_metrics.ekf_loss:.6f}, Cov = {window_result.window_metrics.avg_covariance:.6f} (eta={self.system_model.params.eta:.4f})")
+                # Log all loss metrics for comparison
+                logger.info(f"Window {window_idx}: Pre-EKF Loss = {window_result.loss_metrics.pre_ekf_loss:.6f}, Main Loss = {window_result.loss_metrics.main_loss:.6f} ({window_result.loss_metrics.main_loss_config}), Training Ref Loss = {window_result.loss_metrics.online_training_reference_loss:.6f} ({window_result.loss_metrics.online_training_reference_loss_config}), Cov = {window_result.window_metrics.avg_covariance:.6f} (eta={self.system_model.params.eta:.4f})")
                 
                 # Store trained model results for comparison
                 trained_subspacenet_loss = window_result.loss_metrics.pre_ekf_loss
-                trained_ekf_loss = window_result.loss_metrics.ekf_loss
+                trained_ekf_loss = window_result.loss_metrics.main_loss
                 
                 # Check if loss exceeds threshold (drift detected)
-                if window_result.loss_metrics.ekf_loss > loss_threshold:
-                    logger.info(f"Drift detected in window {window_idx} (loss: {window_result.loss_metrics.ekf_loss:.6f} > threshold: {loss_threshold:.6f})")
+                if window_result.loss_metrics.main_loss > loss_threshold:
+                    logger.info(f"Drift detected in window {window_idx} (loss: {window_result.loss_metrics.main_loss:.6f} > threshold: {loss_threshold:.6f})")
                     # window_update_flags.append(False)
                     # self.drift_detected = True
                     # Track when learning started
@@ -625,7 +631,7 @@ class OnlineLearning:
                     #     self.learning_start_window = window_idx
                     #     logger.info(f"Online learning started at window {window_idx}")
                 else:
-                    logger.info(f"No drift detected in window {window_idx} (loss: {window_result.loss_metrics.ekf_loss:.6f} <= threshold: {loss_threshold:.6f})")
+                    logger.info(f"No drift detected in window {window_idx} (loss: {window_result.loss_metrics.main_loss:.6f} <= threshold: {loss_threshold:.6f})")
                     window_update_flags.append(False)
                     # Keep previous drift_detected state if no drift in current window
                 
@@ -646,30 +652,16 @@ class OnlineLearning:
                             model=self.online_model
                         )
                         
-                        # Store online model results for comparison
-                        online_window_losses.append(online_window_result.loss_metrics.ekf_loss)
-                        online_window_covariances.append(online_window_result.window_metrics.avg_covariance)
-                        online_window_pre_ekf_losses.append(online_window_result.loss_metrics.pre_ekf_loss)
-                        online_ekf_predictions.append(online_window_result.ekf_metrics.predictions)
-                        online_ekf_covariances.append(online_window_result.ekf_metrics.covariances)
-                        online_ekf_innovations.append(online_window_result.ekf_metrics.innovations)
-                        online_ekf_kalman_gains.append(online_window_result.ekf_metrics.kalman_gains)
-                        online_ekf_kalman_gain_times_innovation.append(online_window_result.ekf_metrics.kalman_gain_times_innovation)
-                        online_ekf_y_s_inv_y.append(online_window_result.ekf_metrics.y_s_inv_y)
-                        online_window_indices.append(window_idx)  # Track which window this evaluation was for
-                        online_delta_rmspe_losses.append(online_window_result.loss_metrics.delta_rmspe_loss)  # Store online delta loss
-                        online_delta_rmape_losses.append(online_window_result.loss_metrics.delta_rmape_loss)  # Store online delta RMAPE loss
-                        online_pre_ekf_angles_pred.append(online_window_result.pre_ekf_angles_pred_list)  # Store online pre-EKF angle predictions
-                        online_avg_ekf_angle_pred.append(online_window_result.loss_metrics.avg_ekf_angle_pred)  # Store online averaged EKF angle predictions
-                        online_avg_pre_ekf_angle_pred.append(online_window_result.loss_metrics.avg_pre_ekf_angle_pred)  # Store online averaged pre-EKF angle predictions
+                        # Add online model result to trajectory results
+                        online_trajectory_results.add_window_result(window_idx, online_window_result, self.system_model.params.eta, labels_single_window_list_of_arrays)
                         
-                        logger.info(f"Online model - Window {window_idx}: Loss = {online_window_result.loss_metrics.ekf_loss:.6f}, Cov = {online_window_result.window_metrics.avg_covariance:.6f}")
+                        logger.info(f"Online model - Window {window_idx}: Main Loss = {online_window_result.loss_metrics.main_loss:.6f} ({online_window_result.loss_metrics.main_loss_config}), Cov = {online_window_result.window_metrics.avg_covariance:.6f}")
                         
                         # Log online learning window summary (post-learning evaluation)
                         log_online_learning_window_summary(
                             subspacenet_loss=trained_subspacenet_loss,
                             ekf_loss=trained_ekf_loss,
-                            online_ekf_loss=online_window_result.loss_metrics.ekf_loss,
+                            online_ekf_loss=online_window_result.loss_metrics.main_loss,
                             current_eta=self.system_model.params.eta,
                             is_near_field=hasattr(self.trained_model, 'field_type') and self.trained_model.field_type.lower() == "near",
                             trajectory_idx=trajectory_idx,
@@ -678,12 +670,17 @@ class OnlineLearning:
                         )
                         
                         # Update online EKF state for next window
-                        # online_window_result.ekf_metrics.predictions is already in tensor format
-                        online_last_ekf_predictions = online_window_result.ekf_metrics.predictions
-                        online_last_ekf_covariances = online_window_result.ekf_metrics.covariances
+                        # online_window_result.doa_metrics.ekf_predictions is already in tensor format
+                        online_last_ekf_predictions = online_window_result.doa_metrics.ekf_predictions
+                        online_last_ekf_covariances = online_window_result.step_metrics.covariances
                     else:
                         # Online model still learning/adapting
                         logger.info(f"Training online model for window {window_idx}")
+                        
+                        # Track training start on first training call
+                        if training_start_window is None:
+                            training_start_window = window_idx
+                            logger.info(f"Training started at window {window_idx}")
                         
                         # Call the refactored _online_training_window method
                         training_result = self._online_training_window(
@@ -697,30 +694,16 @@ class OnlineLearning:
                             last_ekf_covariances=online_last_ekf_covariances
                         )
                         
-                        # Store training results for analysis and plotting
-                        training_window_losses.append(training_result.loss_metrics.ekf_loss)
-                        training_window_covariances.append(training_result.window_metrics.avg_covariance)
-                        training_window_pre_ekf_losses.append(training_result.loss_metrics.pre_ekf_loss)
-                        training_ekf_predictions.append(training_result.ekf_metrics.predictions)
-                        training_ekf_covariances.append(training_result.ekf_metrics.covariances)
-                        training_ekf_innovations.append(training_result.ekf_metrics.innovations)
-                        training_ekf_kalman_gains.append(training_result.ekf_metrics.kalman_gains)
-                        training_ekf_kalman_gain_times_innovation.append(training_result.ekf_metrics.kalman_gain_times_innovation)
-                        training_ekf_y_s_inv_y.append(training_result.ekf_metrics.y_s_inv_y)
-                        training_window_indices.append(window_idx)
-                        training_delta_rmspe_losses.append(training_result.loss_metrics.delta_rmspe_loss)  # Store training delta loss
-                        training_delta_rmape_losses.append(training_result.loss_metrics.delta_rmape_loss)  # Store training delta RMAPE loss
-                        training_pre_ekf_angles_pred.append(training_result.pre_ekf_angles_pred_list)  # Store training pre-EKF angle predictions
-                        training_avg_ekf_angle_pred.append(training_result.loss_metrics.avg_ekf_angle_pred)  # Store training averaged EKF angle predictions
-                        training_avg_pre_ekf_angle_pred.append(training_result.loss_metrics.avg_pre_ekf_angle_pred)  # Store training averaged pre-EKF angle predictions
+                        # Add training result to online trajectory results
+                        online_trajectory_results.add_window_result(window_idx, training_result, self.system_model.params.eta, labels_single_window_list_of_arrays)
                         
-                        logger.info(f"Online training - Window {window_idx}: EKF Loss = {training_result.loss_metrics.ekf_loss:.6f}, Cov = {training_result.window_metrics.avg_covariance:.6f}, Pre-EKF Loss = {training_result.loss_metrics.pre_ekf_loss:.6f}")
+                        logger.info(f"Online training - Window {window_idx}: Main Loss = {training_result.loss_metrics.main_loss:.6f} ({training_result.loss_metrics.main_loss_config}), Cov = {training_result.window_metrics.avg_covariance:.6f}, Pre-EKF Loss = {training_result.loss_metrics.pre_ekf_loss:.6f}")
                         
                         # Log online learning window summary (learning phase)
                         log_online_learning_window_summary(
                             subspacenet_loss=trained_subspacenet_loss,
                             ekf_loss=trained_ekf_loss,
-                            online_ekf_loss=training_result.loss_metrics.ekf_loss,
+                            online_ekf_loss=training_result.loss_metrics.main_loss,
                             current_eta=self.system_model.params.eta,
                             is_near_field=hasattr(self.trained_model, 'field_type') and self.trained_model.field_type.lower() == "near",
                             trajectory_idx=trajectory_idx,
@@ -728,10 +711,15 @@ class OnlineLearning:
                             is_learning=True
                         )
                         
+                        # Check if training just ended (learning_done became True)
+                        if self.learning_done and training_end_window is None:
+                            training_end_window = window_idx
+                            logger.info(f"Training ended at window {window_idx}")
+                        
                         # Update online EKF state for next window
-                        # training_result.ekf_metrics.predictions is already in tensor format
-                        online_last_ekf_predictions = training_result.ekf_metrics.predictions
-                        online_last_ekf_covariances = training_result.ekf_metrics.covariances
+                        # training_result.doa_metrics.ekf_predictions is already in tensor format
+                        online_last_ekf_predictions = training_result.doa_metrics.ekf_predictions
+                        online_last_ekf_covariances = training_result.step_metrics.covariances
             
             # Save final model if it was updated
             if model_updated_count > 0:
@@ -746,10 +734,11 @@ class OnlineLearning:
             return {
                 "status": "success",
                 "online_learning_results": {
-                    # Static model results (always available)
-                    "window_losses": window_losses,
-                    "window_covariances": window_covariances,
-                    "window_eta_values": window_eta_values,
+                    # Model results
+                    "pretrained_model_trajectory_results": trajectory_results,
+                    "online_model_trajectory_results": online_trajectory_results,
+                    
+                    # Learning metadata
                     "window_updates": window_update_flags,
                     "drift_detected_count": drift_detected_count,
                     "model_updated_count": model_updated_count,
@@ -757,60 +746,18 @@ class OnlineLearning:
                     "window_size": online_config.window_size,
                     "stride": online_config.stride,
                     "loss_threshold": loss_threshold,
-                    "ekf_predictions": window_ekf_predictions,
-                    "ekf_covariances": window_ekf_covariances,
-                    "ekf_innovations": window_ekf_innovations,  # Add innovations to results
-                    "ekf_kalman_gains": window_ekf_kalman_gains,
-                    "ekf_kalman_gain_times_innovation": window_ekf_kalman_gain_times_innovation,
-                    "ekf_y_s_inv_y": window_ekf_y_s_inv_y,  # Add y*(S^-1)*y to results
-                    "pre_ekf_losses": window_pre_ekf_losses,
-                    "window_labels": window_labels,
-                    "window_delta_rmspe_losses": window_delta_rmspe_losses,
-                    "window_delta_rmape_losses": window_delta_rmape_losses,
-                    "window_pre_ekf_angles_pred": window_pre_ekf_angles_pred,
-                    "window_avg_ekf_angle_pred": window_avg_ekf_angle_pred,
-                    "window_avg_pre_ekf_angle_pred": window_avg_pre_ekf_angle_pred,
-                    
-                    # Online model results (available when drift detected and learning complete)
-                    "online_window_losses": online_window_losses,
-                    "online_window_covariances": online_window_covariances,
-                    "online_pre_ekf_losses": online_window_pre_ekf_losses,
-                    "online_ekf_predictions": online_ekf_predictions,
-                    "online_ekf_covariances": online_ekf_covariances,
-                    "online_ekf_innovations": online_ekf_innovations,
-                    "online_ekf_kalman_gains": online_ekf_kalman_gains,
-                    "online_ekf_kalman_gain_times_innovation": online_ekf_kalman_gain_times_innovation,
-                    "online_ekf_y_s_inv_y": online_ekf_y_s_inv_y,
-                    "online_window_indices": online_window_indices,
-                    "online_delta_rmspe_losses": online_delta_rmspe_losses,
-                    "online_delta_rmape_losses": online_delta_rmape_losses,
-                    "online_pre_ekf_angles_pred": online_pre_ekf_angles_pred,
-                    "online_avg_ekf_angle_pred": online_avg_ekf_angle_pred,
-                    "online_avg_pre_ekf_angle_pred": online_avg_pre_ekf_angle_pred,
-                    
-                    # Training data results (available during learning process)
-                    "training_window_losses": training_window_losses,
-                    "training_window_covariances": training_window_covariances,
-                    "training_pre_ekf_losses": training_window_pre_ekf_losses,
-                    "training_ekf_predictions": training_ekf_predictions,
-                    "training_ekf_covariances": training_ekf_covariances,
-                    "training_ekf_innovations": training_ekf_innovations,
-                    "training_ekf_kalman_gains": training_ekf_kalman_gains,
-                    "training_ekf_kalman_gain_times_innovation": training_ekf_kalman_gain_times_innovation,
-                    "training_ekf_y_s_inv_y": training_ekf_y_s_inv_y,
-                    "training_window_indices": training_window_indices,
                     "learning_start_window": self.learning_start_window,
-                    "training_delta_rmspe_losses": training_delta_rmspe_losses,
-                    "training_delta_rmape_losses": training_delta_rmape_losses,
-                    "training_pre_ekf_angles_pred": training_pre_ekf_angles_pred,
-                    "training_avg_ekf_angle_pred": training_avg_ekf_angle_pred,
-                    "training_avg_pre_ekf_angle_pred": training_avg_pre_ekf_angle_pred,
                     
                     # Learning state tracking
                     "drift_detected_final": self.drift_detected,
                     "learning_done_final": self.learning_done,
                     "first_eta_change_final": self.first_eta_change,
-                    "online_training_count_final": self.online_training_count
+                    "online_training_count_final": self.online_training_count,
+                    
+                    # Training and eta change tracking
+                    "eta_change_windows": eta_change_windows,
+                    "training_start_window": training_start_window,
+                    "training_end_window": training_end_window
                 }
             }
             
@@ -893,7 +840,7 @@ class OnlineLearning:
         num_training_steps = 0
         
         # Number of gradient descent steps per window
-        num_gd_steps = 3
+        num_gd_steps = 5
         
         # Get loss configuration for online learning
         loss_config = getattr(self.config.online_learning, 'loss_config', None)
@@ -903,9 +850,9 @@ class OnlineLearning:
             # Zero gradients at the start of each GD step
             self.online_optimizer.zero_grad()
             
-            # Accumulate loss over entire window before backpropagation
-            # Each GD iteration processes the entire window and averages the losses
-            window_losses = []  # Store individual step losses for averaging
+            # Collect step results for window-level loss calculation
+            # Each GD iteration processes the entire window and calculates window-level loss
+            window_step_results = []  # Store step results for window-level loss calculation
             step_count = 0
             last_ekf_covariances = windows_last_ekf_covariances
             last_ekf_predictions = windows_last_ekf_predictions
@@ -931,8 +878,16 @@ class OnlineLearning:
                         angles_pred, _, _ = self.online_model(step_data_tensor, num_sources_this_step)
                         
                         # Convert predictions and true angles to proper format
-                        angles_pred_tensor = angles_pred.view(1, -1)[:, :num_sources_this_step]
-                        true_angles_tensor = torch.tensor(true_angles_this_step, device=device).unsqueeze(0)
+                        # Ensure angles_pred_tensor has shape [1, num_sources] for loss functions
+                        if angles_pred.dim() == 3:  # [batch, channels, sources] -> [batch, sources]
+                            angles_pred_tensor = angles_pred.squeeze(1)[:, :num_sources_this_step]
+                        elif angles_pred.dim() == 2:  # [batch, sources] or [batch, features]
+                            angles_pred_tensor = angles_pred.view(1, -1)[:, :num_sources_this_step]
+                        else:  # [sources] -> [1, sources]
+                            angles_pred_tensor = angles_pred.view(1, -1)[:, :num_sources_this_step]
+                        
+                        # Ensure true_angles_tensor has shape [1, num_sources]
+                        true_angles_tensor = torch.tensor(true_angles_this_step, device=device).unsqueeze(0)  # Shape: [1, num_sources]
                         
                         # Get optimal permutation for training
                         angles_pred_np = angles_pred.detach().cpu().numpy().flatten()[:num_sources_this_step]
@@ -969,14 +924,13 @@ class OnlineLearning:
                             last_ekf_predictions=last_ekf_predictions, 
                             last_ekf_covariances=last_ekf_covariances
                         )
-                        print(f"last_ekf_predictions: {last_ekf_predictions}")
-                        print(f"last_ekf_covariances: {last_ekf_covariances}")
                         
                         # Apply EKF to each source prediction using tensor inputs to preserve gradients
                         ekf_angles_pred = []
                         ekf_covariances_pred = []
                         kalman_gain_times_innovation_list = []  # Collect K*y for training
                         y_s_inv_y_list = []  # Collect y*S^-1*y for training
+                        step_Innovation_Covariance_list = []  # Collect Innovation Covariance for training
                         for i in range(num_sources_this_step):
                             if i < len(self.training_ekf_filters) and i < angles_pred_tensor.size(2):
                                 ekf_filter = self.training_ekf_filters[i]
@@ -985,7 +939,7 @@ class OnlineLearning:
                                 tensor_measurement = angles_pred_tensor[0, 0, i]
                                 
                                 # EKF predict and update with tensor measurement
-                                _, updated_state, _, kalman_gain, kalman_gain_times_innovation, y_s_inv_y = ekf_filter.predict_and_update(
+                                _, updated_state, _, kalman_gain, kalman_gain_times_innovation, y_s_inv_y,Innovation_Covariance = ekf_filter.predict_and_update(
                                     measurement=tensor_measurement, 
                                     true_state=true_angles_this_step[i]
                                 )
@@ -1012,6 +966,7 @@ class OnlineLearning:
                                 ekf_covariances_pred.append(ekf_filter.P)
                                 kalman_gain_times_innovation_list.append(kalman_gain_times_innovation)
                                 y_s_inv_y_list.append(y_s_inv_y)
+                                step_Innovation_Covariance_list.append(Innovation_Covariance)
                             else:
                                 # No fallback - fail hard if EKF not available or index out of bounds
                                 if i >= len(self.training_ekf_filters):
@@ -1021,66 +976,27 @@ class OnlineLearning:
                                 raise RuntimeError(f"EKF filter {i} not available but should be. This indicates a serious configuration error.")
                         
                         # Create EKF predictions tensor
-                        ekf_angles_pred_tensor = torch.stack(ekf_angles_pred).unsqueeze(0)
-                        ekf_covariances_tensor = torch.stack(ekf_covariances_pred).unsqueeze(0)
+                        # Ensure ekf_angles_pred_tensor has shape [1, num_sources] for loss functions
+                        ekf_angles_pred_tensor = torch.stack(ekf_angles_pred).unsqueeze(0)  # Shape: [1, num_sources]
+                        ekf_covariances_tensor = torch.stack(ekf_covariances_pred).unsqueeze(0)  # Shape: [1, num_sources]
+                        step_Innovation_Covariance_tensor = torch.stack(step_Innovation_Covariance_list).unsqueeze(0)  # Shape: [1, num_sources]
                         last_ekf_predictions = ekf_angles_pred_tensor
                         last_ekf_covariances = ekf_covariances_tensor
-                        # Calculate training loss based on configuration
-                        if loss_config is not None and loss_config.training_loss_type == "kalman_innovation":
-                            # Use Kalman innovation loss for training
-                            kalman_innovation_criterion = KalmanInnovationLoss()
-                            
-                            # Calculate Kalman innovation loss (sum across all sources)
-                            training_loss = torch.tensor(0.0, device=device, requires_grad=True)
-                            for k_times_y in kalman_gain_times_innovation_list:
-                                training_loss = training_loss + kalman_innovation_criterion(k_times_y)
-                            
-                            logger.info(f"Training step {step}, GD {gd_step}: Kalman Innovation Loss = {training_loss.item():.6f}")
-                        elif loss_config is not None and loss_config.training_loss_type == "y_s_inv_y":
-                            # Use y*S^-1*y loss for training
-                            y_s_inv_y_criterion = YSInvYLoss()
-                            
-                            # Calculate y*S^-1*y loss (sum across all sources)
-                            training_loss = torch.tensor(0.0, device=device, requires_grad=True)
-                            for y_s_inv_y_val in y_s_inv_y_list:
-                                training_loss = training_loss + y_s_inv_y_criterion(y_s_inv_y_val)
-                            
-                            logger.info(f"Training step {step}, GD {gd_step}: Y*S^-1*Y Loss = {training_loss.item():.6f}")
-                        elif loss_config is not None and loss_config.training_loss_type == "unsupervised_rmape":
-                            # Use unsupervised RMAPE loss for training (compare predictions with EKF outputs)
-                            training_loss = rmape_criterion(angles_pred_tensor, ekf_angles_pred_tensor)
-                            logger.info(f"Training step {step}, GD {gd_step}: Unsupervised RMAPE Loss = {training_loss.item():.6f}")
-                        elif loss_config is not None and loss_config.training_loss_type == "unsupervised_rmspe":
-                            # Use unsupervised RMSPE loss for training (compare predictions with EKF outputs)
-                            training_loss = rmspe_criterion(angles_pred_tensor, ekf_angles_pred_tensor)
-                            logger.info(f"Training step {step}, GD {gd_step}: Unsupervised RMSPE Loss = {training_loss.item():.6f}")
-                        elif loss_config is not None:
-                            # Use configured loss (original behavior)
-                            # Determine targets based on supervision mode
-                            if loss_config.supervision == "supervised":
-                                # Use ground truth as targets
-                                true_angles_tensor = torch.tensor(true_angles_this_step, device=device).unsqueeze(0)
-                                targets = true_angles_tensor
-                            else:  # unsupervised
-                                # Use EKF predictions as targets (current behavior)
-                                targets = ekf_angles_pred_tensor
-                            
-                            # Calculate configured loss
-                            training_loss = self._calculate_configured_loss(angles_pred_tensor, targets, loss_config, rmspe_criterion, rmape_criterion)
-                            
-                            metric_name = loss_config.metric.upper()
-                            supervision_mode = loss_config.supervision
-                            logger.info(f"Training step {step}, GD {gd_step}: {metric_name}({supervision_mode}) = {training_loss.item():.6f}")
-                        else:
-                            # Fallback to original RMAPE loss for backward compatibility
-                            training_loss = rmape_criterion(angles_pred_tensor, ekf_angles_pred_tensor)
-                            logger.info(f"Training step {step}, GD {gd_step}: RMAPE(angles_pred, ekf_angles_pred) = {training_loss.item():.6f}")
+                        # Store step results for window-level loss calculation
+                        step_result = {
+                            'success': True,
+                            'pre_ekf_angles_pred_tensor': angles_pred_tensor,  # Tensor for window-level loss calculation
+                            'ekf_angles_pred_tensor': ekf_angles_pred_tensor,  # Tensor for window-level loss calculation
+                            'true_angles_tensor': true_angles_tensor,  # Tensor for window-level loss calculation
+                            'num_sources': num_sources_this_step,
+                            'Innovation_Covariance_tensor': step_Innovation_Covariance_tensor  # Tensor for window-level loss calculation
+                        }
                         
-                        # Store loss for window averaging (don't call backward yet)
-                        window_losses.append(training_loss)
+                        # Store step result for window-level loss calculation
+                        window_step_results.append(step_result)
                         step_count += 1
                         
-                        # Logging is already done within each loss calculation block above
+                        logger.debug(f"Training step {step}, GD {gd_step}: Collected step result for window-level loss calculation")
                     
                     else:
                         # Near-field case - not supported
@@ -1092,19 +1008,14 @@ class OnlineLearning:
                     logger.warning(f"Error during online training step {step} in GD iteration {gd_step}: {e}")
                     continue
             
-            # Calculate average loss over entire window and perform backpropagation
-            if step_count > 0 and len(window_losses) > 0:
-                # Average the losses over the window
-                avg_window_loss = torch.stack(window_losses).mean()
+            # Calculate window-level loss and perform backpropagation
+            if step_count > 0 and len(window_step_results) > 0:
+                # Unified window-level loss calculation
+                window_loss = self._calculate_window_training_loss(window_step_results, loss_config, rmspe_criterion, rmape_criterion)
+                logger.info(f"GD step {gd_step + 1}: Window loss = {window_loss.item():.6f} over {step_count} steps")
                 
-                # Debug logging to verify averaging
-                logger.debug(f"GD step {gd_step + 1}: Averaging {len(window_losses)} losses over {step_count} steps")
-                individual_losses = [f"{loss.item():.6f}" for loss in window_losses]
-                logger.debug(f"GD step {gd_step + 1}: Individual losses = {individual_losses}")
-                logger.debug(f"GD step {gd_step + 1}: Average loss = {avg_window_loss.item():.6f}")
-                
-                # Backward pass on the averaged loss
-                avg_window_loss.backward()
+                # Backward pass on the window loss
+                window_loss.backward()
                 
                 # Check if gradients were computed properly
                 gradients_ok = self._check_gradients(self.online_model, step_count, gd_step)
@@ -1114,9 +1025,9 @@ class OnlineLearning:
                 # Zero gradients after optimizer step to prepare for next GD iteration
                 self.online_optimizer.zero_grad()
                 
-                total_training_loss += avg_window_loss.item()
+                total_training_loss += window_loss.item()
                 num_training_steps += 1  # Count each GD step, not each individual step
-                logger.info(f"Online training GD step {gd_step + 1}/{num_gd_steps}: Updated model with window avg loss = {avg_window_loss.item():.6f} over {step_count} steps")
+                logger.info(f"Online training GD step {gd_step + 1}/{num_gd_steps}: Updated model with window loss = {window_loss.item():.6f} over {step_count} steps")
             else:
                 logger.warning(f"No valid training steps in GD iteration {gd_step} for window {window_idx}")
         
@@ -1153,19 +1064,19 @@ class OnlineLearning:
             # Process single step
             success, step_result = self._process_single_step(
                 step, time_series_steps, sources_num_per_step, labels_per_step_list,
-                ekf_filters, self.online_model, is_near_field, rmspe_criterion, False, loss_config
+                ekf_filters, self.online_model, is_near_field, False
             )
             
             step_results_list.append(step_result)
         
         # Calculate aggregated metrics using the same helper method
-        result = self._calculate_metrics(step_results_list, current_window_len, max_sources, current_eta, is_near_field)
+        result = self._calculate_metrics(step_results_list, current_window_len, max_sources, current_eta, is_near_field, loss_config)
         
         # Log window summary
         if result.is_valid:
             logger.info(f"Online training window {window_idx}: "
                        f"Pre-EKF Loss = {result.loss_metrics.pre_ekf_loss:.6f}, "
-                       f"EKF Loss = {result.loss_metrics.ekf_loss:.6f}, "
+                       f"Main Loss = {result.loss_metrics.main_loss:.6f} ({result.loss_metrics.main_loss_config}), "
                        f"Avg Cov = {result.window_metrics.avg_covariance:.6f}, "
                        f"Training Loss = {avg_training_loss:.6f}")
         
@@ -1323,10 +1234,9 @@ class OnlineLearning:
 
     def _process_single_step(self, step: int, time_series_steps: torch.Tensor, sources_num_per_step: List[int],
                            labels_per_step_list: List[np.ndarray], ekf_filters: List[ExtendedKalmanFilter1D],
-                           model, is_near_field: bool, rmspe_criterion, model_is_trained: bool, 
-                           loss_config=None) -> Tuple[bool, Dict]:
+                           model, is_near_field: bool, Pretrained_model: bool) -> Tuple[bool, Dict]:
         """
-        Process a single step in the window evaluation.
+        Process a single step in the window evaluation - data collection only.
         
         Args:
             step: Current step index
@@ -1336,12 +1246,10 @@ class OnlineLearning:
             ekf_filters: List of EKF filter instances
             model: Model to use for predictions
             is_near_field: Whether processing near-field or far-field
-            rmspe_criterion: Loss criterion
-            model_is_trained: Whether the model is the trained model
-            loss_config: Loss configuration object (optional, for backward compatibility)
+            Pretrained_model: Whether the model is the Pretrained_model or online trained model
             
         Returns:
-            Tuple of (success, step_results_dict)
+            Tuple of (success, step_results_dict) containing only raw data
         """
         try:
             # Extract data for this step
@@ -1362,25 +1270,28 @@ class OnlineLearning:
                     weights_equal = all(torch.equal(model_state[key], trained_state[key]) for key in model_state.keys())
                     true_angles_tensor = torch.tensor(true_angles_this_step, device=device).unsqueeze(0)
 
-                    if weights_equal and not model_is_trained:
+                    if weights_equal and not Pretrained_model:
                         logger.error("Model and trained model have the same weights - online model was not properly copied!")
                         raise RuntimeError("Online model and trained model have identical weights. This indicates the online model was not properly initialized as an independent copy. Cannot proceed with online learning.")
-                    elif model_is_trained:
+                    elif Pretrained_model:
                         logger.info("The evaluated model is not the online model,online model is not initialized yet or this is evaluation comparison")
                     else:
                         logger.info("Model and trained model dont have the same weights - online model is properly initialized")
+                        # Debug: Compare online model with pretrained model (no loss calculation)
                         pretrained_model_angle_pred, _, _ = self.trained_model(step_data_tensor,num_sources_this_step)
                         pretrained_model_angle_pred= pretrained_model_angle_pred.view(1, -1)[:, :num_sources_this_step]
-                        pretrained_model_loss = rmspe_criterion(pretrained_model_angle_pred,true_angles_tensor)
                         model_perm = self._get_optimal_permutation(pretrained_model_angle_pred.cpu().numpy().flatten(), true_angles_this_step)
                         pretrained_model_angle_pred = pretrained_model_angle_pred[:, torch.tensor(model_perm, device=device)]
                         model_perm = self._get_optimal_permutation(angles_pred.cpu().numpy().flatten(), true_angles_this_step)
                         angles_pred = angles_pred[:, torch.tensor(model_perm, device=device)]
-                        print(f" difference between pretrained model and true angle: {abs(pretrained_model_angle_pred.flatten() - true_angles_this_step)}")
-                        print(f" difference between online model and true angle: {abs(angles_pred.flatten() - true_angles_this_step)}")
-                    # Calculate pre-EKF loss (raw model predictions)
-                    pre_ekf_angles_pred = angles_pred.view(1, -1)[:, :num_sources_this_step]
-                    
+                    # Prepare pre-EKF predictions tensor
+                    # Ensure pre_ekf_angles_pred has shape [1, num_sources] for loss functions
+                    if angles_pred.dim() == 3:  # [batch, channels, sources] -> [batch, sources]
+                        pre_ekf_angles_pred = angles_pred.squeeze(1)[:, :num_sources_this_step]
+                    elif angles_pred.dim() == 2:  # [batch, sources] or [batch, features]
+                        pre_ekf_angles_pred = angles_pred.view(1, -1)[:, :num_sources_this_step]
+                    else:  # [sources] -> [1, sources]
+                        pre_ekf_angles_pred = angles_pred.view(1, -1)[:, :num_sources_this_step]
                     
                     # Get optimal permutation for model predictions (need numpy for permutation)
                     angles_pred_np = angles_pred.cpu().numpy().flatten()[:num_sources_this_step]
@@ -1389,9 +1300,6 @@ class OnlineLearning:
                     # Apply permutation to both numpy and tensor versions
                     angles_pred_np = angles_pred_np[model_perm]
                     pre_ekf_angles_pred = pre_ekf_angles_pred[:, model_perm]
-                    
-                    # Calculate pre-EKF loss with reordered predictions
-                    pre_ekf_loss = rmspe_criterion(pre_ekf_angles_pred, true_angles_tensor)
                 
                     # EKF update for each source - use tensor directly
                     step_predictions = []
@@ -1400,38 +1308,15 @@ class OnlineLearning:
                     step_kalman_gains = []
                     step_kalman_gain_times_innovation = []
                     step_y_s_inv_y = []
+                    step_Innovation_Covariance = []
                     
                     for i in range(num_sources_this_step):
                         # Predict and update in one step - pass tensor directly
-                        # print(f"**********Predicting and updating for source {i}, Filter Parameters**********")
-                        # print(f"P0: {ekf_filters[i].P0}")
-                        # print(f"P: {ekf_filters[i].P}")
-                        # print(f"Q: {ekf_filters[i].Q}")
-                        # print(f"R: {ekf_filters[i].R}")
-                        # print(f"x: {ekf_filters[i].x}")
-                        # print(f"Source {i} parameters:")
-                        # print(f"Time step: {step}")
-                        # print(f"Ekf time step: {ekf_filters[i].state_model.current_time}")
-                        # print(f"True_state: {true_angles_this_step[i]}")
-                        predicted_angle, updated_angle, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y = ekf_filters[i].predict_and_update(
+
+                        predicted_angle, updated_angle, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y,Innovation_Covariance = ekf_filters[i].predict_and_update(
                             measurement= pre_ekf_angles_pred.flatten()[i],  # Flatten to get proper indexing
                             true_state= true_angles_this_step[i]
                         )      
-                        # print(f"SubspaceNet angle: {pre_ekf_angles_pred.flatten()[i]}")
-                        # print(f"Predicted angle: {predicted_angle}")
-                        # print(f"Updated angle: {updated_angle}")
-                        # print(f"Innovation: {innovation}")
-                        # print(f"Kalman gain: {kalman_gain}")
-                        # print(f"Kalman gain times innovation: {kalman_gain_times_innovation}")
-                        # print(f"y_s_inv_y: {y_s_inv_y}")
-                        # print(f"**********Predicting and updating for source {i}**********")
-                        # print(f"Pre-EKF angle: {pre_ekf_angles_pred.flatten()[i]}")
-                        # print(f"True angle: {true_angles_this_step[i]}")
-                        
-                        # print(f" difference between pre-EKF and true angle: {abs(pre_ekf_angles_pred.flatten()[i] - true_angles_this_step[i])}")
-                        # print(f" difference between predicted and true angle: {abs(predicted_angle - true_angles_this_step[i])}")
-                        # print(f" difference between updated and true angle: {abs(updated_angle - true_angles_this_step[i])}")
-                        
                         # Store prediction, covariance and innovation
                         step_predictions.append(updated_angle)
                         step_covariances.append(ekf_filters[i].P)
@@ -1439,54 +1324,24 @@ class OnlineLearning:
                         step_kalman_gains.append(kalman_gain)
                         step_kalman_gain_times_innovation.append(kalman_gain_times_innovation)
                         step_y_s_inv_y.append(y_s_inv_y)
-                    
-                    # Create tensor from EKF predictions for loss calculation
-                    ekf_angles_pred = torch.tensor(step_predictions, device=device).unsqueeze(0)
-                    
-                    # Calculate loss using EKF predictions - use configured loss if available
-                    if loss_config is not None:
-                        # Determine targets based on supervision mode
-                        if loss_config.supervision == "supervised":
-                            # Use ground truth as targets
-                            targets = true_angles_tensor
-                        else:  # unsupervised
-                            # Use pre-EKF predictions as targets
-                            targets = pre_ekf_angles_pred
-                        
-                        # Import RMAPE criterion if needed
-                        rmape_criterion = None
-                        if loss_config.metric == "rmape":
-                            from DCD_MUSIC.src.metrics.rmape_loss import RMAPELoss
-                            rmape_criterion = RMAPELoss().to(device)
-                        
-                        # Calculate configured loss
-                        loss = self._calculate_configured_loss(ekf_angles_pred, targets, loss_config, rmspe_criterion, rmape_criterion)
-                    else:
-                        # Fallback to original RMSPE loss for backward compatibility
-                        loss = rmspe_criterion(ekf_angles_pred, true_angles_tensor)
-                    
-                    # Calculate subspace_kalman_delta (difference between predictions)
-                    step_delta_predictions_rmspe = rmspe_criterion(ekf_angles_pred, pre_ekf_angles_pred)
-                    
-                    # Also calculate RMAPE between EKF and pre-EKF predictions
-                    from DCD_MUSIC.src.metrics.rmape_loss import RMAPELoss
-                    rmape_criterion = RMAPELoss().to(device)
-                    step_delta_predictions_rmape = rmape_criterion(ekf_angles_pred, pre_ekf_angles_pred)
+                        step_Innovation_Covariance.append(Innovation_Covariance)
+                    # Create tensor from EKF predictions
+                    # Ensure ekf_angles_pred has shape [1, num_sources] for loss functions
+                    ekf_angles_pred = torch.tensor(step_predictions, device=device).unsqueeze(0)  # Shape: [1, num_sources]
                     
                     step_results = {
                         'success': True,
-                        'loss': loss.item(),
-                        'pre_ekf_loss': pre_ekf_loss.item(),
-                        'step_delta_predictions_rmspe': step_delta_predictions_rmspe.item(),
-                        'step_delta_predictions_rmape': step_delta_predictions_rmape.item(),
                         'step_predictions': step_predictions,  # List of tensors
                         'step_covariances': step_covariances,  # List of tensors
                         'step_innovations': step_innovations,  # List of tensors
                         'step_kalman_gains': step_kalman_gains,  # List of tensors
                         'step_kalman_gain_times_innovation': step_kalman_gain_times_innovation,  # List of tensors
                         'step_y_s_inv_y': step_y_s_inv_y,  # List of tensors
-                        'pre_ekf_angles_pred': pre_ekf_angles_pred,  # Keep as tensor
-                        'num_sources': num_sources_this_step
+                        'pre_ekf_angles_pred_tensor': pre_ekf_angles_pred,  # Tensor for window-level loss calculation
+                        'ekf_angles_pred_tensor': ekf_angles_pred,  # Tensor for window-level loss calculation
+                        'true_angles_tensor': true_angles_tensor,  # Tensor for window-level loss calculation
+                        'num_sources': num_sources_this_step,
+                        'step_Innovation_Covariance': step_Innovation_Covariance  # List of tensors
                     }
                     
                     return True, step_results
@@ -1501,7 +1356,8 @@ class OnlineLearning:
             return False, {'success': False, 'error': str(e)}
 
     def _calculate_metrics(self, step_results_list: List[Dict], current_window_len: int, 
-                          max_sources: int, current_eta: float, is_near_field: bool) -> WindowEvaluationResult:
+                          max_sources: int, current_eta: float, is_near_field: bool, 
+                          loss_config=None) -> WindowEvaluationResult:
         """
         Calculate aggregated metrics from step results.
         
@@ -1511,6 +1367,7 @@ class OnlineLearning:
             max_sources: Maximum number of sources
             current_eta: Current eta value
             is_near_field: Whether processing near-field or far-field
+            loss_config: Loss configuration object (optional)
             
         Returns:
             WindowEvaluationResult containing all calculated metrics
@@ -1524,11 +1381,13 @@ class OnlineLearning:
         ekf_y_s_inv_y = torch.empty((current_window_len, max_sources), dtype=torch.float64)
         pre_ekf_angles_pred_list = torch.empty((current_window_len, max_sources), dtype=torch.float64)
         
+        # Collect all tensors for window-level loss calculation
+        all_pre_ekf_preds = []
+        all_ekf_preds = []
+        all_true_angles = []
+        all_innovation_covariances = []
+        
         # Initialize accumulation variables
-        total_loss = 0.0
-        total_pre_ekf_loss = 0.0
-        total_delta_rmspe_loss = 0.0
-        total_delta_rmape_loss = 0.0
         num_valid_steps = 0
         total_covariance = 0.0
         total_cov_points = 0
@@ -1550,15 +1409,15 @@ class OnlineLearning:
                 ekf_y_s_inv_y[step, i] = step_result['step_y_s_inv_y'][i].item()
             
             # Store pre-EKF predictions (tensor)
-            pre_ekf_preds = step_result['pre_ekf_angles_pred'].flatten()
+            pre_ekf_preds = step_result['pre_ekf_angles_pred_tensor'].flatten()
             for i in range(min(num_sources, len(pre_ekf_preds))):
                 pre_ekf_angles_pred_list[step, i] = pre_ekf_preds[i].item()
             
-            # Accumulate losses
-            total_loss += step_result['loss']
-            total_pre_ekf_loss += step_result['pre_ekf_loss']
-            total_delta_rmspe_loss += step_result['step_delta_predictions_rmspe']
-            total_delta_rmape_loss += step_result['step_delta_predictions_rmape']
+            # Collect tensors for window-level loss calculation
+            all_pre_ekf_preds.append(step_result['pre_ekf_angles_pred_tensor'])
+            all_ekf_preds.append(step_result['ekf_angles_pred_tensor'])
+            all_true_angles.append(step_result['true_angles_tensor'])
+            all_innovation_covariances.append(step_result['step_Innovation_Covariance'])
             
             # Accumulate covariance (convert tensors to scalars for sum)
             total_covariance += sum(tensor.item() for tensor in step_result['step_covariances'])
@@ -1566,23 +1425,42 @@ class OnlineLearning:
             
             num_valid_steps += 1
         
-        # Calculate averages
-        if num_valid_steps > 0:
-            avg_loss = total_loss / num_valid_steps
-            avg_pre_ekf_loss = total_pre_ekf_loss / num_valid_steps
-            avg_delta_rmspe_loss = total_delta_rmspe_loss / num_valid_steps
-            avg_delta_rmape_loss = total_delta_rmape_loss / num_valid_steps
+        # Calculate window-level losses using unified method
+        if num_valid_steps > 0 and all_pre_ekf_preds:
+            # Stack predictions across time steps
+            window_pre_ekf_preds = torch.cat(all_pre_ekf_preds, dim=0)  # [window_size, num_sources]
+            window_ekf_preds = torch.cat(all_ekf_preds, dim=0)          # [window_size, num_sources]
+            window_true_angles = torch.cat(all_true_angles, dim=0)      # [window_size, num_sources]
+            
+            # Calculate ALL losses at window level
+            loss_metrics = self._calculate_all_losses(
+                window_pre_ekf_preds, window_ekf_preds, window_true_angles, all_innovation_covariances, loss_config
+            )
+            
             avg_covariance = total_covariance / total_cov_points if total_cov_points > 0 else float('nan')
         else:
-            avg_loss = float('inf')
-            avg_pre_ekf_loss = float('inf')
-            avg_delta_rmspe_loss = 0.0
-            avg_delta_rmape_loss = 0.0
+            # Create default loss metrics if no valid steps
+            loss_metrics = LossMetrics(
+                main_loss=float('inf'),
+                main_loss_db=float('inf'),
+                main_loss_config="no_valid_steps",
+                online_training_reference_loss=float('inf'),
+                online_training_reference_loss_config="no_valid_steps",
+                pre_ekf_loss=float('inf'),
+                ekf_gain_rmspe=0.0,
+                ekf_gain_rmape=0.0
+            )
             avg_covariance = float('nan')
         
-        # Calculate averaged angle predictions across time steps
+        # Calculate averaged metrics across time steps
         avg_ekf_angle_pred = []
         avg_pre_ekf_angle_pred = []
+        avg_ekf_covariances = []
+        avg_ekf_innovations = []
+        avg_ekf_kalman_gains = []
+        avg_ekf_kalman_gain_times_innovation = []
+        avg_ekf_y_s_inv_y = []
+        avg_step_innovation_covariances = []
         
         if num_valid_steps > 0:
             # Get the number of sources from the first valid step
@@ -1605,33 +1483,92 @@ class OnlineLearning:
                     source_predictions = []
                     for step_result in step_results_list:
                         if step_result['success']:
-                            pre_ekf_preds = step_result['pre_ekf_angles_pred'].flatten()
+                            pre_ekf_preds = step_result['pre_ekf_angles_pred_tensor'].flatten()
                             if len(pre_ekf_preds) > source_idx:
                                 source_predictions.append(pre_ekf_preds[source_idx].item())
                     
                     if source_predictions:
                         avg_pre_ekf_angle_pred.append(float(sum(source_predictions) / len(source_predictions)))
         
-        # Create result objects
-        loss_metrics = LossMetrics(
-            ekf_loss=avg_loss,
-            pre_ekf_loss=avg_pre_ekf_loss,
-            delta_rmspe_loss=avg_delta_rmspe_loss,
-            delta_rmape_loss=avg_delta_rmape_loss,
-            avg_ekf_angle_pred=avg_ekf_angle_pred,
-            avg_pre_ekf_angle_pred=avg_pre_ekf_angle_pred
-        )
+                # Average EKF covariances across time steps for each source
+                for source_idx in range(num_sources):
+                    source_covariances = []
+                    for step_result in step_results_list:
+                        if step_result['success'] and len(step_result['step_covariances']) > source_idx:
+                            source_covariances.append(step_result['step_covariances'][source_idx].item())
+                    
+                    if source_covariances:
+                        avg_ekf_covariances.append(float(sum(source_covariances) / len(source_covariances)))
+                
+                # Average EKF innovations across time steps for each source
+                for source_idx in range(num_sources):
+                    source_innovations = []
+                    for step_result in step_results_list:
+                        if step_result['success'] and len(step_result['step_innovations']) > source_idx:
+                            source_innovations.append(step_result['step_innovations'][source_idx].item())
+                    
+                    if source_innovations:
+                        avg_ekf_innovations.append(float(sum(source_innovations) / len(source_innovations)))
+                
+                # Average EKF Kalman gains across time steps for each source
+                for source_idx in range(num_sources):
+                    source_kalman_gains = []
+                    for step_result in step_results_list:
+                        if step_result['success'] and len(step_result['step_kalman_gains']) > source_idx:
+                            source_kalman_gains.append(step_result['step_kalman_gains'][source_idx].item())
+                    
+                    if source_kalman_gains:
+                        avg_ekf_kalman_gains.append(float(sum(source_kalman_gains) / len(source_kalman_gains)))
+                
+                # Average EKF Kalman gain times innovation across time steps for each source
+                for source_idx in range(num_sources):
+                    source_kalman_gain_times_innovation = []
+                    for step_result in step_results_list:
+                        if step_result['success'] and len(step_result['step_kalman_gain_times_innovation']) > source_idx:
+                            source_kalman_gain_times_innovation.append(step_result['step_kalman_gain_times_innovation'][source_idx].item())
+                    
+                    if source_kalman_gain_times_innovation:
+                        avg_ekf_kalman_gain_times_innovation.append(float(sum(source_kalman_gain_times_innovation) / len(source_kalman_gain_times_innovation)))
+                
+                # Average EKF y_s_inv_y across time steps for each source
+                for source_idx in range(num_sources):
+                    source_y_s_inv_y = []
+                    for step_result in step_results_list:
+                        if step_result['success'] and len(step_result['step_y_s_inv_y']) > source_idx:
+                            source_y_s_inv_y.append(step_result['step_y_s_inv_y'][source_idx].item())
+                    
+                    if source_y_s_inv_y:
+                        avg_ekf_y_s_inv_y.append(float(sum(source_y_s_inv_y) / len(source_y_s_inv_y)))
+                
+                # Average step innovation covariances across time steps for each source
+                for source_idx in range(num_sources):
+                    source_innovation_covariances = []
+                    for step_result in step_results_list:
+                        if step_result['success'] and 'step_Innovation_Covariance' in step_result and len(step_result['step_Innovation_Covariance']) > source_idx:
+                            source_innovation_covariances.append(step_result['step_Innovation_Covariance'][source_idx].item())
+                    
+                    if source_innovation_covariances:
+                        avg_step_innovation_covariances.append(float(sum(source_innovation_covariances) / len(source_innovation_covariances)))
         
+        # Create window metrics with averaged values
         window_metrics = WindowMetrics(
             window_size=current_window_len,
             num_sources=num_sources if num_valid_steps > 0 else 0,
             avg_covariance=avg_covariance,
             eta_value=current_eta,
-            is_near_field=is_near_field
+            is_near_field=is_near_field,
+            avg_ekf_angle_pred=avg_ekf_angle_pred,
+            avg_pre_ekf_angle_pred=avg_pre_ekf_angle_pred,
+            avg_ekf_covariances=avg_ekf_covariances,
+            avg_ekf_innovations=avg_ekf_innovations,
+            avg_ekf_kalman_gains=avg_ekf_kalman_gains,
+            avg_ekf_kalman_gain_times_innovation=avg_ekf_kalman_gain_times_innovation,
+            avg_ekf_y_s_inv_y=avg_ekf_y_s_inv_y,
+            avg_step_innovation_covariances=avg_step_innovation_covariances
         )
         
-        ekf_metrics = EKFMetrics(
-            predictions=ekf_predictions,
+        # Create step metrics (renamed from EKF metrics)
+        step_metrics = StepMetrics(
             covariances=ekf_covariances,
             innovations=ekf_innovations,
             kalman_gains=ekf_kalman_gains,
@@ -1639,11 +1576,20 @@ class OnlineLearning:
             y_s_inv_y=ekf_y_s_inv_y
         )
         
+        # Create DOA metrics with predictions and true angles
+        doa_metrics = DOAMetrics(
+            ekf_predictions=ekf_predictions,
+            pre_ekf_predictions=pre_ekf_angles_pred_list,
+            true_angles=torch.cat(all_true_angles, dim=0) if all_true_angles else torch.empty((0, 0), dtype=torch.float64),
+            avg_ekf_angle_pred=avg_ekf_angle_pred,
+            avg_pre_ekf_angle_pred=avg_pre_ekf_angle_pred
+        )
+        
         return WindowEvaluationResult(
             loss_metrics=loss_metrics,
             window_metrics=window_metrics,
-            ekf_metrics=ekf_metrics,
-            pre_ekf_angles_pred_list=pre_ekf_angles_pred_list,
+            step_metrics=step_metrics,
+            doa_metrics=doa_metrics,
             is_valid=num_valid_steps > 0
         )
 
@@ -1686,15 +1632,12 @@ class OnlineLearning:
         # Use provided model or default to trained model
         if model is None:
             model = self.trained_model
-            model_is_trained = True
+            Pretrained_model = True
         else:
-            model_is_trained = False
+            Pretrained_model = False
         
         # Check if we're dealing with far-field or near-field
         is_near_field = hasattr(model, 'field_type') and model.field_type.lower() == "near"
-        
-        # Use RMSPE loss for evaluation
-        rmspe_criterion = RMSPELoss().to(device)
         
         # Initialize Extended Kalman Filters
         max_sources = self.config.system_model.M
@@ -1717,41 +1660,226 @@ class OnlineLearning:
             # Process single step
             success, step_result = self._process_single_step(
                 step, time_series_steps, sources_num_per_step, labels_per_step_list,
-                ekf_filters, model, is_near_field, rmspe_criterion, model_is_trained, loss_config
+                ekf_filters, model, is_near_field, Pretrained_model
             )
             
             step_results_list.append(step_result)
         
-        # Calculate aggregated metrics
-        result = self._calculate_metrics(step_results_list, current_window_len, max_sources, current_eta, is_near_field)
+        # Calculate aggregated metrics using unified method
+        result = self._calculate_metrics(step_results_list, current_window_len, max_sources, current_eta, is_near_field, loss_config)
         
         # Log window summary
         if result.is_valid:
-            log_window_summary(result.loss_metrics.pre_ekf_loss, result.loss_metrics.ekf_loss, 
-                             result.window_metrics.avg_covariance, current_eta, is_near_field, 
-                             trajectory_idx, window_idx)
+            log_window_summary(result.loss_metrics, result.window_metrics.avg_covariance, 
+                             current_eta, is_near_field, trajectory_idx, window_idx)
         
         return result
 
-    def _calculate_configured_loss(self, predictions: torch.Tensor, targets: torch.Tensor, 
-                                 loss_config, rmspe_criterion, rmape_criterion) -> torch.Tensor:
+    def _fix_tensor_shape_for_loss(self, tensor: torch.Tensor) -> torch.Tensor:
         """
-        Calculate loss based on configuration.
+        Fix tensor shape for loss calculations.
+        Expected: [window_size, num_sources]
+        Actual: [window_size, 1, num_sources] -> squeeze middle dimension
+        """
+        if tensor.dim() == 3 and tensor.shape[1] == 1:
+            return tensor.squeeze(1)  # Remove middle dimension
+        return tensor
+
+    def _calculate_all_losses(self, pre_ekf_preds: torch.Tensor, ekf_preds: torch.Tensor, 
+                            true_angles: torch.Tensor, innovation_covariances: list = None, loss_config=None) -> 'LossMetrics':
+        """
+        Calculate all losses at window level.
         
         Args:
-            predictions: Model predictions tensor
-            targets: Target tensor (ground truth or pre-EKF predictions based on supervision mode)
-            loss_config: Loss configuration object from config.online_learning.loss_config
+            pre_ekf_preds: Pre-EKF predictions tensor [window_size, num_sources]
+            ekf_preds: EKF predictions tensor [window_size, num_sources]
+            true_angles: True angles tensor [window_size, num_sources]
+            innovation_covariances: List of innovation covariance tensors for each step (optional)
+            loss_config: Loss configuration object (optional)
+        
+        Returns:
+            LossMetrics object with all calculated losses
+        """
+        # Import loss criteria
+        from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
+        from DCD_MUSIC.src.metrics.rmape_loss import RMAPELoss
+        
+        rmspe_criterion = RMSPELoss().to(device)
+        rmape_criterion = RMAPELoss().to(device)
+        
+        # Fix tensor shapes - remove extra dimension if present
+        pre_ekf_preds = self._fix_tensor_shape_for_loss(pre_ekf_preds)
+        ekf_preds = self._fix_tensor_shape_for_loss(ekf_preds)
+        true_angles = self._fix_tensor_shape_for_loss(true_angles)
+        
+        # Get window size for proper averaging
+        window_size = pre_ekf_preds.shape[0]
+        
+        # Main loss (what the system is optimized for - uses supervision + metric)
+        if loss_config is None:
+            raise RuntimeError("loss_config is required for _calculate_all_losses but was None")
+        
+        # Determine targets based on supervision mode
+        if loss_config.supervision == "supervised":
+            targets = true_angles
+        elif loss_config.supervision == "unsupervised":  # unsupervised
+            targets = pre_ekf_preds
+        else:
+            raise RuntimeError(f"Unknown supervision mode: {loss_config.supervision}. Must be one of: supervised, unsupervised")
+        
+        # Calculate main loss using supervision + metric (NOT training_loss_type)
+        main_loss_config = f"{loss_config.supervision}_{loss_config.metric}"
+        if loss_config.metric == "rmspe":
+            main_loss = rmspe_criterion(ekf_preds, targets) / window_size  # RMSPE sums across batch, divide by window size
+        elif loss_config.metric == "rmape": # rmape
+            main_loss = rmape_criterion(ekf_preds, targets) / window_size  # RMAPE sums across batch, divide by window size
+        else:
+            raise RuntimeError(f"Unknown metric: {loss_config.metric}. Must be one of: rmspe, rmape")
+        
+        # Calculate main loss in dB units (20 * log10(main_loss))
+        import math
+        main_loss_value = main_loss.item() if hasattr(main_loss, 'item') else main_loss
+        main_loss_db = 20 * math.log10(main_loss_value)  # Avoid log(0) with small epsilon
+        
+        # Online training reference loss (uses training_loss_type configuration)
+        if not hasattr(loss_config, 'training_loss_type'):
+            raise RuntimeError("loss_config.training_loss_type is required for online_training_reference_loss but was not found")
+        
+        training_loss_type = loss_config.training_loss_type
+        online_training_reference_loss_config = training_loss_type
+        
+        if training_loss_type == "multimoment":
+            # Multi-Moment loss: use pre-EKF as predictions, EKF as targets
+            try:
+                multimoment_criterion = MultiMomentInnovationConsistencyLoss(
+                    alpha=getattr(loss_config, 'multimoment_alpha', 1.0),
+                    beta=getattr(loss_config, 'multimoment_beta', 1.0)
+                ).to(device)
+                online_training_reference_loss = multimoment_criterion(
+                    angles_pred=pre_ekf_preds,
+                    angles=ekf_preds,
+                    return_components=False
+                )
+                # Multi-Moment already divides by batch_size, no need for .mean()
+            except Exception as e:
+                raise RuntimeError(f"Failed to calculate Multi-Moment reference loss: {e}")
+        elif training_loss_type == "unsupervised_rmspe":
+            # Unsupervised RMSPE: EKF vs pre-EKF
+            online_training_reference_loss = rmspe_criterion(ekf_preds, pre_ekf_preds) / window_size  # RMSPE sums across batch, divide by window size
+        elif training_loss_type == "unsupervised_rmape":
+            # Unsupervised RMAPE: EKF vs pre-EKF
+            online_training_reference_loss = rmape_criterion(ekf_preds, pre_ekf_preds) / window_size  # RMAPE sums across batch, divide by window size
+        elif training_loss_type == "supervised_rmspe":
+            # Supervised RMSPE: EKF vs true angles
+            online_training_reference_loss = rmspe_criterion(ekf_preds, true_angles) / window_size  # RMSPE sums across batch, divide by window size
+        elif training_loss_type == "supervised_rmape":
+            # Supervised RMAPE: EKF vs true angles
+            online_training_reference_loss = rmape_criterion(ekf_preds, true_angles) / window_size  # RMAPE sums across batch, divide by window size
+        else:
+            # Unknown training_loss_type, terminate with error
+            raise RuntimeError(f"Unknown training_loss_type: {training_loss_type}. Must be one of: multimoment, unsupervised_rmspe, unsupervised_rmape, supervised_rmspe, supervised_rmape")
+        
+        # Pre-EKF loss (raw model performance)
+        pre_ekf_loss = rmspe_criterion(pre_ekf_preds, true_angles) / window_size  # RMSPE sums across batch, divide by window size
+        
+        # EKF gain losses (EKF improvement over raw predictions)
+        ekf_gain_rmspe = rmspe_criterion(ekf_preds, pre_ekf_preds) / window_size  # RMSPE sums across batch, divide by window size
+        ekf_gain_rmape = rmape_criterion(ekf_preds, pre_ekf_preds) / window_size  # RMAPE sums across batch, divide by window size
+        
+        return LossMetrics(
+            main_loss=main_loss.item() if hasattr(main_loss, 'item') else main_loss,
+            main_loss_db=main_loss_db,
+            main_loss_config=main_loss_config,
+            online_training_reference_loss=online_training_reference_loss.item() if hasattr(online_training_reference_loss, 'item') else online_training_reference_loss,
+            online_training_reference_loss_config=online_training_reference_loss_config,
+            pre_ekf_loss=pre_ekf_loss.item() if hasattr(pre_ekf_loss, 'item') else pre_ekf_loss,
+            ekf_gain_rmspe=ekf_gain_rmspe.item() if hasattr(ekf_gain_rmspe, 'item') else ekf_gain_rmspe,
+            ekf_gain_rmape=ekf_gain_rmape.item() if hasattr(ekf_gain_rmape, 'item') else ekf_gain_rmape
+        )
+
+
+    def _calculate_window_training_loss(self, step_results_list: List[Dict], 
+                                      loss_config=None, rmspe_criterion=None, rmape_criterion=None) -> torch.Tensor:
+        """
+        Calculate window-level training loss based on configuration.
+        
+        Args:
+            step_results_list: List of step result dictionaries from window
+            loss_config: Loss configuration (optional)
             rmspe_criterion: RMSPE loss criterion instance
             rmape_criterion: RMAPE loss criterion instance
         
         Returns:
-            Calculated loss tensor
+            Window-level loss tensor
         """
-        if loss_config.metric == "rmspe":
-            return rmspe_criterion(predictions, targets)
-        else:  # rmape
-            return rmape_criterion(predictions, targets)
+        if not step_results_list:
+            return torch.tensor(0.0, device=device, requires_grad=True)
+        
+        # Collect all tensors for window-level loss calculation
+        all_pre_ekf_preds = []
+        all_ekf_preds = []
+        all_true_angles = []
+        
+        for step_result in step_results_list:
+            if step_result['success']:
+                all_pre_ekf_preds.append(step_result['pre_ekf_angles_pred_tensor'])
+                all_ekf_preds.append(step_result['ekf_angles_pred_tensor'])
+                all_true_angles.append(step_result['true_angles_tensor'])
+        
+        if not all_pre_ekf_preds:
+            return torch.tensor(0.0, device=device, requires_grad=True)
+        
+        # Stack predictions across time steps
+        window_pre_ekf_preds = torch.cat(all_pre_ekf_preds, dim=0)  # [window_size, num_sources]
+        window_ekf_preds = torch.cat(all_ekf_preds, dim=0)          # [window_size, num_sources]
+        window_true_angles = torch.cat(all_true_angles, dim=0)      # [window_size, num_sources]
+        
+        # Fix tensor shapes - remove extra dimension if present
+        window_pre_ekf_preds = self._fix_tensor_shape_for_loss(window_pre_ekf_preds)
+        window_ekf_preds = self._fix_tensor_shape_for_loss(window_ekf_preds)
+        window_true_angles = self._fix_tensor_shape_for_loss(window_true_angles)
+        
+        # Get window size for proper averaging
+        window_size = window_pre_ekf_preds.shape[0]
+        
+        # Calculate window-level loss based on training_loss_type configuration
+        if loss_config is not None and hasattr(loss_config, 'training_loss_type'):
+            training_loss_type = loss_config.training_loss_type
+            
+            if training_loss_type == "multimoment":
+                # Multi-Moment loss: use pre-EKF as predictions, EKF as targets
+                try:
+                    multimoment_criterion = MultiMomentInnovationConsistencyLoss(
+                        alpha=getattr(loss_config, 'multimoment_alpha', 1.0),
+                        beta=getattr(loss_config, 'multimoment_beta', 1.0)
+                    ).to(device)
+                    return multimoment_criterion(
+                        angles_pred=window_pre_ekf_preds,
+                        angles=window_ekf_preds,
+                        return_components=False
+                    )
+                except Exception as e:
+                    raise RuntimeError(f"Failed to calculate Multi-Moment training loss: {e}")
+            elif training_loss_type == "unsupervised_rmspe":
+                # Unsupervised RMSPE: EKF vs pre-EKF
+                return rmspe_criterion(window_ekf_preds, window_pre_ekf_preds) / window_size  # RMSPE sums across batch, divide by window size
+            elif training_loss_type == "unsupervised_rmape":
+                # Unsupervised RMAPE: EKF vs pre-EKF
+                return rmape_criterion(window_ekf_preds, window_pre_ekf_preds) / window_size  # RMAPE sums across batch, divide by window size
+            elif training_loss_type == "supervised_rmspe":
+                # Supervised RMSPE: EKF vs true angles
+                return rmspe_criterion(window_ekf_preds, window_true_angles) / window_size  # RMSPE sums across batch, divide by window size
+            elif training_loss_type == "supervised_rmape":
+                # Supervised RMAPE: EKF vs true angles
+                return rmape_criterion(window_ekf_preds, window_true_angles) / window_size  # RMAPE sums across batch, divide by window size
+            else:
+                # Unknown training_loss_type, terminate with error
+                raise RuntimeError(f"Unknown training_loss_type: {training_loss_type}. Must be one of: multimoment, unsupervised_rmspe, unsupervised_rmape, supervised_rmspe, supervised_rmape")
+        else:
+            # Default to RMSPE loss
+            return rmspe_criterion(window_ekf_preds, window_true_angles) / window_size  # RMSPE sums across batch, divide by window size
+
+
 
     def _get_optimal_permutation(self, predictions: np.ndarray, true_angles: np.ndarray) -> np.ndarray:
         """

@@ -146,7 +146,11 @@ class OnlineLearningLossConfig(BaseModel):
     """Configuration for online learning loss function."""
     metric: Literal["rmspe", "rmape"] = Field(default="rmape", description="Loss metric to use: 'rmspe' or 'rmape'")
     supervision: Literal["supervised", "unsupervised"] = Field(default="unsupervised", description="Supervision mode: 'supervised' (compare with ground truth) or 'unsupervised' (compare with pre-EKF predictions)")
-    training_loss_type: Literal["configured", "kalman_innovation", "y_s_inv_y", "unsupervised_rmape", "unsupervised_rmspe"] = Field(default="configured", description="Training loss type: 'configured' (use metric+supervision), 'kalman_innovation' (use K*innovation loss), 'y_s_inv_y' (use y*S^-1*y loss), 'unsupervised_rmape' (use RMAPE between predictions and EKF outputs), or 'unsupervised_rmspe' (use RMSPE between predictions and EKF outputs)")
+    training_loss_type: Literal["configured", "kalman_innovation", "y_s_inv_y", "unsupervised_rmape", "unsupervised_rmspe", "supervised_rmape", "supervised_rmspe", "multimoment"] = Field(default="configured", description="Training loss type: 'configured' (use metric+supervision), 'kalman_innovation' (use K*innovation loss), 'y_s_inv_y' (use y*S^-1*y loss), 'unsupervised_rmape' (use RMAPE between EKF and pre-EKF), 'unsupervised_rmspe' (use RMSPE between EKF and pre-EKF), 'supervised_rmape' (use RMAPE between EKF and true angles), 'supervised_rmspe' (use RMSPE between EKF and true angles), or 'multimoment' (use Multi-Moment Innovation Consistency Loss)")
+    
+    # Multi-Moment Innovation Consistency Loss Configuration (only used when training_loss_type="multimoment")
+    multimoment_alpha: float = Field(default=1.0, description="Alpha parameter for Multi-Moment loss (weight for RMAPE component)")
+    multimoment_beta: float = Field(default=1.0, description="Beta parameter for Multi-Moment loss (weight for RMSPE component)")
 
 
 class OnlineLearningConfig(BaseModel):
@@ -224,6 +228,7 @@ class ScenarioConfig(BaseModel):
     """Configuration for running a scenario with multiple parameter values."""
     type: str = Field(..., description="Type of scenario to run (e.g., 'SNR', 'T', 'M', 'eta').")
     values: List[float] = Field(..., description="List of values to test for this scenario type.")
+    model_paths: Optional[List[str]] = Field(default=None, description="List of model paths for each scenario value (must match values order)")
     retrain_model: bool = Field(default=False, description="Whether to retrain the model for each scenario value.")
 
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#Train command over multiple snrs python3 main.py simulate -c configs/training_config/Random_basemodel_training_config.yaml -o experiments/results/my_snr_experiment -s snr -v -10 -v -5 -v 0 v 5 -v 10 --mode training
 """
 SubspaceNet - Command Line Interface
 
@@ -20,6 +21,7 @@ from cli.commands import show_command, save_command
 from cli.options import config_option, output_option, override_option
 from simulation.core import Simulation
 from utils.logging_utils import setup_logging_from_config
+from utils.plotting import plot_scenario_results
 
 # Device setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -40,13 +42,13 @@ def cli():
               help='Scenario to run (training, evaluation, online_learning, or full for all components)')
 def run_command(config: str, output: Optional[str], override: List[str], scenario: str):
     """Run an experiment with the specified configuration."""
+    logger = logging.getLogger('SubspaceNet')  # Initialize logger early
     try:
         # Use config_handler to set up configuration and components
         config_obj, components, output_dir = setup_configuration(config, output, override)
         
         # Setup logging from config
         setup_logging_from_config(config_obj.logging, output_dir)
-        logger = logging.getLogger('SubspaceNet')
         
         # Create simulation instance
         logger.info(f"Running {scenario} scenario")
@@ -355,6 +357,10 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
             logger.info(f"Running {scenario} scenario with values {values}")
             results = sim.run_scenario(scenario, list(values), full_mode=(mode=='full'))
             logger.info(f"Scenario completed with {len(results)} results")
+            
+            # Plot scenario results if it's an SNR scenario
+            if scenario.lower() == 'snr' and mode == 'online_learning':
+                plot_scenario_results(results, sim.output_dir)
         else:
             if mode == 'full':
                 logger.info("Running full simulation (training, evaluation, and online learning)")
@@ -381,7 +387,7 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
 @config_option
 @output_option
 @override_option
-@click.option('--model', '-m', type=str, required=True, help='Path to the trained model for online learning')
+@click.option('--model', '-m', type=str, required=False, help='Path to the trained model for online learning (overrides config)')
 @click.option('--scenario', '-s', type=str, help='Run scenario (4d_grid for eta/process_noise/kalman_noise grid search)')
 @click.option('--eta-values', multiple=True, type=float, help='Values for eta.')
 @click.option('--process-noise-values', multiple=True, type=float, help='Values for trajectory process noise.')
@@ -402,14 +408,21 @@ def online_learning_command(config: str, output: Optional[str], override: List[s
         setup_logging_from_config(config_obj.logging, output_dir)
         logger = logging.getLogger('SubspaceNet')
         
+        # Validate that model path is provided either via flag or config
+        if not model and not config_obj.simulation.model_path:
+            raise ValueError("Model path must be provided either via --model flag or in config file (simulation.model_path)")
+        
         # Apply required overrides for online learning
         from config.loader import apply_overrides
         online_learning_overrides = [
             "simulation.train_model=false",
             "simulation.load_model=true",
-            f"simulation.model_path={model}",
             "online_learning.enabled=true"
         ]
+        
+        # Only override model_path if -m flag was provided
+        if model:
+            online_learning_overrides.append(f"simulation.model_path={model}")
         
         modified_config = apply_overrides(config_obj, online_learning_overrides)
         

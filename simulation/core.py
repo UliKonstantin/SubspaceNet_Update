@@ -28,6 +28,7 @@ from .runners.Online_learning import OnlineLearning
 from simulation.kalman_filter import KalmanFilter1D, BatchKalmanFilter1D, BatchExtendedKalmanFilter1D
 from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
 from DCD_MUSIC.src.signal_creation import Samples
+from utils.utils import save_model_state
 from DCD_MUSIC.src.evaluation import get_model_based_method, evaluate_model_based
 from simulation.kalman_filter.extended import ExtendedKalmanFilter1D
 
@@ -164,7 +165,7 @@ class Simulation:
             
             # Save model if configured
             if self.config.simulation.save_model and self.trained_model is not None:
-                self._save_model_state(self.trained_model)
+                save_model_state(self.trained_model, self.output_dir, f"{self.config.model.type}_trained")
             
             # Save results
             self._save_results()
@@ -1056,20 +1057,44 @@ class Simulation:
         logger.info(f"Running {scenario_type} scenario with values: {values}")
         scenario_results = {}
         
-        for value in values:
+        # Check if model paths are provided in config for this scenario
+        model_paths = None
+        if hasattr(self.config, 'scenario_config') and hasattr(self.config.scenario_config, 'model_paths') and self.config.scenario_config.model_paths:
+            model_paths = self.config.scenario_config.model_paths
+            logger.info(f"Found {len(model_paths)} model paths in scenario_config for scenario sweep")
+        
+        for i, value in enumerate(values):
             logger.info(f"Running scenario with {scenario_type}={value}")
+            
+            # Create overrides for this scenario
+            overrides = [f"system_model.{scenario_type.lower()}={value}"]
+            
+            # Add model path override if available
+            if model_paths and i < len(model_paths):
+                model_path = model_paths[i]
+                overrides.append(f"simulation.model_path={model_path}")
+                logger.info(f"Using model path for {scenario_type}={value}: {model_path}")
+            else:
+                # Ensure model_path is set to null if no model paths provided
+                overrides.append("simulation.model_path=null")
             
             # Create a modified configuration for this scenario
             from config.loader import apply_overrides
-            modified_config = apply_overrides(
-                self.config,
-                [f"system_model.{scenario_type.lower()}={value}"]
+            modified_config = apply_overrides(self.config, overrides)
+            
+            # Update components for this sweep value (important for system_model and model recreation)
+            from config_handler import update_components_for_sweep
+            updated_components = update_components_for_sweep(
+                components=self.components,
+                config=modified_config,
+                sweep_param=scenario_type,
+                sweep_value=value
             )
             
-            # Create a new simulation with the modified config
+            # Create a new simulation with the modified config and updated components
             simulation = Simulation(
                 config=modified_config,
-                components=self.components,  # Reuse components where possible
+                components=updated_components,  # Use updated components
                 output_dir=self.output_dir / f"{scenario_type}_{value}"
             )
             
@@ -1080,6 +1105,10 @@ class Simulation:
                 # If in evaluation-only mode, run evaluation instead of training
                 logger.info(f"Running evaluation for {scenario_type}={value}")
                 result = simulation.run_evaluation()
+            elif self.config.simulation.load_model and not self.config.simulation.train_model:
+                # If in online learning mode, run online learning
+                logger.info(f"Running online learning for {scenario_type}={value}")
+                result = simulation.execute_online_learning()
             else:
                 result = simulation.run_training()  # Run training only
                 
@@ -1135,6 +1164,18 @@ class Simulation:
     def _load_and_apply_weights(self, model_path: Path, device: torch.device) -> Tuple[bool, Optional[str]]:
         """Loads weights from a checkpoint file and applies them to self.model."""
         logger.info(f"Attempting to load model weights from: {model_path}")
+        
+        # Handle wildcard expansion for model paths
+        if '*' in str(model_path):
+            import glob
+            expanded_paths = glob.glob(str(model_path))
+            if not expanded_paths:
+                return False, f"No files found matching pattern: {model_path}"
+            elif len(expanded_paths) > 1:
+                logger.warning(f"Multiple files found for pattern {model_path}: {expanded_paths}. Using the first one.")
+            model_path = Path(expanded_paths[0])
+            logger.info(f"Expanded wildcard to: {model_path}")
+        
         try:
             # First try without any specific parameters
             try:

@@ -70,6 +70,8 @@ def _create_system_model_params(config: Config) -> Any:
     for key, value in config_dict.items():
         if key == 'eta':
             logger.info(f"FACTORY DEBUG: eta being set in SystemModelParams: {value}")
+        if key == 'snr':
+            logger.info(f"FACTORY DEBUG: snr being set in SystemModelParams: {value}")
         system_model_params.set_parameter(key, value)
     
     # IMPORTANT: If sweep values are defined in evaluation config, they should be

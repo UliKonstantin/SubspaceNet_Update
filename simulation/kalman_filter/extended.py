@@ -315,7 +315,7 @@ class ExtendedKalmanFilter1D:
         self.P = P_new
         
         # Return all values as tensors
-        return x_new, y, K, K * y, y_s_inv_y
+        return x_new, y, K, K * y, y_s_inv_y,S
 
     def predict_and_update(self, measurement, true_state=None):
         """
@@ -337,6 +337,6 @@ class ExtendedKalmanFilter1D:
         predicted_state = self.predict()
         
         # Perform update step with measurement
-        updated_state, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y = self.update(z=measurement)
+        updated_state, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y,Innovation_Covariance = self.update(z=measurement)
         
-        return predicted_state, updated_state, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y 
+        return predicted_state, updated_state, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y,Innovation_Covariance 

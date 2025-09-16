@@ -914,331 +914,291 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                 logger.info(f"Saved eta comparison plot {combination_count}/{total_combinations}: {plot_path.name}")
     
     logger.info(f"Completed eta comparison plotting: {len(saved_plots)} plots saved to {plot_dir}")
-    return saved_plots 
+    return saved_plots
 
-
-def plot_single_trajectory_results(trajectory_results, trajectory_idx, output_dir):
+def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
     """
-    Plot results for a single trajectory including loss difference and innovation.
-    Also includes online learning results when available.
+    Plot scenario results comparing average dB loss of online learning vs pretrained models.
     
     Args:
-        trajectory_results: Dictionary containing single trajectory results
-        trajectory_idx: Index of the trajectory being plotted
-        output_dir: Output directory for saving plots
+        scenario_results: Dictionary mapping SNR values to their results
+        output_dir: Output directory for saving the plot
     """
-    try:
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import datetime
-        from pathlib import Path
-        
-        # Create timestamp and plot directory
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        plot_dir = Path(output_dir) / "plots" / "single_trajectories"
-        plot_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Extract data from trajectory results
-        pre_ekf_losses = np.array(trajectory_results['pre_ekf_losses'])  # Shape: (30,)
-        window_losses = np.array(trajectory_results['window_losses'])    # Shape: (30,) - post EKF losses
-        ekf_innovations = np.array(trajectory_results['ekf_innovations']) # Shape: (30, 5, 3)
-        window_eta_values = trajectory_results['window_eta_values']
-        
-        # Check if online learning results are available
-        has_online_results = ('online_window_losses' in trajectory_results and 
-                            len(trajectory_results['online_window_losses']) > 0)
-        
-        # Calculate loss difference: pre_ekf_loss - post_ekf_loss (positive means EKF improved)
-        loss_difference = pre_ekf_losses - window_losses
-        
-        # Calculate average innovation magnitude per window
-        # Aggregate across steps (5) and sources (3) to get one value per window (30)
-        avg_innovations_per_window = []
-        for window_idx in range(ekf_innovations.shape[0]):  # 30 windows
-            window_innovations = []
-            for step_idx in range(ekf_innovations.shape[1]):  # 5 steps
-                for source_idx in range(ekf_innovations.shape[2]):  # 3 sources
-                    innovation_val = ekf_innovations[window_idx, step_idx, source_idx]
-                    window_innovations.append(abs(innovation_val))  # Use absolute value
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from pathlib import Path
+    
+    logger = logging.getLogger(__name__)
+    logger.info("Creating scenario results plot...")
+    
+    # Extract SNR values and sort them
+    snr_values = sorted([float(snr) for snr in scenario_results.keys()])
+    
+    # Initialize lists to store average dB losses
+    online_avg_db_losses = []
+    pretrained_avg_db_losses = []
+    
+    for snr in snr_values:
+        if snr not in scenario_results:
+            logger.warning(f"SNR {snr} not found in results, skipping...")
+            continue
             
-            if window_innovations:
-                avg_innovations_per_window.append(np.mean(window_innovations))
-            else:
-                avg_innovations_per_window.append(0)
+        result = scenario_results[snr]
         
-        avg_innovations_per_window = np.array(avg_innovations_per_window)
+        # Extract online learning results
+        online_results = None
+        pretrained_results = None
         
-        # Find indices where eta changes
-        eta_changes = []
-        eta_values = []
-        for i in range(1, len(window_eta_values)):
-            if abs(window_eta_values[i] - window_eta_values[i-1]) > 1e-6:
-                eta_changes.append(i)
-                eta_values.append(window_eta_values[i])
-        
-        # Calculate training end window for single trajectory plots
-        training_end_window = None
-        if has_online_results and 'training_window_indices' in trajectory_results:
-            training_window_indices = trajectory_results['training_window_indices']
-            if training_window_indices and len(training_window_indices) > 0:
-                # Training ends after 13 training windows, so the last training window is window 12 (0-indexed)
-                if len(training_window_indices) >= 13:
-                    training_end_window = training_window_indices[12]  # 13th training window (0-indexed)
-                else:
-                    # If less than 13 training windows, use the last training window
-                    training_end_window = training_window_indices[-1]
-        
-        # Calculate training start window for single trajectory plots
-        training_start_window = None
-        if has_online_results and 'learning_start_window' in trajectory_results:
-            training_start_window = trajectory_results['learning_start_window']
-        elif has_online_results and 'training_window_indices' in trajectory_results:
-            training_window_indices = trajectory_results['training_window_indices']
-            if training_window_indices and len(training_window_indices) > 0:
-                # Use the first training window index as training start
-                training_start_window = training_window_indices[0]
-        
-        # Determine number of subplots based on available data
-        if has_online_results:
-            # Create figure with 6 subplots (2x3 layout) to accommodate difference plot
-            fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(2, 3, figsize=(20, 12))
+        if 'online_learning_results' in result:
+            online_learning_data = result['online_learning_results']
             
-            # Extract online learning data
-            online_window_losses = np.array(trajectory_results['online_window_losses'])
-            online_pre_ekf_losses = np.array(trajectory_results['online_pre_ekf_losses'])
-            online_ekf_innovations = np.array(trajectory_results['online_ekf_innovations'])
+            # Get online model trajectory results
+            if 'online_trajectory_results' in online_learning_data:
+                online_results = online_learning_data['online_trajectory_results']
             
-            # Calculate online loss difference
-            online_loss_difference = online_pre_ekf_losses - online_window_losses
+            # Get pretrained model trajectory results  
+            if 'pretrained_trajectory_results' in online_learning_data:
+                pretrained_results = online_learning_data['pretrained_trajectory_results']
+        
+        # Calculate average dB loss for online model (using last 10 windows)
+        online_avg_db = None
+        if online_results and isinstance(online_results, list) and len(online_results) > 0:
+            # online_results is a list of TrajectoryResults objects
+            trajectory_results = online_results[0]  # Get the first trajectory result
             
-            # Calculate online average innovation magnitude per window
-            online_avg_innovations_per_window = []
-            for window_idx in range(online_ekf_innovations.shape[0]):
-                window_innovations = []
-                for step_idx in range(online_ekf_innovations.shape[1]):
-                    for source_idx in range(online_ekf_innovations.shape[2]):
-                        innovation_val = online_ekf_innovations[window_idx, step_idx, source_idx]
-                        window_innovations.append(abs(innovation_val))
+            # Use last 10 windows for averaging
+            total_windows = len(trajectory_results.window_results)
+            if total_windows >= 10:
+                # Take last 10 windows
+                start_window = total_windows - 10
+                post_learning_db_losses = []
+                for window_result in trajectory_results.window_results[start_window:]:
+                    if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'main_loss_db'):
+                        post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
                 
-                if window_innovations:
-                    online_avg_innovations_per_window.append(np.mean(window_innovations))
+                if post_learning_db_losses:
+                    online_avg_db = np.mean(post_learning_db_losses)
+                    logger.info(f"SNR {snr}: Online model - last {len(post_learning_db_losses)} windows, avg dB loss = {online_avg_db:.2f}")
+            else:
+                # If less than 10 windows, use all available windows
+                post_learning_db_losses = []
+                for window_result in trajectory_results.window_results:
+                    if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'main_loss_db'):
+                        post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
+                
+                if post_learning_db_losses:
+                    online_avg_db = np.mean(post_learning_db_losses)
+                    logger.info(f"SNR {snr}: Online model - all {len(post_learning_db_losses)} windows, avg dB loss = {online_avg_db:.2f}")
+        
+        # Calculate average dB loss for pretrained model (using last 10 windows)
+        pretrained_avg_db = None
+        if pretrained_results and isinstance(pretrained_results, list) and len(pretrained_results) > 0:
+            # pretrained_results is a list of TrajectoryResults objects
+            pretrained_trajectory_results = pretrained_results[0]  # Get the first trajectory result
+            
+            # Use last 10 windows for averaging (same as online model for fair comparison)
+            total_windows = len(pretrained_trajectory_results.window_results)
+            if total_windows >= 10:
+                # Take last 10 windows
+                start_window = total_windows - 10
+                post_learning_db_losses = []
+                for window_result in pretrained_trajectory_results.window_results[start_window:]:
+                    if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'main_loss_db'):
+                        post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
+                
+                if post_learning_db_losses:
+                    pretrained_avg_db = np.mean(post_learning_db_losses)
+                    logger.info(f"SNR {snr}: Pretrained model - last {len(post_learning_db_losses)} windows, avg dB loss = {pretrained_avg_db:.2f}")
+            else:
+                # If less than 10 windows, use all available windows
+                post_learning_db_losses = []
+                for window_result in pretrained_trajectory_results.window_results:
+                    if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'main_loss_db'):
+                        post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
+                
+                if post_learning_db_losses:
+                    pretrained_avg_db = np.mean(post_learning_db_losses)
+                    logger.info(f"SNR {snr}: Pretrained model - all {len(post_learning_db_losses)} windows, avg dB loss = {pretrained_avg_db:.2f}")
+        
+        # Store results
+        online_avg_db_losses.append(online_avg_db if online_avg_db is not None else np.nan)
+        pretrained_avg_db_losses.append(pretrained_avg_db if pretrained_avg_db is not None else np.nan)
+        
+        logger.info(f"SNR {snr}: Online avg dB loss = {online_avg_db:.2f}, Pretrained avg dB loss = {pretrained_avg_db:.2f}")
+    
+    # Create the plot
+    plt.figure(figsize=(10, 6))
+    
+    # Plot both models
+    plt.plot(snr_values, online_avg_db_losses, 'o-', label='Online Learning Model', linewidth=2, markersize=8)
+    plt.plot(snr_values, pretrained_avg_db_losses, 's-', label='Pretrained Model', linewidth=2, markersize=8)
+    
+    # Customize the plot
+    plt.xlabel('SNR (dB)', fontsize=12)
+    plt.ylabel('Average Main Loss (dB)', fontsize=12)
+    plt.title('Average Main Loss vs SNR (Post-Learning)', fontsize=14, fontweight='bold')
+    plt.legend(fontsize=11)
+    plt.grid(True, alpha=0.3)
+    
+    # Set custom x-axis ticks with 5dB spacing
+    min_snr = min(snr_values)
+    max_snr = max(snr_values)
+    
+    # Create ticks with 5dB spacing, starting from the nearest 5dB value below min_snr
+    start_tick = int(min_snr // 5) * 5  # Round down to nearest 5
+    end_tick = int(max_snr // 5) * 5 + 5  # Round up to nearest 5
+    
+    # Generate ticks with 5dB spacing
+    x_ticks = list(range(start_tick, end_tick + 1, 5))
+    plt.xticks(x_ticks)
+    
+    # Set custom y-axis ticks with 5dB spacing
+    min_loss = min(min(online_avg_db_losses), min(pretrained_avg_db_losses))
+    max_loss = max(max(online_avg_db_losses), max(pretrained_avg_db_losses))
+    
+    # Create ticks with 5dB spacing for y-axis, starting from the nearest 5dB value below min_loss
+    start_y_tick = int(min_loss // 5) * 5  # Round down to nearest 5
+    end_y_tick = int(max_loss // 5) * 5 + 5  # Round up to nearest 5
+    
+    # Generate y-axis ticks with 5dB spacing
+    y_ticks = list(range(start_y_tick, end_y_tick + 1, 5))
+    plt.yticks(y_ticks)
+    
+    # Set axis limits with some padding
+    plt.xlim(min_snr - 2.5, max_snr + 2.5)
+    plt.ylim(min_loss - 2.5, max_loss + 2.5)
+    
+    # Add some styling
+    plt.tight_layout()
+    
+    # Save the plot
+    plot_path = output_dir / 'scenario_results_comparison.png'
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    logger.info(f"Scenario results plot saved to: {plot_path}") 
+
+def plot_online_learning_results_structured(output_dir, pretrained_trajectory_results, online_trajectory_results, main_loss_config, training_reference_loss_config, training_start_window=None, training_end_window=None, eta_change_windows=None):
+    """
+    Plot online learning results using structured data approach.
+    
+    Args:
+        output_dir: Output directory for saving plots
+        pretrained_trajectory_results: List of TrajectoryResults for pretrained model
+        online_trajectory_results: List of TrajectoryResults for online model
+        main_loss_config: Configuration string for main loss (e.g., "supervised_rmspe")
+        training_reference_loss_config: Configuration string for training reference loss (e.g., "multimoment")
+        training_start_window: Window index where training started (optional)
+        training_end_window: Window index where training ended (optional)
+        eta_change_windows: List of window indices where eta changed (optional)
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Extract data from structured results
+    def extract_loss_data(trajectory_results_list, loss_type):
+        """Extract loss data from trajectory results."""
+        all_losses = []
+        all_eta_values = []
+        all_window_indices = []
+        
+        for trajectory_results in trajectory_results_list:
+            for i, window_result in enumerate(trajectory_results.window_results):
+                if loss_type == "main":
+                    loss_value = window_result.loss_metrics.main_loss
+                elif loss_type == "training_reference":
+                    loss_value = window_result.loss_metrics.online_training_reference_loss
                 else:
-                    online_avg_innovations_per_window.append(0)
-            
-            online_avg_innovations_per_window = np.array(online_avg_innovations_per_window)
-            
-            # Window indices for online results
-            online_window_indices = np.arange(len(online_window_losses))
-            
-            # Calculate difference between static and online models
-            # We need to align the data properly - static model has full trajectory, online has subset
-            # For now, we'll calculate difference for the online windows only
-            static_losses_for_comparison = window_losses[online_window_indices]  # Get static losses for online windows
-            static_pre_ekf_for_comparison = pre_ekf_losses[online_window_indices]  # Get static pre-ekf for online windows
-            
-            # Calculate differences
-            loss_difference_static_vs_online = static_losses_for_comparison - online_window_losses  # Positive = online better
-            pre_ekf_difference_static_vs_online = static_pre_ekf_for_comparison - online_pre_ekf_losses  # Positive = online better
-            
-        else:
-            # Create figure with 2 subplots (original layout)
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-            ax3, ax4 = None, None
+                    continue
+                    
+                all_losses.append(loss_value)
+                all_eta_values.append(trajectory_results.window_eta_values[i])
+                all_window_indices.append(trajectory_results.window_indices[i])
         
-        # Window indices for static model results
-        window_indices = np.arange(len(window_losses))
-        
-        # Plot 1: Static model loss difference (Pre-EKF Loss - Post-EKF Loss)
-        ax1.plot(window_indices, loss_difference, 'g-', marker='o', linewidth=2, markersize=6, label='Static Model: Pre-EKF Loss - Post-EKF Loss')
-        ax1.axhline(y=0, color='black', linestyle='--', alpha=0.5, label='No Improvement Line')
-        
-        # Add eta change markers
-        for idx, eta in zip(eta_changes, eta_values):
-            ax1.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
-            ax1.text(idx, ax1.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
-        
-        # Add training end marker if available
-        if training_end_window is not None:
-            ax1.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
-            ax1.text(training_end_window, ax1.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
-                    color='purple', fontweight='bold', fontsize=10)
-        
-        # Add training start marker if available
-        if training_start_window is not None:
-            ax1.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
-            ax1.text(training_start_window, ax1.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
-                    color='orange', fontweight='bold', fontsize=10)
-        
-        ax1.set_xlabel('Window Index')
-        ax1.set_ylabel('Loss Difference')
-        ax1.set_title(f'Trajectory {trajectory_idx}: Static Model Loss Difference\n(Positive = EKF Improved, Negative = EKF Worse)')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        
-        # Plot 2: Static model innovation magnitude
-        ax2.plot(window_indices, avg_innovations_per_window, 'b-', marker='s', linewidth=2, markersize=6, label='Static Model: Average Innovation Magnitude')
-        
-        # Add eta change markers
-        for idx, eta in zip(eta_changes, eta_values):
-            ax2.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
-            ax2.text(idx, ax2.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
-        
-        # Add training end marker if available
-        if training_end_window is not None:
-            ax2.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
-            ax2.text(training_end_window, ax2.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
-                    color='purple', fontweight='bold', fontsize=10)
-        
-        # Add training start marker if available
-        if training_start_window is not None:
-            ax2.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
-            ax2.text(training_start_window, ax2.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
-                    color='orange', fontweight='bold', fontsize=10)
-        
-        ax2.set_xlabel('Window Index')
-        ax2.set_ylabel('Average Innovation Magnitude')
-        ax2.set_title(f'Trajectory {trajectory_idx}: Static Model Innovation Magnitude\n|Innovation| = |z_k - H x̂_k|k-1| = |measurement - prediction|')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        
-        # Add online learning plots if available
-        if has_online_results and ax3 is not None and ax4 is not None and ax5 is not None and ax6 is not None:
-            # Plot 3: Online model loss difference
-            ax3.plot(online_window_indices, online_loss_difference, 'purple', marker='d', linewidth=2, markersize=6, label='Online Model: Pre-EKF Loss - Post-EKF Loss')
-            ax3.axhline(y=0, color='black', linestyle='--', alpha=0.5, label='No Improvement Line')
-            
-            # Add eta change markers for online results
-            for idx, eta in zip(eta_changes, eta_values):
-                if idx < len(online_window_indices):
-                    ax3.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
-                    ax3.text(idx, ax3.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
-            
-            # Add training end marker if available
-            if training_end_window is not None and training_end_window < len(online_window_indices):
-                ax3.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
-                ax3.text(training_end_window, ax3.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
-                        color='purple', fontweight='bold', fontsize=10)
-            
-            # Add training start marker if available
-            if training_start_window is not None and training_start_window < len(online_window_indices):
-                ax3.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
-                ax3.text(training_start_window, ax3.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
-                        color='orange', fontweight='bold', fontsize=10)
-            
-            ax3.set_xlabel('Window Index')
-            ax3.set_ylabel('Loss Difference')
-            ax3.set_title(f'Trajectory {trajectory_idx}: Online Model Loss Difference\n(Positive = EKF Improved, Negative = EKF Worse)')
-            ax3.legend()
-            ax3.grid(True, alpha=0.3)
-            
-            # Plot 4: Online model innovation magnitude
-            ax4.plot(online_window_indices, online_avg_innovations_per_window, 'orange', marker='^', linewidth=2, markersize=6, label='Online Model: Average Innovation Magnitude')
-            
-            # Add eta change markers for online results
-            for idx, eta in zip(eta_changes, eta_values):
-                if idx < len(online_window_indices):
-                    ax4.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
-                    ax4.text(idx, ax4.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
-            
-            # Add training end marker if available
-            if training_end_window is not None and training_end_window < len(online_window_indices):
-                ax4.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
-                ax4.text(training_end_window, ax4.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
-                        color='purple', fontweight='bold', fontsize=10)
-            
-            # Add training start marker if available
-            if training_start_window is not None and training_start_window < len(online_window_indices):
-                ax4.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
-                ax4.text(training_start_window, ax4.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
-                        color='orange', fontweight='bold', fontsize=10)
-            
-            ax4.set_xlabel('Window Index')
-            ax4.set_ylabel('Average Innovation Magnitude')
-            ax4.set_title(f'Trajectory {trajectory_idx}: Online Model Innovation Magnitude\n|Innovation| = |z_k - H x̂_k|k-1| = |measurement - prediction|')
-            ax4.legend()
-            ax4.grid(True, alpha=0.3)
-            
-            # Plot 5: Static vs Online EKF Loss Difference
-            ax5.plot(online_window_indices, loss_difference_static_vs_online, 'red', marker='s', linewidth=2, markersize=6, label='Static - Online EKF Loss')
-            ax5.axhline(y=0, color='black', linestyle='--', alpha=0.5, label='No Difference Line')
-            
-            # Add eta change markers
-            for idx, eta in zip(eta_changes, eta_values):
-                if idx < len(online_window_indices):
-                    ax5.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
-                    ax5.text(idx, ax5.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
-            
-            # Add training end marker if available
-            if training_end_window is not None and training_end_window < len(online_window_indices):
-                ax5.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
-                ax5.text(training_end_window, ax5.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
-                        color='purple', fontweight='bold', fontsize=10)
-            
-            # Add training start marker if available
-            if training_start_window is not None and training_start_window < len(online_window_indices):
-                ax5.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
-                ax5.text(training_start_window, ax5.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
-                        color='orange', fontweight='bold', fontsize=10)
-            
-            ax5.set_xlabel('Window Index')
-            ax5.set_ylabel('Loss Difference')
-            ax5.set_title(f'Trajectory {trajectory_idx}: Static vs Online EKF Loss Difference\n(Positive = Online Better, Negative = Static Better)')
-            ax5.legend()
-            ax5.grid(True, alpha=0.3)
-            
-            # Plot 6: Static vs Online Pre-EKF Loss Difference
-            ax6.plot(online_window_indices, pre_ekf_difference_static_vs_online, 'brown', marker='*', linewidth=2, markersize=6, label='Static - Online Pre-EKF Loss')
-            ax6.axhline(y=0, color='black', linestyle='--', alpha=0.5, label='No Difference Line')
-            
-            # Add eta change markers
-            for idx, eta in zip(eta_changes, eta_values):
-                if idx < len(online_window_indices):
-                    ax6.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
-                    ax6.text(idx, ax6.get_ylim()[1], f'η={eta:.3f}', rotation=90, verticalalignment='top')
-            
-            # Add training end marker if available
-            if training_end_window is not None and training_end_window < len(online_window_indices):
-                ax6.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
-                ax6.text(training_end_window, ax6.get_ylim()[1], 'Training End', rotation=90, verticalalignment='top', 
-                        color='purple', fontweight='bold', fontsize=10)
-            
-            # Add training start marker if available
-            if training_start_window is not None and training_start_window < len(online_window_indices):
-                ax6.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
-                ax6.text(training_start_window, ax6.get_ylim()[1], 'Training Start', rotation=90, verticalalignment='top', 
-                        color='orange', fontweight='bold', fontsize=10)
-            
-            ax6.set_xlabel('Window Index')
-            ax6.set_ylabel('Loss Difference')
-            ax6.set_title(f'Trajectory {trajectory_idx}: Static vs Online Pre-EKF Loss Difference\n(Positive = Online Better, Negative = Static Better)')
-            ax6.legend()
-            ax6.grid(True, alpha=0.3)
-        
-        # Adjust layout and save
-        plt.tight_layout()
-        plot_filename = f"single_trajectory_{trajectory_idx}_{timestamp}.png"
-        if has_online_results:
-            plot_filename = f"single_trajectory_{trajectory_idx}_with_online_{timestamp}.png"
-        
-        plot_path = plot_dir / plot_filename
-        plt.savefig(plot_path)
-        plt.close()
-        
-        logger = logging.getLogger(__name__)
-        logger.info(f"Single trajectory plot saved: {plot_path}")
-        if has_online_results:
-            logger.info(f"Online learning results included in plot for trajectory {trajectory_idx}")
-        
-        return plot_path
-        
-    except ImportError:
-        logger = logging.getLogger(__name__)
-        logger.warning("matplotlib not available for single trajectory plotting")
-        return None
-    except Exception as e:
-        logger = logging.getLogger(__name__)
-        logger.error(f"Error plotting single trajectory results for trajectory {trajectory_idx}: {e}")
-        return None
+        return all_losses, all_eta_values, all_window_indices
+    
+    # Extract data for both models
+    pretrained_main_losses, pretrained_eta_values, pretrained_window_indices = extract_loss_data(pretrained_trajectory_results, "main")
+    online_main_losses, online_eta_values, online_window_indices = extract_loss_data(online_trajectory_results, "main")
+    
+    pretrained_training_losses, _, _ = extract_loss_data(pretrained_trajectory_results, "training_reference")
+    online_training_losses, _, _ = extract_loss_data(online_trajectory_results, "training_reference")
+    
+    # Plot 1: Main Loss Comparison
+    plt.figure(figsize=(12, 8))
+    
+    # Plot pretrained model main losses
+    plt.subplot(2, 1, 1)
+    plt.plot(pretrained_window_indices, pretrained_main_losses, 'b-', linewidth=2, label=f'Pretrained Model ({main_loss_config})', marker='o', markersize=4)
+    plt.plot(online_window_indices, online_main_losses, 'r-', linewidth=2, label=f'Online Model ({main_loss_config})', marker='s', markersize=4)
+    
+    # Add eta change markers to first subplot
+    if eta_change_windows:
+        for eta_window in eta_change_windows:
+            if eta_window >= 1:
+                plt.axvline(x=eta_window, color='red', linestyle='--', alpha=0.3, linewidth=1)
+                plt.text(eta_window, plt.ylim()[1] * 0.8, f'η Change', rotation=90, verticalalignment='top', 
+                        color='red', fontsize=8)
+    
+    # Add training markers to first subplot
+    if training_start_window is not None and training_start_window >= 1:
+        plt.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+        plt.text(training_start_window, plt.ylim()[1] * 0.9, 'Training Start', rotation=90, verticalalignment='top', 
+                color='orange', fontweight='bold', fontsize=10)
+    
+    if training_end_window is not None and training_end_window >= 1:
+        plt.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+        plt.text(training_end_window, plt.ylim()[1] * 0.9, 'Training End', rotation=90, verticalalignment='top', 
+                color='purple', fontweight='bold', fontsize=10)
+    
+    plt.xlabel('Window Index')
+    plt.ylabel('Main Loss')
+    plt.title(f'Main Loss Comparison: {main_loss_config.replace("_", " ").title()}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Plot 2: Training Reference Loss Comparison
+    plt.subplot(2, 1, 2)
+    plt.plot(pretrained_window_indices, pretrained_training_losses, 'b-', linewidth=2, label=f'Pretrained Model ({training_reference_loss_config})', marker='o', markersize=4)
+    plt.plot(online_window_indices, online_training_losses, 'r-', linewidth=2, label=f'Online Model ({training_reference_loss_config})', marker='s', markersize=4)
+    
+    # Add eta change markers to second subplot
+    if eta_change_windows:
+        for eta_window in eta_change_windows:
+            if eta_window >= 1:
+                plt.axvline(x=eta_window, color='red', linestyle='--', alpha=0.3, linewidth=1)
+                plt.text(eta_window, plt.ylim()[1] * 0.8, f'η Change', rotation=90, verticalalignment='top', 
+                        color='red', fontsize=8)
+    
+    # Add training markers to second subplot
+    if training_start_window is not None and training_start_window >= 1:
+        plt.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
+        plt.text(training_start_window, plt.ylim()[1] * 0.9, 'Training Start', rotation=90, verticalalignment='top', 
+                color='orange', fontweight='bold', fontsize=10)
+    
+    if training_end_window is not None and training_end_window >= 1:
+        plt.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
+        plt.text(training_end_window, plt.ylim()[1] * 0.9, 'Training End', rotation=90, verticalalignment='top', 
+                color='purple', fontweight='bold', fontsize=10)
+    
+    plt.xlabel('Window Index')
+    plt.ylabel('Training Reference Loss')
+    plt.title(f'Training Reference Loss Comparison: {training_reference_loss_config.replace("_", " ").title()}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    # Save the plot
+    plot_path = os.path.join(output_dir, 'online_learning_structured_comparison.png')
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Structured online learning comparison plot saved to: {plot_path}")
 
 
 def plot_online_learning_results(output_dir, window_losses, window_covariances, window_eta_values, window_updates, window_pre_ekf_losses, window_labels, ekf_covariances, ekf_kalman_gains=None, ekf_kalman_gain_times_innovation=None, ekf_y_s_inv_y=None, online_window_losses=None, online_window_covariances=None, online_pre_ekf_losses=None, online_ekf_innovations=None, online_ekf_kalman_gains=None, online_ekf_kalman_gain_times_innovation=None, online_ekf_y_s_inv_y=None, online_window_indices=None, training_window_losses=None, training_window_covariances=None, training_pre_ekf_losses=None, training_ekf_innovations=None, training_ekf_kalman_gains=None, training_ekf_kalman_gain_times_innovation=None, training_ekf_y_s_inv_y=None, training_window_indices=None, learning_start_window=None, window_delta_rmspe_losses=None, window_delta_rmape_losses=None, online_delta_rmspe_losses=None, online_delta_rmape_losses=None, training_delta_rmspe_losses=None, training_delta_rmape_losses=None, window_pre_ekf_angles_pred=None, online_pre_ekf_angles_pred=None, training_pre_ekf_angles_pred=None, window_ekf_predictions=None, online_ekf_predictions=None, training_ekf_predictions=None, window_avg_ekf_angle_pred=None, window_avg_pre_ekf_angle_pred=None, online_avg_ekf_angle_pred=None, online_avg_pre_ekf_angle_pred=None, training_avg_ekf_angle_pred=None, training_avg_pre_ekf_angle_pred=None):

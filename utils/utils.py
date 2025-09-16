@@ -6,8 +6,7 @@ from pathlib import Path
 
 
 def log_window_summary(
-    avg_pre_ekf_loss: float,
-    avg_loss: float,
+    loss_metrics,
     avg_window_cov: float,
     current_eta: float,
     is_near_field: bool,
@@ -18,54 +17,47 @@ def log_window_summary(
     Log window summary results in a columnar format similar to evaluation results.
     
     Args:
-        avg_pre_ekf_loss: Average pre-EKF loss for the window
-        avg_loss: Average EKF loss for the window
+        loss_metrics: LossMetrics object containing all loss information
         avg_window_cov: Average covariance for the window
         current_eta: Current eta value
         is_near_field: Whether this is near field scenario
         trajectory_idx: Index of the current trajectory
         window_idx: Index of the current window within the trajectory
     """
-    print(f"\n{'WINDOW SUMMARY - WINDOW ' + str(window_idx) + ' TRAJECTORY ' + str(trajectory_idx):^100}")
+    print(f"\n{'Online Mode; Vs Pretrained Model SUMMARY - WINDOW ' + str(window_idx) + ' TRAJECTORY ' + str(trajectory_idx):^100}")
     print("-"*100)
-    print(f"{'Metric':<20} {'Loss Value':<20} {'Loss (degrees)':<25} {'Additional Info':<30}")
+    print(f"{'Metric':<25} {'Loss Value':<20} {'Loss (degrees)':<25} {'Config':<15} {'Additional Info':<15}")
     print("-"*100)
     
     if not is_near_field:
         # Convert losses to degrees
-        pre_ekf_loss_degrees = avg_pre_ekf_loss * 180 / np.pi
-        ekf_loss_degrees = avg_loss * 180 / np.pi
-        loss_difference_degrees = ekf_loss_degrees - pre_ekf_loss_degrees  # Negative = EKF better
+        pre_ekf_loss_degrees = loss_metrics.pre_ekf_loss * 180 / np.pi
+        main_loss_degrees = loss_metrics.main_loss * 180 / np.pi
+        ekf_gain_rmspe_degrees = loss_metrics.ekf_gain_rmspe * 180 / np.pi
+        ekf_gain_rmape_degrees = loss_metrics.ekf_gain_rmape * 180 / np.pi
         
-        # Determine performance status
-        ekf_improved = loss_difference_degrees < 0
-        abs_difference = abs(loss_difference_degrees)
-        improvement_percent = abs_difference / pre_ekf_loss_degrees * 100
-        best_method = "EKF" if ekf_improved else "SubspaceNet"
-        best_loss_degrees = min(pre_ekf_loss_degrees, ekf_loss_degrees)
+        # Display all loss metrics
+        print(f"{'Supervised Loss':<25} {loss_metrics.main_loss:<20.6f} {main_loss_degrees:<25.6f} {loss_metrics.main_loss_config:<15} {f'w: {window_idx}':<15}")
+        print(f"{'Unsupervised loss':<25} {loss_metrics.online_training_reference_loss:<20.6f} {loss_metrics.online_training_reference_loss * 180 / np.pi:<25.6f} {loss_metrics.online_training_reference_loss_config:<15} {f't: {trajectory_idx}':<15}")
+        print(f"{'EKF Gain (RMSPE)':<25} {loss_metrics.ekf_gain_rmspe:<20.6f} {ekf_gain_rmspe_degrees:<25.6f} {'N/A':<15} {f'Cov: {avg_window_cov:.2e}':<15}")
+        print(f"{'EKF Gain (RMAPE)':<25} {loss_metrics.ekf_gain_rmape:<20.6f} {ekf_gain_rmape_degrees:<25.6f} {'N/A':<15} {'':<15}")
         
-        # Display individual losses
-        print(f"{'SubspaceNet Loss':<20} {avg_pre_ekf_loss:<20.6f} {pre_ekf_loss_degrees:<25.6f} {f'eta: {current_eta:.4f}, w: {window_idx}, t: {trajectory_idx}':<30}")
-        print(f"{'EKF Loss':<20} {avg_loss:<20.6f} {ekf_loss_degrees:<25.6f} {f'Avg Cov: {avg_window_cov:.2e}, w: {window_idx}, t: {trajectory_idx}':<30}")
-        
-        # Display comparison result
-        if ekf_improved:
+        # Display EKF improvement analysis
+        if ekf_gain_rmspe_degrees < 0:
+            improvement_text = f"EKF improves by {abs(ekf_gain_rmspe_degrees):.4f}°"
             status_icon = "✓"
-            status_text = "EKF OVERCOMES SubspaceNet"
-            change_text = f"↓ {abs_difference:.4f}° ({improvement_percent:.1f}% better)"
         else:
+            improvement_text = f"EKF degrades by {ekf_gain_rmspe_degrees:.4f}°"
             status_icon = "✗"
-            status_text = "SubspaceNet BETTER than EKF"
-            change_text = f"↑ {abs_difference:.4f}° ({improvement_percent:.1f}% worse)"
         
-        print(f"{'WINNER':<20} {best_method:<20} {best_loss_degrees:<25.6f} {status_icon + ' ' + status_text:<30}")
-        print(f"{'Performance':<20} {change_text:<45} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
+        print(f"{'EKF Performance':<25} {improvement_text:<45} {status_icon:<15} {'':<15}")
         print("-" * 100)
     else:
-        # Near field - only EKF loss (no SubspaceNet comparison available)
-        ekf_loss_degrees = avg_loss * 180 / np.pi
-        print(f"{'EKF Loss':<20} {avg_loss:<20.6f} {ekf_loss_degrees:<25.6f} {f'eta: {current_eta:.4f}, w: {window_idx}, t: {trajectory_idx}':<30}")
-        print(f"{'Mode':<20} {'NEAR FIELD':<20} {'(No SubspaceNet comparison)':<25} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
+        # Near field - display available metrics
+        main_loss_degrees = loss_metrics.main_loss * 180 / np.pi
+        print(f"{'Supervised Loss':<25} {loss_metrics.main_loss:<20.6f} {main_loss_degrees:<25.6f} {loss_metrics.main_loss_config:<15} {f'eta: {current_eta:.4f}':<15}")
+        print(f"{'Unsupervised Loss':<25} {loss_metrics.online_training_reference_loss:<20.6f} {loss_metrics.online_training_reference_loss * 180 / np.pi:<25.6f} {loss_metrics.online_training_reference_loss_config:<15} {f'w: {window_idx}':<15}")
+        print(f"{'Mode':<25} {'NEAR FIELD':<20} {'(No SubspaceNet comparison)':<25} {'N/A':<15} {f't: {trajectory_idx}':<15}")
         print("-" * 100)
 
 
@@ -142,7 +134,7 @@ def log_online_learning_window_summary(
         
         # Determine best method
         losses = [subspacenet_loss_degrees, ekf_loss_degrees, online_ekf_loss_degrees]
-        methods = ["SubspaceNet", "EKF (Trained)", "EKF (Online)"]
+        methods = ["SubspaceNet", "Pre-trained Model", "Online Model"]
         best_idx = losses.index(min(losses))
         best_method = methods[best_idx]
         best_loss_degrees = min(losses)
@@ -152,33 +144,33 @@ def log_online_learning_window_summary(
         online_vs_ekf = online_ekf_loss_degrees - ekf_loss_degrees
         
         # Display individual losses
-        print(f"{'SubspaceNet Loss':<20} {subspacenet_loss:<20.6f} {subspacenet_loss_degrees:<25.6f} {f'eta: {current_eta:.4f}, w: {window_idx}, t: {trajectory_idx}':<30}")
-        print(f"{'EKF Loss (Trained)':<20} {ekf_loss:<20.6f} {ekf_loss_degrees:<25.6f} {f'w: {window_idx}, t: {trajectory_idx}':<30}")
+        #print(f"{'SubspaceNet Loss':<20} {subspacenet_loss:<20.6f} {subspacenet_loss_degrees:<25.6f} {f'eta: {current_eta:.4f}, w: {window_idx}, t: {trajectory_idx}':<30}")
+        print(f"{'pre-trained Model Supervised Loss ':<20} {ekf_loss:<20.6f} {ekf_loss_degrees:<25.6f} {f'w: {window_idx}, t: {trajectory_idx}':<30}")
         
         # Display online learning status
         if is_learning:
             status_text = "LEARNING PHASE"
-            print(f"{'EKF Loss (Online)':<20} {online_ekf_loss:<20.6f} {online_ekf_loss_degrees:<25.6f} {f'{status_text}, w: {window_idx}, t: {trajectory_idx}':<30}")
+            print(f"{'Online Model Supervised Loss':<20} {online_ekf_loss:<20.6f} {online_ekf_loss_degrees:<25.6f} {f'{status_text}, w: {window_idx}, t: {trajectory_idx}':<30}")
         else:
             status_text = "POST-LEARNING"
-            print(f"{'EKF Loss (Online)':<20} {online_ekf_loss:<20.6f} {online_ekf_loss_degrees:<25.6f} {f'{status_text}, w: {window_idx}, t: {trajectory_idx}':<30}")
+            print(f"{'Online Model Supervised Loss':<20} {online_ekf_loss:<20.6f} {online_ekf_loss_degrees:<25.6f} {f'{status_text}, w: {window_idx}, t: {trajectory_idx}':<30}")
         
         # Display comparison results
         print(f"{'WINNER':<20} {best_method:<20} {best_loss_degrees:<25.6f} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
         
         # Show online vs others comparison
         if online_vs_subspacenet < 0:
-            online_vs_subspacenet_text = f"Online better than SubspaceNet by {abs(online_vs_subspacenet):.4f}°"
+            online_vs_subspacenet_text = f"Online Model better than SubspaceNet by {abs(online_vs_subspacenet):.4f}°"
         else:
-            online_vs_subspacenet_text = f"Online worse than SubspaceNet by {online_vs_subspacenet:.4f}°"
+            online_vs_subspacenet_text = f"Online Model worse than SubspaceNet by {online_vs_subspacenet:.4f}°"
             
         if online_vs_ekf < 0:
-            online_vs_ekf_text = f"Online better than EKF by {abs(online_vs_ekf):.4f}°"
+            online_vs_ekf_text = f"Online better than Pretrained by {abs(online_vs_ekf):.4f}°"
         else:
-            online_vs_ekf_text = f"Online worse than EKF by {online_vs_ekf:.4f}°"
+            online_vs_ekf_text = f"Online worse than Pretrained by {online_vs_ekf:.4f}°"
         
-        print(f"{'Online vs SubspaceNet':<20} {online_vs_subspacenet_text:<45} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
-        print(f"{'Online vs EKF (Trained)':<20} {online_vs_ekf_text:<45} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
+        print(f"{'Online Model vs SubspaceNet':<20} {online_vs_subspacenet_text:<45} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
+        print(f"{'Online Model vs Pretrained':<20} {online_vs_ekf_text:<45} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
         print("-" * 100)
     else:
         # Near field - only EKF losses (no SubspaceNet comparison available)
@@ -187,24 +179,24 @@ def log_online_learning_window_summary(
         
         # Determine best method for near field
         if online_ekf_loss_degrees < ekf_loss_degrees:
-            best_method = "EKF (Online)"
+            best_method = "Online Model"
             best_loss_degrees = online_ekf_loss_degrees
             improvement = ekf_loss_degrees - online_ekf_loss_degrees
             status_text = f"Online better by {improvement:.4f}°"
         else:
-            best_method = "EKF (Trained)"
+            best_method = "Pretrained Model"
             best_loss_degrees = ekf_loss_degrees
             degradation = online_ekf_loss_degrees - ekf_loss_degrees
-            status_text = f"Online worse by {degradation:.4f}°"
+            status_text = f"Online Model worse by {degradation:.4f}°"
         
-        print(f"{'EKF Loss (Trained)':<20} {ekf_loss:<20.6f} {ekf_loss_degrees:<25.6f} {f'eta: {current_eta:.4f}, w: {window_idx}, t: {trajectory_idx}':<30}")
+        print(f"{'Pretrained model':<20} {ekf_loss:<20.6f} {ekf_loss_degrees:<25.6f} {f'eta: {current_eta:.4f}, w: {window_idx}, t: {trajectory_idx}':<30}")
         
         if is_learning:
             status_text_full = "LEARNING PHASE"
         else:
             status_text_full = "POST-LEARNING"
             
-        print(f"{'EKF Loss (Online)':<20} {online_ekf_loss:<20.6f} {online_ekf_loss_degrees:<25.6f} {f'{status_text_full}, w: {window_idx}, t: {trajectory_idx}':<30}")
+        print(f"{'Online Model':<20} {online_ekf_loss:<20.6f} {online_ekf_loss_degrees:<25.6f} {f'{status_text_full}, w: {window_idx}, t: {trajectory_idx}':<30}")
         print(f"{'WINNER':<20} {best_method:<20} {best_loss_degrees:<25.6f} {status_text + ', w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
         print(f"{'Mode':<20} {'NEAR FIELD':<20} {'(No SubspaceNet comparison)':<25} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
         print("-" * 100)
