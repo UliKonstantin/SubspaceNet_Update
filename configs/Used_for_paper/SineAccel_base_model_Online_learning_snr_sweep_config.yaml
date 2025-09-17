@@ -5,7 +5,7 @@
 system_model:
   N: 9  # number of antennas
   M: 3   # number of sources
-  T: 20  # number of snapshots
+  T: 200  # number of snapshots
   snr: 10  # signal-to-noise ratio in dB
   field_type: "far"  # "near" or "far"
   signal_nature: "non-coherent"  # "non-coherent" or "coherent"
@@ -96,14 +96,14 @@ kalman_filter:
 scenario_config:
   type: "snr"
   #values: [-5,-4,-3,-2,-1,0]
-  values: [10] #[0,1,2,3,4,5,6,7,8,9,10] #[-5,-4,-3,-2,-1,0,1,2,3,4,5,6,7,8,9,10]
+  values: [0] #[0,1,2,3,4,5,6,7,8,9,10] #[-5,-4,-3,-2,-1,0,1,2,3,4,5,6,7,8,9,10]
   model_paths: [
     #"experiments/results/base_model_random_data_snr_-5_SubspaceNet_esprit_N9_M3_SNR-5.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250908_133942.pt",
     #"experiments/results/base_model_random_data_snr_-4_SubspaceNet_esprit_N9_M3_SNR-4.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_161440.pt", 
     #"experiments/results/base_model_random_data_snr_-3_SubspaceNet_esprit_N9_M3_SNR-3.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_163716.pt",
     #"experiments/results/base_model_random_data_snr_-2_SubspaceNet_esprit_N9_M3_SNR-2.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_171354.pt",
     #"experiments/results/base_model_random_data_snr_-1_SubspaceNet_esprit_N9_M3_SNR-1.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_190908.pt",
-    #"experiments/results/base_model_random_data_snr_0_SubspaceNet_esprit_N9_M3_SNR0.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_162434.pt",
+    "experiments/results/base_model_random_data_snr_0_SubspaceNet_esprit_N9_M3_SNR0.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_162434.pt",
     #"experiments/results/base_model_random_data_snr_1_SubspaceNet_esprit_N9_M3_SNR1.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_160710.pt",
     #"experiments/results/base_model_random_data_snr_2_SubspaceNet_esprit_N9_M3_SNR2.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_154905.pt",
     #"experiments/results/base_model_random_data_snr_3_SubspaceNet_esprit_N9_M3_SNR3.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_164715.pt",
@@ -113,7 +113,7 @@ scenario_config:
     #"experiments/results/base_model_random_data_snr_7_SubspaceNet_esprit_N9_M3_SNR7.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_101356.pt",
     #"experiments/results/base_model_random_data_snr_8_SubspaceNet_esprit_N9_M3_SNR8.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_095517.pt",
     #"experiments/results/base_model_random_data_snr_9_SubspaceNet_esprit_N9_M3_SNR9.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_093636.pt",
-    "experiments/results/base_model_random_data_snr_10_SubspaceNet_esprit_N9_M3_SNR10.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_084930.pt"
+    #"experiments/results/base_model_random_data_snr_10_SubspaceNet_esprit_N9_M3_SNR10.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_084930.pt"
   ]
   # Model paths for each SNR value (must match values order)
   #model_paths: [
@@ -136,13 +136,13 @@ online_learning:
   max_iterations: 10  # Maximum iterations for online training
   learning_rate: 0.001  # Learning rate for online training (smaller than main training)
   trajectory_length: 300  # Length of trajectory specifically for online learning
-  dataset_size: 10
+  dataset_size: 100
     # Number of trajectories for online learning
   
   # Dynamic Eta Update Parameters
   eta_update_interval_windows: 20  # Update eta every N windows. If null or 0, eta is not periodically updated
-  eta_increment: 0.31  # Amount to increment (if positive) or decrement (if negative) eta by when an update occurs
-  max_eta: 0.31  # Maximum allowed value for eta during dynamic updates
+  eta_increment: 1.5  # Amount to increment (if positive) or decrement (if negative) eta by when an update occurs
+  max_eta: 1.5  # Maximum allowed value for eta during dynamic updates
   min_eta: 0.0  # Minimum allowed value for eta during dynamic updates
   
   # Calibration error control
@@ -153,6 +153,7 @@ online_learning:
     metric: "rmspe"  # Loss metric to use: 'rmspe' or 'rmape'
     supervision: "supervised"  # Supervision mode: 'supervised' (compare with ground truth) or 'unsupervised' (compare with pre-EKF predictions)
     training_loss_type: "unsupervised_rmspe"  # Training loss type: 'configured' (use metric+supervision),unsupervised_rmspe, unsupervised_rmape, supervised_rmspe, supervised_rmape,multimoment, 'kalman_innovation' (use K*innovation loss), or 'y_s_inv_y' (use y*S^-1*y loss), 
+    supervised_loss_type: "supervised_rmspe"  # Supervised training loss type: same options as training_loss_type
     #multimoment_alpha: 1      # Custom alpha (default: 1.0)
     #multimoment_beta: 0       # Custom beta (default: 1.0)  
     #multimoment_regularization_term: 0  # Custom regularization (default: 1.0)    

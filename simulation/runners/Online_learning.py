@@ -417,7 +417,8 @@ class OnlineLearning:
                     training_reference_loss_config,
                     training_start_window,
                     training_end_window,
-                    eta_change_windows
+                    eta_change_windows,
+                    averaged_data.get("averaged_supervised_trajectory")
                 )
             
             # Calculate summary statistics from structured results
@@ -578,6 +579,26 @@ class OnlineLearning:
                     logger.error(f"All model copying methods failed: {e2}")
                     raise RuntimeError(f"Failed to create online model copy. Factory function failed: {e}, Deepcopy failed: {e2}. Cannot proceed with online learning.")
             
+            # Create supervised trained model as copy of trained model (same approach as online model)
+            try:
+                # Method 1: Use the same factory function to ensure identical architecture
+                self.supervised_trained_model = create_model(self.config, self.system_model)
+                self.supervised_trained_model.load_state_dict(self.trained_model.state_dict())
+                self.supervised_trained_model.train()  # Set to training mode for supervised learning
+                logger.info("Initialized supervised trained model as copy of trained model using factory function")
+            except Exception as e:
+                logger.warning(f"Factory function copy failed for supervised model ({e}), trying clone approach")
+                try:
+                    # Method 2: Use torch.clone() for parameters
+                    self.supervised_trained_model = deepcopy(self.trained_model.cpu())
+                    if torch.cuda.is_available() and next(self.trained_model.parameters()).is_cuda:
+                        self.supervised_trained_model = self.supervised_trained_model.cuda()
+                    self.supervised_trained_model.train()  # Set to training mode for supervised learning
+                    logger.info("Initialized supervised trained model using CPU deepcopy then moved to GPU")
+                except Exception as e2:
+                    logger.error(f"All supervised model copying methods failed: {e2}")
+                    raise RuntimeError(f"Failed to create supervised trained model copy. Factory function failed: {e}, Deepcopy failed: {e2}. Cannot proceed with supervised learning.")
+            
             # Reset dual model state for new trajectory
             self.drift_detected = False
             self.learning_done = False
@@ -586,6 +607,9 @@ class OnlineLearning:
             # Reset online optimizer to start fresh for new trajectory
             if hasattr(self, 'online_optimizer'):
                 delattr(self, 'online_optimizer')
+            # Reset supervised optimizer to start fresh for new trajectory
+            if hasattr(self, 'supervised_optimizer'):
+                delattr(self, 'supervised_optimizer')
             logger.info("Reset dual model state for new trajectory")
             
             # Get online learning parameters
@@ -646,9 +670,16 @@ class OnlineLearning:
             # Initialize online model results structure
             online_trajectory_results = TrajectoryResults()
             
+            # Initialize supervised model results structure
+            supervised_trajectory_results = TrajectoryResults()
+            
             # EKF state tracking for online learning
             online_last_ekf_predictions = None
             online_last_ekf_covariances = None
+            
+            # EKF state tracking for supervised learning
+            supervised_last_ekf_predictions = None
+            supervised_last_ekf_covariances = None
             
             # Track training and eta change events
             eta_change_windows = []  # List of window indices where eta changed
@@ -788,6 +819,29 @@ class OnlineLearning:
                             is_learning=False
                         )
                         
+                        # Evaluate supervised trained model (post-training)
+                        logger.info(f"Evaluating supervised trained model (post-training) for window {window_idx}")
+                        supervised_window_result = self._evaluate_window(
+                            time_series_single_window, 
+                            sources_num_single_window_list, 
+                            labels_single_window_list_of_arrays,
+                            trajectory_idx,
+                            window_idx,
+                            is_first_window=(window_idx == 0),
+                            last_ekf_predictions=supervised_last_ekf_predictions,
+                            last_ekf_covariances=supervised_last_ekf_covariances,
+                            model=self.supervised_trained_model
+                        )
+                        
+                        # Add supervised model result to trajectory results
+                        supervised_trajectory_results.add_window_result(window_idx, supervised_window_result, self.system_model.params.eta, labels_single_window_list_of_arrays)
+                        
+                        logger.info(f"Supervised trained model - Window {window_idx}: Main Loss = {supervised_window_result.loss_metrics.main_loss:.6f} ({supervised_window_result.loss_metrics.main_loss_config}), Cov = {supervised_window_result.window_metrics.avg_covariance:.6f}")
+                        
+                        # Update supervised EKF state for next window
+                        supervised_last_ekf_predictions = supervised_window_result.doa_metrics.ekf_predictions
+                        supervised_last_ekf_covariances = supervised_window_result.step_metrics.covariances
+                        
                         # Update online EKF state for next window
                         # online_window_result.doa_metrics.ekf_predictions is already in tensor format
                         online_last_ekf_predictions = online_window_result.doa_metrics.ekf_predictions
@@ -839,6 +893,37 @@ class OnlineLearning:
                         # training_result.doa_metrics.ekf_predictions is already in tensor format
                         online_last_ekf_predictions = training_result.doa_metrics.ekf_predictions
                         online_last_ekf_covariances = training_result.step_metrics.covariances
+                        
+                        # Train supervised model with supervised loss configuration
+                        logger.info(f"Training supervised trained model for window {window_idx}")
+                        
+                        # Create supervised loss config object
+                        from copy import deepcopy
+                        supervised_loss_config = deepcopy(self.config.online_learning.loss_config)
+                        # Override the training_loss_type with supervised_loss_type
+                        supervised_loss_config.training_loss_type = self.config.online_learning.loss_config.supervised_loss_type
+                        
+                        supervised_training_result = self._online_training_window(
+                            time_series_single_window, 
+                            sources_num_single_window_list, 
+                            labels_single_window_list_of_arrays,
+                            trajectory_idx,
+                            window_idx,
+                            is_first_window=(window_idx == 0),
+                            last_ekf_predictions=supervised_last_ekf_predictions,
+                            last_ekf_covariances=supervised_last_ekf_covariances,
+                            model=self.supervised_trained_model,
+                            loss_config_override=supervised_loss_config
+                        )
+                        
+                        # Add supervised training result to supervised trajectory results
+                        supervised_trajectory_results.add_window_result(window_idx, supervised_training_result, self.system_model.params.eta, labels_single_window_list_of_arrays)
+                        
+                        logger.info(f"Supervised training - Window {window_idx}: Main Loss = {supervised_training_result.loss_metrics.main_loss:.6f} ({supervised_training_result.loss_metrics.main_loss_config}), Cov = {supervised_training_result.window_metrics.avg_covariance:.6f}, Pre-EKF Loss = {supervised_training_result.loss_metrics.pre_ekf_loss:.6f}")
+                        
+                        # Update supervised EKF state for next window
+                        supervised_last_ekf_predictions = supervised_training_result.doa_metrics.ekf_predictions
+                        supervised_last_ekf_covariances = supervised_training_result.step_metrics.covariances
             
             # Save final model if it was updated
             if model_updated_count > 0:
@@ -856,6 +941,7 @@ class OnlineLearning:
                     # Model results
                     "pretrained_model_trajectory_results": trajectory_results,
                     "online_model_trajectory_results": online_trajectory_results,
+                    "supervised_model_trajectory_results": supervised_trajectory_results,
                     
                     # Learning metadata
                     "window_updates": window_update_flags,
@@ -886,12 +972,16 @@ class OnlineLearning:
 
     def _online_training_window(self, window_time_series, window_sources_num, window_labels, trajectory_idx: int = 0, window_idx: int = 0, 
                                is_first_window: bool = True, last_ekf_predictions: Optional[torch.Tensor] = None, 
-                               last_ekf_covariances: Optional[torch.Tensor] = None) -> WindowEvaluationResult:
+                               last_ekf_covariances: Optional[torch.Tensor] = None, model=None, loss_config_override=None) -> WindowEvaluationResult:
         """
-        Train the online model on a single window, then evaluate it like _evaluate_window.
+        Train the provided model on a single window, then evaluate it like _evaluate_window.
         
         This function performs the same evaluation as _evaluate_window but adds a training step
         after the model forward pass and before the Kalman filter processing.
+        
+        Args:
+            model: Model to train (defaults to self.online_model if None)
+            loss_config_override: Optional loss configuration override (defaults to online loss config if None)
         
         Args:
             window_time_series: Time series data for window
@@ -932,8 +1022,11 @@ class OnlineLearning:
             logger.error(error_message)
             return WindowEvaluationResult.create_error_result(error_message)
         
+        # Use provided model or default to online_model
+        training_model = model if model is not None else self.online_model
+        
         # Check if we're dealing with far-field or near-field
-        is_near_field = hasattr(self.online_model, 'field_type') and self.online_model.field_type.lower() == "near"
+        is_near_field = hasattr(training_model, 'field_type') and training_model.field_type.lower() == "near"
         
         # Use RMSPE loss for evaluation
         rmspe_criterion = RMSPELoss().to(device)
@@ -941,9 +1034,20 @@ class OnlineLearning:
         # Use RMAPE loss for online training
         rmape_criterion = RMAPELoss().to(device)
         
-        # Set up optimizer for online training
-        if not hasattr(self, 'online_optimizer'):
-            self.online_optimizer = optim.Adam(self.online_model.parameters(), lr=1e-3)
+        # Set up optimizer for training
+        if training_model is self.online_model:
+            # Use online optimizer for online model
+            if not hasattr(self, 'online_optimizer'):
+                self.online_optimizer = optim.Adam(self.online_model.parameters(), lr=1e-3)
+            optimizer = self.online_optimizer
+        elif training_model is self.supervised_trained_model:
+            # Use supervised optimizer for supervised model
+            if not hasattr(self, 'supervised_optimizer'):
+                self.supervised_optimizer = optim.Adam(self.supervised_trained_model.parameters(), lr=1e-3)
+            optimizer = self.supervised_optimizer
+        else:
+            # Fallback: create a temporary optimizer
+            optimizer = optim.Adam(training_model.parameters(), lr=1e-3)
         
         # Initialize Extended Kalman Filters
         max_sources = self.config.system_model.M
@@ -954,20 +1058,24 @@ class OnlineLearning:
         logger.info(f"Online training: Initialized {max_sources} EKF instances for window (eta={current_eta:.4f})")
         
         # Training phase: Run gradient descent steps per window
-        self.online_model.train()  # Set to training mode
+        training_model.train()  # Set to training mode
         total_training_loss = 0.0
         num_training_steps = 0
         
         # Number of gradient descent steps per window
         num_gd_steps = 5
         
-        # Get loss configuration for online learning
-        loss_config = getattr(self.config.online_learning, 'loss_config', None)
+        # Get loss configuration for training (use override if provided)
+        base_loss_config = getattr(self.config.online_learning, 'loss_config', None)
+        if loss_config_override is not None:
+            loss_config = loss_config_override
+        else:
+            loss_config = base_loss_config
         windows_last_ekf_covariances = last_ekf_covariances
         windows_last_ekf_predictions = last_ekf_predictions
         for gd_step in range(num_gd_steps):
             # Zero gradients at the start of each GD step
-            self.online_optimizer.zero_grad()
+            optimizer.zero_grad()
             
             # Collect step results for window-level loss calculation
             # Each GD iteration processes the entire window and calculates window-level loss
@@ -993,8 +1101,8 @@ class OnlineLearning:
                     true_angles_this_step = labels_per_step_list[step][:num_sources_this_step]
                     
                     if not is_near_field:
-                        # Forward pass through online model (with gradients for training)
-                        angles_pred, _, _ = self.online_model(step_data_tensor, num_sources_this_step)
+                        # Forward pass through training model (with gradients for training)
+                        angles_pred, _, _ = training_model(step_data_tensor, num_sources_this_step)
                         
                         # Convert predictions and true angles to proper format
                         # Ensure angles_pred_tensor has shape [1, num_sources] for loss functions
@@ -1081,7 +1189,12 @@ class OnlineLearning:
                                 if not y_s_inv_y.requires_grad:
                                     raise RuntimeError(f"EKF y_s_inv_y tensor does not require gradients. This breaks the computation graph.")
                                 
-                                ekf_angles_pred.append(updated_state)
+                                # Ensure updated_state is a scalar tensor for consistent stacking
+                                if updated_state.dim() > 0:
+                                    updated_state_scalar = updated_state.flatten()[0]  # Take first element if multi-dimensional
+                                else:
+                                    updated_state_scalar = updated_state
+                                ekf_angles_pred.append(updated_state_scalar)
                                 ekf_covariances_pred.append(ekf_filter.P)
                                 kalman_gain_times_innovation_list.append(kalman_gain_times_innovation)
                                 y_s_inv_y_list.append(y_s_inv_y)
@@ -1097,8 +1210,9 @@ class OnlineLearning:
                         # Create EKF predictions tensor
                         # Ensure ekf_angles_pred_tensor has shape [1, num_sources] for loss functions
                         ekf_angles_pred_tensor = torch.stack(ekf_angles_pred).unsqueeze(0)  # Shape: [1, num_sources]
-                        ekf_covariances_tensor = torch.stack(ekf_covariances_pred).unsqueeze(0)  # Shape: [1, num_sources]
-                        step_Innovation_Covariance_tensor = torch.stack(step_Innovation_Covariance_list).unsqueeze(0)  # Shape: [1, num_sources]
+                        logger.debug(f"EKF predictions tensor shape: {ekf_angles_pred_tensor.shape} (expected [1, {num_sources_this_step}])")
+                        ekf_covariances_tensor = torch.stack(ekf_covariances_pred).view(1, -1)  # Shape: [1, num_sources]
+                        step_Innovation_Covariance_tensor = torch.stack(step_Innovation_Covariance_list).view(1, -1)  # Shape: [1, num_sources]
                         last_ekf_predictions = ekf_angles_pred_tensor
                         last_ekf_covariances = ekf_covariances_tensor
                         # Store step results for window-level loss calculation
@@ -1137,12 +1251,12 @@ class OnlineLearning:
                 window_loss.backward()
                 
                 # Check if gradients were computed properly
-                gradients_ok = self._check_gradients(self.online_model, step_count, gd_step)
+                gradients_ok = self._check_gradients(training_model, step_count, gd_step)
                 
                 # Update model parameters
-                self.online_optimizer.step()
+                optimizer.step()
                 # Zero gradients after optimizer step to prepare for next GD iteration
-                self.online_optimizer.zero_grad()
+                optimizer.zero_grad()
                 
                 total_training_loss += window_loss.item()
                 num_training_steps += 1  # Count each GD step, not each individual step
@@ -1160,7 +1274,7 @@ class OnlineLearning:
             logger.warning(f"No valid training steps in window {window_idx}")
         
         # Set model back to eval mode for EKF evaluation
-        self.online_model.eval()
+        training_model.eval()
         
         # Clean up training EKF filters to free memory
         if hasattr(self, 'training_ekf_filters'):
@@ -1183,13 +1297,16 @@ class OnlineLearning:
             # Process single step
             success, step_result = self._process_single_step(
                 step, time_series_steps, sources_num_per_step, labels_per_step_list,
-                ekf_filters, self.online_model, is_near_field, False
+                ekf_filters, training_model, is_near_field, False
             )
             
             step_results_list.append(step_result)
         
+        # Use loss config override if provided, otherwise use default
+        effective_loss_config = loss_config_override if loss_config_override is not None else loss_config
+        
         # Calculate aggregated metrics using the same helper method
-        result = self._calculate_metrics(step_results_list, current_window_len, max_sources, current_eta, is_near_field, loss_config)
+        result = self._calculate_metrics(step_results_list, current_window_len, max_sources, current_eta, is_near_field, effective_loss_config)
         
         # Log window summary
         if result.is_valid:

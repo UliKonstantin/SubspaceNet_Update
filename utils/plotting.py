@@ -937,6 +937,7 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
     # Initialize lists to store average dB losses
     online_avg_db_losses = []
     pretrained_avg_db_losses = []
+    supervised_avg_db_losses = []
     
     for snr in snr_values:
         if snr not in scenario_results:
@@ -948,6 +949,7 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
         # Extract averaged results (use the already calculated averages)
         online_avg_db = None
         pretrained_avg_db = None
+        supervised_avg_db = None
         
         # First, try to get the averaged results if available
         if 'averaged_results' in result:
@@ -972,10 +974,20 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
                     num_windows_to_use = min(10, len(pretrained_db_losses))
                     pretrained_avg_db = np.mean(pretrained_db_losses[-num_windows_to_use:])
                     logger.info(f"SNR {snr}: Pretrained model - averaged from last {num_windows_to_use} windows, avg dB loss = {pretrained_avg_db:.2f}")
+            
+            # Get averaged supervised model dB losses (use last 10 windows for consistency)
+            if 'averaged_supervised_trajectory' in averaged_data:
+                supervised_metrics = averaged_data['averaged_supervised_trajectory']
+                supervised_db_losses = supervised_metrics.get('main_losses_db', [])
+                if supervised_db_losses:
+                    # Use last 10 windows or all if fewer than 10
+                    num_windows_to_use = min(10, len(supervised_db_losses))
+                    supervised_avg_db = np.mean(supervised_db_losses[-num_windows_to_use:])
+                    logger.info(f"SNR {snr}: Supervised trained model - averaged from last {num_windows_to_use} windows, avg dB loss = {supervised_avg_db:.2f}")
         
         # Fallback to individual trajectory results if averaged results not available
-        if online_avg_db is None or pretrained_avg_db is None:
-            logger.warning(f"SNR {snr}: Averaged results not available, falling back to individual trajectory extraction")
+        if online_avg_db is None or pretrained_avg_db is None or supervised_avg_db is None:
+            logger.warning(f"SNR {snr}: Some averaged results not available, falling back to individual trajectory extraction")
             
             if 'online_learning_results' in result:
                 online_learning_data = result['online_learning_results']
@@ -1011,19 +1023,40 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
                         if post_learning_db_losses:
                             pretrained_avg_db = np.mean(post_learning_db_losses)
                             logger.info(f"SNR {snr}: Pretrained model (fallback) - last {len(post_learning_db_losses)} windows, avg dB loss = {pretrained_avg_db:.2f}")
+                
+                # Get supervised model trajectory results (fallback)
+                if supervised_avg_db is None and 'supervised_model_trajectory_results' in online_learning_data:
+                    supervised_results = online_learning_data['supervised_model_trajectory_results']
+                    if supervised_results and isinstance(supervised_results, list) and len(supervised_results) > 0:
+                        supervised_trajectory_results = supervised_results[0]  # Get the first trajectory result
+                        total_windows = len(supervised_trajectory_results.window_results)
+                        num_windows_to_use = min(10, total_windows)
+                        start_window = max(0, total_windows - num_windows_to_use)
+                        post_learning_db_losses = []
+                        for window_result in supervised_trajectory_results.window_results[start_window:]:
+                            if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'main_loss_db'):
+                                post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
+                        if post_learning_db_losses:
+                            supervised_avg_db = np.mean(post_learning_db_losses)
+                            logger.info(f"SNR {snr}: Supervised trained model (fallback) - last {len(post_learning_db_losses)} windows, avg dB loss = {supervised_avg_db:.2f}")
         
         # Store results
         online_avg_db_losses.append(online_avg_db if online_avg_db is not None else np.nan)
         pretrained_avg_db_losses.append(pretrained_avg_db if pretrained_avg_db is not None else np.nan)
+        supervised_avg_db_losses.append(supervised_avg_db if supervised_avg_db is not None else np.nan)
         
-        logger.info(f"SNR {snr}: Online avg dB loss = {online_avg_db:.2f}, Pretrained avg dB loss = {pretrained_avg_db:.2f}")
+        logger.info(f"SNR {snr}: Online avg dB loss = {online_avg_db:.2f}, Pretrained avg dB loss = {pretrained_avg_db:.2f}, Supervised avg dB loss = {supervised_avg_db:.2f}" if supervised_avg_db is not None else f"SNR {snr}: Online avg dB loss = {online_avg_db:.2f}, Pretrained avg dB loss = {pretrained_avg_db:.2f}")
     
     # Create the plot
     plt.figure(figsize=(10, 6))
     
-    # Plot both models
+    # Plot all three models
     plt.plot(snr_values, online_avg_db_losses, 'o-', label='Algorithm 1', linewidth=2, markersize=8)
     plt.plot(snr_values, pretrained_avg_db_losses, 's-', label='Pretrained Model', linewidth=2, markersize=8)
+    
+    # Add supervised model if data is available
+    if any(not np.isnan(loss) for loss in supervised_avg_db_losses):
+        plt.plot(snr_values, supervised_avg_db_losses, '^-', label='Supervised Trained Model', linewidth=2, markersize=8)
     
     # Customize the plot
     plt.xlabel('SNR (dB)', fontsize=20)
@@ -1045,8 +1078,14 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
     plt.xticks(x_ticks, fontsize=18)
     
     # Set custom y-axis ticks with 5dB spacing
-    min_loss = min(min(online_avg_db_losses), min(pretrained_avg_db_losses))
-    max_loss = max(max(online_avg_db_losses), max(pretrained_avg_db_losses))
+    all_losses = online_avg_db_losses + pretrained_avg_db_losses
+    if any(not np.isnan(loss) for loss in supervised_avg_db_losses):
+        all_losses += supervised_avg_db_losses
+    
+    # Filter out NaN values for min/max calculation
+    valid_losses = [loss for loss in all_losses if not np.isnan(loss)]
+    min_loss = min(valid_losses) if valid_losses else -30
+    max_loss = max(valid_losses) if valid_losses else 0
     
     # Create ticks with 5dB spacing for y-axis, starting from the nearest 5dB value below min_loss
     start_y_tick = int(min_loss // 5) * 5  # Round down to nearest 5
@@ -1195,7 +1234,7 @@ def plot_online_learning_results_structured(output_dir, pretrained_trajectory_re
     print(f"Structured online learning comparison plot saved to: {plot_path}")
 
 
-def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metrics, averaged_online_metrics, main_loss_config, training_reference_loss_config, training_start_window=None, training_end_window=None, eta_change_windows=None):
+def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metrics, averaged_online_metrics, main_loss_config, training_reference_loss_config, training_start_window=None, training_end_window=None, eta_change_windows=None, averaged_supervised_metrics=None):
     """
     Plot online learning results using directly averaged metrics (no TrajectoryResults conversion).
     
@@ -1230,6 +1269,18 @@ def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metric
     online_training_losses = averaged_online_metrics.get("training_reference_losses", [])
     online_eta_values = averaged_online_metrics.get("window_eta_values", [])
     
+    # Extract supervised model data if available
+    supervised_window_indices = []
+    supervised_main_losses = []
+    supervised_training_losses = []
+    supervised_eta_values = []
+    
+    if averaged_supervised_metrics is not None:
+        supervised_window_indices = averaged_supervised_metrics.get("window_indices", [])
+        supervised_main_losses = averaged_supervised_metrics.get("main_losses", [])
+        supervised_training_losses = averaged_supervised_metrics.get("training_reference_losses", [])
+        supervised_eta_values = averaged_supervised_metrics.get("window_eta_values", [])
+    
     # Create the plot with 2 subplots
     fig, axes = plt.subplots(2, 1, figsize=(12, 10))
     
@@ -1241,6 +1292,9 @@ def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metric
     if online_main_losses and online_window_indices:
         ax1.plot(online_window_indices, online_main_losses, 'r-', linewidth=3, 
                 label='Algorithm 1', marker='s', markersize=6)
+    if supervised_main_losses and supervised_window_indices:
+        ax1.plot(supervised_window_indices, supervised_main_losses, 'g-', linewidth=3, 
+                label='Supervised Trained Model', marker='^', markersize=6)
     
     # Add eta change markers
     distribution_change_added = False
@@ -1341,6 +1395,8 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
     # Initialize data structures for the table
     rmspe_improvements = []
     msie_improvements = []
+    supervised_rmspe_improvements = []
+    supervised_msie_improvements = []
     
     for snr in snr_values:
         if snr not in scenario_results:
@@ -1354,17 +1410,20 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
         # Initialize improvements as NaN
         rmspe_improvement = np.nan
         msie_improvement = np.nan
+        supervised_rmspe_improvement = np.nan
+        supervised_msie_improvement = np.nan
         
         # Try to get averaged results first
         if 'averaged_results' in result:
             averaged_data = result['averaged_results']
             
-            # Get averaged metrics for both models
+            # Get averaged metrics for all models
             if ('averaged_pretrained_trajectory' in averaged_data and 
                 'averaged_online_trajectory' in averaged_data):
                 
                 pretrained_metrics = averaged_data['averaged_pretrained_trajectory']
                 online_metrics = averaged_data['averaged_online_trajectory']
+                supervised_metrics = averaged_data.get('averaged_supervised_trajectory')
                 
                 # Get last 15 windows for RMSPE (main losses)
                 pretrained_rmspe = pretrained_metrics.get('main_losses', [])
@@ -1387,6 +1446,20 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
                     
                     logger.info(f"SNR {snr}: RMSPE - Pretrained: {pretrained_rmspe_avg:.6f} rad ({(pretrained_rmspe_avg / np.pi) * 180:.3f}°), Algorithm 1: {online_rmspe_avg:.6f} rad ({(online_rmspe_avg / np.pi) * 180:.3f}°), Improvement: {rmspe_improvement:.6f} rad ({(rmspe_improvement / np.pi) * 180:.3f}°)")
                 
+                # Calculate supervised model RMSPE improvement if available
+                if supervised_metrics is not None:
+                    supervised_rmspe = supervised_metrics.get('main_losses', [])
+                    if supervised_rmspe:
+                        num_windows = min(15, len(pretrained_rmspe), len(supervised_rmspe))
+                        supervised_last15 = supervised_rmspe[-num_windows:]
+                        
+                        # Calculate supervised model improvement vs pretrained
+                        supervised_improvements = [pre - sup for pre, sup in zip(pretrained_last15, supervised_last15)]
+                        supervised_rmspe_improvement = np.mean(supervised_improvements)
+                        
+                        supervised_rmspe_avg = np.mean(supervised_last15)
+                        logger.info(f"SNR {snr}: RMSPE Supervised - Supervised Trained: {supervised_rmspe_avg:.6f} rad ({(supervised_rmspe_avg / np.pi) * 180:.3f}°), vs Pretrained Improvement: {supervised_rmspe_improvement:.6f} rad ({(supervised_rmspe_improvement / np.pi) * 180:.3f}°)")
+                
                 # Get last 15 windows for MSIE (training reference losses)
                 pretrained_msie = pretrained_metrics.get('training_reference_losses', [])
                 online_msie = online_metrics.get('training_reference_losses', [])
@@ -1406,10 +1479,26 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
                     msie_improvement = np.mean(improvements)
                     
                     logger.info(f"SNR {snr}: MSIE - Pretrained: {pretrained_msie_avg:.6f} rad ({(pretrained_msie_avg / np.pi) * 180:.3f}°), Algorithm 1: {online_msie_avg:.6f} rad ({(online_msie_avg / np.pi) * 180:.3f}°), Improvement: {msie_improvement:.6f} rad ({(msie_improvement / np.pi) * 180:.3f}°)")
+                
+                # Calculate supervised model MSIE improvement if available
+                if supervised_metrics is not None:
+                    supervised_msie = supervised_metrics.get('training_reference_losses', [])
+                    if supervised_msie:
+                        num_windows = min(15, len(pretrained_msie), len(supervised_msie))
+                        supervised_last15 = supervised_msie[-num_windows:]
+                        
+                        # Calculate supervised model improvement vs pretrained
+                        supervised_improvements = [pre - sup for pre, sup in zip(pretrained_last15, supervised_last15)]
+                        supervised_msie_improvement = np.mean(supervised_improvements)
+                        
+                        supervised_msie_avg = np.mean(supervised_last15)
+                        logger.info(f"SNR {snr}: MSIE Supervised - Supervised Trained: {supervised_msie_avg:.6f} rad ({(supervised_msie_avg / np.pi) * 180:.3f}°), vs Pretrained Improvement: {supervised_msie_improvement:.6f} rad ({(supervised_msie_improvement / np.pi) * 180:.3f}°)")
         
         # Store the improvements
         rmspe_improvements.append(rmspe_improvement)
         msie_improvements.append(msie_improvement)
+        supervised_rmspe_improvements.append(supervised_rmspe_improvement)
+        supervised_msie_improvements.append(supervised_msie_improvement)
     
     # Create the table plot with minimal margins
     fig, ax = plt.subplots(figsize=(8, 12))
@@ -1420,7 +1509,7 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
     
     # Prepare table data (SNR as rows, loss types as columns)
     snr_labels = [f'SNR {int(snr)}' for snr in snr_values]
-    table_headers = ['SNR (dB)', 'RMSPE (Supervised)', 'MSIE (Unsupervised)']
+    table_headers = ['SNR (dB)', 'RMSPE (Alg 1)', 'MSIE (Alg 1)', 'RMSPE (Supervised)']
     
     # Format the improvement values with degree conversion
     table_data = []
@@ -1428,12 +1517,13 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
         # Convert to degrees and add degree symbol
         rmspe_val = f'{(rmspe_improvements[i] / np.pi) * 180:.3f}°' if not np.isnan(rmspe_improvements[i]) else 'N/A'
         msie_val = f'{(msie_improvements[i] / np.pi) * 180:.3f}°' if not np.isnan(msie_improvements[i]) else 'N/A'
-        table_data.append([snr_labels[i], rmspe_val, msie_val])
+        supervised_rmspe_val = f'{(supervised_rmspe_improvements[i] / np.pi) * 180:.3f}°' if not np.isnan(supervised_rmspe_improvements[i]) else 'N/A'
+        table_data.append([snr_labels[i], rmspe_val, msie_val, supervised_rmspe_val])
     
     # Create the table positioned to avoid overlap with titles
     table = ax.table(cellText=table_data, colLabels=table_headers,
                     cellLoc='center', loc='center',
-                    colWidths=[0.25, 0.375, 0.375])
+                    colWidths=[0.2, 0.267, 0.267, 0.267])
     
     # Style the table
     table.auto_set_font_size(False)
@@ -1453,12 +1543,19 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
                 table[(i+1, j)].set_facecolor('#E7E6E6')  # Light gray for SNR labels
                 table[(i+1, j)].set_text_props(weight='bold')
                 table[(i+1, j)].set_fontsize(16)  # Keep original SNR label font size
-            else:  # Data columns (RMSPE and MSIE)
+            else:  # Data columns (RMSPE and MSIE for both algorithms)
                 # Color code based on improvement value
-                improvement = rmspe_improvements[i] if j == 1 else msie_improvements[i]
+                if j == 1:  # Algorithm 1 RMSPE
+                    improvement = rmspe_improvements[i]
+                elif j == 2:  # Algorithm 1 MSIE
+                    improvement = msie_improvements[i]
+                elif j == 3:  # Supervised RMSPE
+                    improvement = supervised_rmspe_improvements[i]
+                else:
+                    improvement = np.nan
                 
                 if not np.isnan(improvement):
-                    if improvement > 0:  # Online model is better
+                    if improvement > 0:  # Algorithm is better than pretrained
                         table[(i+1, j)].set_facecolor('#C6EFCE')  # Light green
                     elif improvement < 0:  # Pretrained model is better
                         table[(i+1, j)].set_facecolor('#FFC7CE')  # Light red
@@ -1470,8 +1567,8 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
                 table[(i+1, j)].set_fontsize(16)  # Larger but reasonable data cell font size for degree values
     
     # Add title and subtitle with proper spacing to avoid overlap
-    plt.suptitle('Performance Improvement of Online Model', fontsize=20, fontweight='bold', y=0.95)
-    ax.text(0.5, 0.82, 'Average L2 Distance (Pretrained - Online) over Last 15 Windows', 
+    plt.suptitle('Performance Improvement of Algorithms vs Pretrained Model', fontsize=20, fontweight='bold', y=0.95)
+    ax.text(0.5, 0.82, 'Average L2 Distance (Pretrained - Algorithm) over Last 15 Windows', 
             ha='center', va='center', transform=ax.transAxes, fontsize=18, style='italic')
     
     # Save the plot with absolute minimal whitespace

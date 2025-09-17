@@ -236,6 +236,7 @@ def average_online_learning_results_across_trajectories(results_list: list) -> d
     # Extract trajectory results from each result
     pretrained_trajectories = []
     online_trajectories = []
+    supervised_trajectories = []
     metadata_list = []
     
     for result in results_list:
@@ -246,6 +247,10 @@ def average_online_learning_results_across_trajectories(results_list: list) -> d
         ol_results = result["online_learning_results"]
         pretrained_trajectories.append(ol_results["pretrained_model_trajectory_results"])
         online_trajectories.append(ol_results["online_model_trajectory_results"])
+        
+        # Add supervised model results if available
+        if "supervised_model_trajectory_results" in ol_results:
+            supervised_trajectories.append(ol_results["supervised_model_trajectory_results"])
         
         # Extract metadata
         metadata = {
@@ -268,12 +273,18 @@ def average_online_learning_results_across_trajectories(results_list: list) -> d
     # Average online model trajectories  
     averaged_online = _average_trajectory_results(online_trajectories, "online")
     
+    # Average supervised model trajectories if available
+    averaged_supervised = None
+    if supervised_trajectories:
+        averaged_supervised = _average_trajectory_results(supervised_trajectories, "supervised")
+        logger.info(f"Successfully averaged supervised model results from {len(supervised_trajectories)} trajectories")
+    
     # Calculate summary statistics
     summary_stats = _calculate_trajectory_summary_statistics(metadata_list)
     
     logger.info(f"Successfully averaged results from {len(pretrained_trajectories)} trajectories")
     
-    return {
+    result_dict = {
         "status": "success",
         "averaged_results": {
             "averaged_pretrained_trajectory": averaged_pretrained,
@@ -282,6 +293,12 @@ def average_online_learning_results_across_trajectories(results_list: list) -> d
             "trajectory_count": len(pretrained_trajectories)
         }
     }
+    
+    # Add supervised results if available
+    if averaged_supervised is not None:
+        result_dict["averaged_results"]["averaged_supervised_trajectory"] = averaged_supervised
+    
+    return result_dict
 
 
 def _average_trajectory_results(trajectory_list: list, model_type: str) -> dict:
