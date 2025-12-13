@@ -282,6 +282,9 @@ def average_online_learning_results_across_trajectories(results_list: list) -> d
     # Calculate summary statistics
     summary_stats = _calculate_trajectory_summary_statistics(metadata_list)
     
+    # Average GLRT drift detection results
+    glrt_results = _average_glrt_results(results_list)
+    
     logger.info(f"Successfully averaged results from {len(pretrained_trajectories)} trajectories")
     
     result_dict = {
@@ -297,6 +300,10 @@ def average_online_learning_results_across_trajectories(results_list: list) -> d
     # Add supervised results if available
     if averaged_supervised is not None:
         result_dict["averaged_results"]["averaged_supervised_trajectory"] = averaged_supervised
+    
+    # Add GLRT results if available
+    if glrt_results:
+        result_dict["averaged_results"]["glrt_results"] = glrt_results
     
     return result_dict
 
@@ -447,3 +454,108 @@ def _calculate_trajectory_summary_statistics(metadata_list: list) -> dict:
     }
     
     return summary
+
+
+def _average_glrt_results(results_list: list) -> dict:
+    """
+    Average GLRT drift detection results across all trajectories.
+    
+    Args:
+        results_list: List of dictionaries containing results from each trajectory
+        
+    Returns:
+        Dictionary with averaged GLRT results containing:
+        - ref_loss: Reference loss GLRT statistics and averaged loss sequence
+        - main_loss: Main loss GLRT statistics and averaged loss sequence
+    """
+    import numpy as np
+    
+    logger = logging.getLogger(__name__)
+    
+    if not results_list:
+        return {}
+    
+    min_segment_size = 5
+    ref_loss_sequences = []
+    main_loss_sequences = []
+    ref_changepoint_windows = []
+    main_changepoint_windows = []
+    ref_likelihoods = []
+    main_likelihoods = []
+    
+    # Collect GLRT results from all trajectories
+    for result in results_list:
+        if result.get("status") != "success":
+            continue
+            
+        online_results = result.get("online_learning_results", {})
+        
+        # Collect reference loss GLRT data
+        if online_results.get("glrt_ref_losses") is not None:
+            ref_loss_sequences.append(online_results["glrt_ref_losses"])
+            if online_results.get("glrt_ref_loss_changepoint_window") is not None:
+                ref_changepoint_windows.append(online_results["glrt_ref_loss_changepoint_window"])
+            if online_results.get("glrt_ref_loss_likelihood") is not None:
+                ref_likelihoods.append(online_results["glrt_ref_loss_likelihood"])
+        
+        # Collect main loss GLRT data
+        if online_results.get("glrt_main_losses") is not None:
+            main_loss_sequences.append(online_results["glrt_main_losses"])
+            if online_results.get("glrt_main_loss_changepoint_window") is not None:
+                main_changepoint_windows.append(online_results["glrt_main_loss_changepoint_window"])
+            if online_results.get("glrt_main_loss_likelihood") is not None:
+                main_likelihoods.append(online_results["glrt_main_loss_likelihood"])
+    
+    glrt_results = {}
+    
+    # Process reference loss GLRT results
+    if len(ref_loss_sequences) > 0:
+        # Average losses window-by-window across all trajectories
+        min_length = min(len(losses) for losses in ref_loss_sequences)
+        avg_ref_losses = [np.mean([losses[i] for losses in ref_loss_sequences]) 
+                         for i in range(min_length)]
+        
+        # Calculate statistics
+        avg_ref_changepoint = float(np.mean(ref_changepoint_windows)) if ref_changepoint_windows else None
+        std_ref_changepoint = float(np.std(ref_changepoint_windows)) if ref_changepoint_windows else None
+        avg_ref_likelihood = float(np.mean(ref_likelihoods)) if ref_likelihoods else None
+        std_ref_likelihood = float(np.std(ref_likelihoods)) if ref_likelihoods else None
+        
+        glrt_results["ref_loss"] = {
+            "avg_losses": avg_ref_losses,
+            "avg_changepoint_window": avg_ref_changepoint,
+            "std_changepoint_window": std_ref_changepoint,
+            "avg_likelihood": avg_ref_likelihood,
+            "std_likelihood": std_ref_likelihood,
+            "trajectory_count": len(ref_loss_sequences),
+            "min_segment_size": min_segment_size,
+            "individual_changepoint_windows": ref_changepoint_windows,
+            "individual_likelihoods": ref_likelihoods
+        }
+    
+    # Process main loss GLRT results
+    if len(main_loss_sequences) > 0:
+        # Average losses window-by-window across all trajectories
+        min_length = min(len(losses) for losses in main_loss_sequences)
+        avg_main_losses = [np.mean([losses[i] for losses in main_loss_sequences]) 
+                          for i in range(min_length)]
+        
+        # Calculate statistics
+        avg_main_changepoint = float(np.mean(main_changepoint_windows)) if main_changepoint_windows else None
+        std_main_changepoint = float(np.std(main_changepoint_windows)) if main_changepoint_windows else None
+        avg_main_likelihood = float(np.mean(main_likelihoods)) if main_likelihoods else None
+        std_main_likelihood = float(np.std(main_likelihoods)) if main_likelihoods else None
+        
+        glrt_results["main_loss"] = {
+            "avg_losses": avg_main_losses,
+            "avg_changepoint_window": avg_main_changepoint,
+            "std_changepoint_window": std_main_changepoint,
+            "avg_likelihood": avg_main_likelihood,
+            "std_likelihood": std_main_likelihood,
+            "trajectory_count": len(main_loss_sequences),
+            "min_segment_size": min_segment_size,
+            "individual_changepoint_windows": main_changepoint_windows,
+            "individual_likelihoods": main_likelihoods
+        }
+    
+    return glrt_results

@@ -30,6 +30,7 @@ from DCD_MUSIC.src.metrics.multimoment_innovation_consistency_loss import MultiM
 from DCD_MUSIC.src.signal_creation import Samples
 from DCD_MUSIC.src.evaluation import get_model_based_method, evaluate_model_based
 from simulation.kalman_filter.extended import ExtendedKalmanFilter1D
+from simulation.runners.sandbox import glrt_changepoint_detection, plot_results
 
 
 class KalmanInnovationLoss:
@@ -421,6 +422,59 @@ class OnlineLearning:
                     averaged_data.get("averaged_supervised_trajectory")
                 )
             
+            # GLRT drift detection averaged plotting (using results from averaging function)
+            glrt_results = averaged_results_across_trajectories.get("averaged_results", {}).get("glrt_results", {})
+            
+            # Plot reference loss GLRT results
+            if "ref_loss" in glrt_results:
+                ref_data = glrt_results["ref_loss"]
+                avg_ref_losses = ref_data["avg_losses"]
+                min_segment_size = ref_data["min_segment_size"]
+                
+                if len(avg_ref_losses) >= 2 * min_segment_size + 1:
+                    try:
+                        ref_changepoint, ref_log_glr, ref_all_log_glr, ref_candidate_points = glrt_changepoint_detection(
+                            avg_ref_losses, min_segment_size=min_segment_size
+                        )
+                        ref_fig = plot_results(avg_ref_losses, ref_changepoint, ref_all_log_glr, ref_candidate_points)
+                        title = f'GLRT Drift Detection - Reference Loss (Averaged across {ref_data["trajectory_count"]} trajectories)'
+                        if ref_data["avg_changepoint_window"] is not None:
+                            title += f'\nAvg Changepoint Window: {ref_data["avg_changepoint_window"]:.2f} ± {ref_data["std_changepoint_window"]:.2f}, Avg Log-GLR: {ref_data["avg_likelihood"]:.4f} ± {ref_data["std_likelihood"]:.4f}'
+                        ref_fig.suptitle(title, fontsize=14)
+                        ref_plot_path = self.output_dir / "glrt_ref_loss_averaged.png"
+                        ref_fig.savefig(ref_plot_path, dpi=300, bbox_inches='tight')
+                        plt.close(ref_fig)
+                        logger.info(f"Saved averaged GLRT reference loss plot to {ref_plot_path}")
+                        logger.info(f"Reference Loss GLRT: Avg Changepoint = {ref_data['avg_changepoint_window']:.2f} ± {ref_data['std_changepoint_window']:.2f}, "
+                                   f"Avg Log-GLR = {ref_data['avg_likelihood']:.4f} ± {ref_data['std_likelihood']:.4f}")
+                    except Exception as e:
+                        logger.warning(f"Failed to plot averaged GLRT reference loss results: {e}")
+            
+            # Plot main loss GLRT results
+            if "main_loss" in glrt_results:
+                main_data = glrt_results["main_loss"]
+                avg_main_losses = main_data["avg_losses"]
+                min_segment_size = main_data["min_segment_size"]
+                
+                if len(avg_main_losses) >= 2 * min_segment_size + 1:
+                    try:
+                        main_changepoint, main_log_glr, main_all_log_glr, main_candidate_points = glrt_changepoint_detection(
+                            avg_main_losses, min_segment_size=min_segment_size
+                        )
+                        main_fig = plot_results(avg_main_losses, main_changepoint, main_all_log_glr, main_candidate_points)
+                        title = f'GLRT Drift Detection - Main Loss (Averaged across {main_data["trajectory_count"]} trajectories)'
+                        if main_data["avg_changepoint_window"] is not None:
+                            title += f'\nAvg Changepoint Window: {main_data["avg_changepoint_window"]:.2f} ± {main_data["std_changepoint_window"]:.2f}, Avg Log-GLR: {main_data["avg_likelihood"]:.4f} ± {main_data["std_likelihood"]:.4f}'
+                        main_fig.suptitle(title, fontsize=14)
+                        main_plot_path = self.output_dir / "glrt_main_loss_averaged.png"
+                        main_fig.savefig(main_plot_path, dpi=300, bbox_inches='tight')
+                        plt.close(main_fig)
+                        logger.info(f"Saved averaged GLRT main loss plot to {main_plot_path}")
+                        logger.info(f"Main Loss GLRT: Avg Changepoint = {main_data['avg_changepoint_window']:.2f} ± {main_data['std_changepoint_window']:.2f}, "
+                                   f"Avg Log-GLR = {main_data['avg_likelihood']:.4f} ± {main_data['std_likelihood']:.4f}")
+                    except Exception as e:
+                        logger.warning(f"Failed to plot averaged GLRT main loss results: {e}")
+            
             # Calculate summary statistics from structured results
             total_drift_detected = sum(result["online_learning_results"].get("drift_detected_count", 0) for result in all_results)
             total_model_updated = sum(result["online_learning_results"].get("model_updated_count", 0) for result in all_results)
@@ -446,6 +500,9 @@ class OnlineLearning:
             # Add averaged results if available
             if averaged_results_across_trajectories.get("status") == "success":
                 return_results["averaged_results"] = averaged_results_across_trajectories["averaged_results"]
+                # Also add GLRT results at top level for easy access
+                if "glrt_results" in averaged_results_across_trajectories["averaged_results"]:
+                    return_results["glrt_results"] = averaged_results_across_trajectories["averaged_results"]["glrt_results"]
             
             return return_results
             
@@ -686,6 +743,18 @@ class OnlineLearning:
             training_start_window = None  # Window where training started
             training_end_window = None  # Window where training ended
             
+            # GLRT drift detection tracking variables
+            glrt_ref_loss_changepoint_window = None  # Most likely window where change occurred (reference loss)
+            glrt_ref_loss_likelihood = None  # Log-GLR value for reference loss
+            glrt_ref_loss_all_log_glr = None  # All log-GLR values for reference loss
+            glrt_ref_loss_candidate_points = None  # Candidate changepoint indices for reference loss
+            glrt_ref_losses = None  # Loss values used for reference loss GLRT
+            glrt_main_loss_changepoint_window = None  # Most likely window where change occurred (main loss)
+            glrt_main_loss_likelihood = None  # Log-GLR value for main loss
+            glrt_main_loss_all_log_glr = None  # All log-GLR values for main loss
+            glrt_main_loss_candidate_points = None  # Candidate changepoint indices for main loss
+            glrt_main_losses = None  # Loss values used for main loss GLRT
+            
             # Process each window of online data
             for window_idx, (time_series_batch, sources_num_batch, labels_batch) in enumerate(tqdm(online_learning_dataloader, desc="Online Learning")):
                 # --- Dynamic Eta Update Logic ---
@@ -757,6 +826,41 @@ class OnlineLearning:
                
                 # Add window result to trajectory results
                 trajectory_results.add_window_result(window_idx, window_result, self.system_model.params.eta, labels_single_window_list_of_arrays)
+                
+                # GLRT drift detection on trajectory results
+                # Extract losses for GLRT analysis
+                min_segment_size = 5  # Minimum windows needed for GLRT
+                # Need at least 2*min_segment_size+1 windows to have at least one candidate changepoint
+                if len(trajectory_results.window_results) >= 2 * min_segment_size + 1:
+                    # Extract online_training_reference_loss values
+                    ref_losses = [wr.loss_metrics.online_training_reference_loss for wr in trajectory_results.window_results]
+                    
+                    # Extract main_loss values
+                    main_losses = [wr.loss_metrics.main_loss for wr in trajectory_results.window_results]
+                    
+                    # Run GLRT on reference loss
+                    try:
+                        ref_changepoint, ref_log_glr, ref_all_log_glr, ref_candidate_points = glrt_changepoint_detection(ref_losses, min_segment_size=min_segment_size)
+                        glrt_ref_loss_changepoint_window = ref_changepoint
+                        glrt_ref_loss_likelihood = ref_log_glr
+                        glrt_ref_loss_all_log_glr = ref_all_log_glr
+                        glrt_ref_loss_candidate_points = ref_candidate_points
+                        glrt_ref_losses = ref_losses
+                        logger.info(f"GLRT (ref_loss) - Window {window_idx}: Changepoint at window {ref_changepoint}, Log-GLR: {ref_log_glr:.4f}")
+                    except Exception as e:
+                        logger.warning(f"GLRT (ref_loss) failed at window {window_idx}: {e}")
+                    
+                    # Run GLRT on main loss
+                    try:
+                        main_changepoint, main_log_glr, main_all_log_glr, main_candidate_points = glrt_changepoint_detection(main_losses, min_segment_size=min_segment_size)
+                        glrt_main_loss_changepoint_window = main_changepoint
+                        glrt_main_loss_likelihood = main_log_glr
+                        glrt_main_loss_all_log_glr = main_all_log_glr
+                        glrt_main_loss_candidate_points = main_candidate_points
+                        glrt_main_losses = main_losses
+                        logger.info(f"GLRT (main_loss) - Window {window_idx}: Changepoint at window {main_changepoint}, Log-GLR: {main_log_glr:.4f}")
+                    except Exception as e:
+                        logger.warning(f"GLRT (main_loss) failed at window {window_idx}: {e}")
                 
                 # Update last predictions and covariances for next window
                 last_ekf_predictions = window_result.doa_metrics.ekf_predictions
@@ -962,7 +1066,15 @@ class OnlineLearning:
                     # Training and eta change tracking
                     "eta_change_windows": eta_change_windows,
                     "training_start_window": training_start_window,
-                    "training_end_window": training_end_window
+                    "training_end_window": training_end_window,
+                    
+                    # GLRT drift detection results
+                    "glrt_ref_loss_changepoint_window": glrt_ref_loss_changepoint_window,
+                    "glrt_ref_loss_likelihood": glrt_ref_loss_likelihood,
+                    "glrt_ref_losses": glrt_ref_losses,
+                    "glrt_main_loss_changepoint_window": glrt_main_loss_changepoint_window,
+                    "glrt_main_loss_likelihood": glrt_main_loss_likelihood,
+                    "glrt_main_losses": glrt_main_losses
                 }
             }
             

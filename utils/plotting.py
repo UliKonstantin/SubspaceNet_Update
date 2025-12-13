@@ -1107,7 +1107,168 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
     plt.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close()
     
-    logger.info(f"Scenario results plot saved to: {plot_path}") 
+    logger.info(f"Scenario results plot saved to: {plot_path}")
+    
+    # GLRT drift detection violin plots
+    _plot_glrt_scenario_results(scenario_results, output_dir)
+
+
+def _plot_glrt_scenario_results(scenario_results: dict, output_dir: Path) -> None:
+    """
+    Plot GLRT drift detection results across scenarios using violin plots.
+    
+    Creates two plots:
+    1. Changepoint window detection (avg ± std) as a function of scenario
+    2. Likelihood (avg ± std) at changepoint window as a function of scenario
+    
+    Args:
+        scenario_results: Dictionary mapping scenario values (e.g., SNR) to their results
+        output_dir: Output directory for saving the plots
+    """
+    try:
+        import pandas as pd
+        import seaborn as sns
+    except ImportError:
+        logger = logging.getLogger(__name__)
+        logger.warning("pandas or seaborn not available, skipping GLRT violin plots")
+        return
+    
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    logger = logging.getLogger(__name__)
+    
+    # Extract scenario values and sort them
+    scenario_values = sorted([float(val) for val in scenario_results.keys() if scenario_results[val] is not None])
+    
+    if not scenario_values:
+        logger.warning("No valid scenario results found for GLRT plotting")
+        return
+    
+    # Collect GLRT data for each scenario
+    changepoint_data_by_scenario = {}  # {scenario_value: [list of changepoint windows]}
+    likelihood_data_by_scenario = {}   # {scenario_value: [list of likelihoods]}
+    
+    for scenario_val in scenario_values:
+        result = scenario_results.get(str(scenario_val))
+        if not result:
+            continue
+        
+        # Try to get GLRT results from different locations
+        glrt_results = None
+        if "glrt_results" in result:
+            glrt_results = result["glrt_results"]
+        elif "averaged_results" in result and "glrt_results" in result["averaged_results"]:
+            glrt_results = result["averaged_results"]["glrt_results"]
+        
+        if glrt_results and "ref_loss" in glrt_results:
+            ref_data = glrt_results["ref_loss"]
+            
+            # Get individual trajectory values for violin plot
+            if "individual_changepoint_windows" in ref_data:
+                changepoint_data_by_scenario[scenario_val] = ref_data["individual_changepoint_windows"]
+            
+            if "individual_likelihoods" in ref_data:
+                likelihood_data_by_scenario[scenario_val] = ref_data["individual_likelihoods"]
+    
+    if not changepoint_data_by_scenario and not likelihood_data_by_scenario:
+        logger.warning("No GLRT data found in scenario results")
+        return
+    
+    # Create figure with two subplots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Plot 1: Changepoint window detection
+    if changepoint_data_by_scenario:
+        # Prepare data for violin plot
+        scenario_labels = []
+        changepoint_values = []
+        
+        for scenario_val in scenario_values:
+            if scenario_val in changepoint_data_by_scenario:
+                values = changepoint_data_by_scenario[scenario_val]
+                if values:
+                    scenario_labels.extend([str(scenario_val)] * len(values))
+                    changepoint_values.extend(values)
+        
+        if changepoint_values:
+            # Create violin plot
+            data_for_violin = pd.DataFrame({
+                'Scenario': scenario_labels,
+                'Changepoint Window': changepoint_values
+            })
+            
+            sns.violinplot(data=data_for_violin, x='Scenario', y='Changepoint Window', ax=ax1)
+            ax1.set_xlabel('Scenario (SNR)', fontsize=14)
+            ax1.set_ylabel('Changepoint Window', fontsize=14)
+            ax1.set_title('GLRT Changepoint Window Detection Across Scenarios', fontsize=16, fontweight='bold')
+            ax1.grid(True, alpha=0.3)
+            
+            # Add mean and std markers
+            handles_added = False
+            for i, scenario_val in enumerate(scenario_values):
+                if scenario_val in changepoint_data_by_scenario:
+                    values = changepoint_data_by_scenario[scenario_val]
+                    if values:
+                        mean_val = np.mean(values)
+                        std_val = np.std(values)
+                        ax1.scatter(i, mean_val, color='red', marker='o', s=100, zorder=5, label='Mean ± Std' if not handles_added else '')
+                        ax1.errorbar(i, mean_val, yerr=std_val, color='red', capsize=5, capthick=2, zorder=5, label='' if handles_added else '')
+                        handles_added = True
+            
+            if handles_added:
+                ax1.legend(fontsize=10, loc='best')
+    
+    # Plot 2: Likelihood at changepoint window
+    if likelihood_data_by_scenario:
+        # Prepare data for violin plot
+        scenario_labels = []
+        likelihood_values = []
+        
+        for scenario_val in scenario_values:
+            if scenario_val in likelihood_data_by_scenario:
+                values = likelihood_data_by_scenario[scenario_val]
+                if values:
+                    scenario_labels.extend([str(scenario_val)] * len(values))
+                    likelihood_values.extend(values)
+        
+        if likelihood_values:
+            # Create violin plot
+            data_for_violin = pd.DataFrame({
+                'Scenario': scenario_labels,
+                'Likelihood (Log-GLR)': likelihood_values
+            })
+            
+            sns.violinplot(data=data_for_violin, x='Scenario', y='Likelihood (Log-GLR)', ax=ax2)
+            ax2.set_xlabel('Scenario (SNR)', fontsize=14)
+            ax2.set_ylabel('Likelihood (Log-GLR)', fontsize=14)
+            ax2.set_title('GLRT Likelihood at Changepoint Window (Reference Loss)', fontsize=16, fontweight='bold')
+            ax2.grid(True, alpha=0.3)
+            
+            # Add mean and std markers
+            handles_added = False
+            for i, scenario_val in enumerate(scenario_values):
+                if scenario_val in likelihood_data_by_scenario:
+                    values = likelihood_data_by_scenario[scenario_val]
+                    if values:
+                        mean_val = np.mean(values)
+                        std_val = np.std(values)
+                        ax2.scatter(i, mean_val, color='red', marker='o', s=100, zorder=5, label='Mean ± Std' if not handles_added else '')
+                        ax2.errorbar(i, mean_val, yerr=std_val, color='red', capsize=5, capthick=2, zorder=5, label='' if handles_added else '')
+                        handles_added = True
+            
+            if handles_added:
+                ax2.legend(fontsize=10, loc='best')
+    
+    plt.tight_layout()
+    
+    # Save the plot
+    plot_path = output_dir / 'glrt_scenario_results.png'
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    logger.info(f"GLRT scenario results violin plots saved to: {plot_path}")
+
 
 def plot_online_learning_results_structured(output_dir, pretrained_trajectory_results, online_trajectory_results, main_loss_config, training_reference_loss_config, training_start_window=None, training_end_window=None, eta_change_windows=None):
     """
