@@ -1056,24 +1056,49 @@ class Simulation:
         """
         logger.info(f"Running {scenario_type} scenario with values: {values}")
         scenario_results = {}
+        all_drift_detection_dicts = []
         
         # Check if model paths are provided in config for this scenario
         model_paths = None
-        if hasattr(self.config, 'scenario_config') and hasattr(self.config.scenario_config, 'model_paths') and self.config.scenario_config.model_paths:
-            model_paths = self.config.scenario_config.model_paths
-            logger.info(f"Found {len(model_paths)} model paths in scenario_config for scenario sweep")
+        retrain_model = False
+        if hasattr(self.config, 'scenario_config') and self.config.scenario_config:
+            if hasattr(self.config.scenario_config, 'model_paths') and self.config.scenario_config.model_paths:
+                model_paths = self.config.scenario_config.model_paths
+                logger.info(f"Found {len(model_paths)} model paths in scenario_config for scenario sweep")
+            if hasattr(self.config.scenario_config, 'retrain_model'):
+                retrain_model = self.config.scenario_config.retrain_model
         
         for i, value in enumerate(values):
             logger.info(f"Running scenario with {scenario_type}={value}")
             
             # Create overrides for this scenario
-            overrides = [f"system_model.{scenario_type.lower()}={value}"]
+            if scenario_type.lower() == "eta":
+                # For eta sweeps: start at 0, jump to target at specified window
+                # Set eta_increment = target value and max_eta = target value
+                # This makes the first update jump directly to the target, then stay there
+                overrides = [
+                    "system_model.eta=0.0",  # Always start at 0
+                    f"online_learning.eta_increment={value}",  # Jump directly to this value
+                    f"online_learning.max_eta={value}"  # Clamp to this value
+                ]
+            else:
+                overrides = [f"system_model.{scenario_type.lower()}={value}"]
             
             # Add model path override if available
-            if model_paths and i < len(model_paths):
-                model_path = model_paths[i]
-                overrides.append(f"simulation.model_path={model_path}")
-                logger.info(f"Using model path for {scenario_type}={value}: {model_path}")
+            if model_paths:
+                if retrain_model and i < len(model_paths):
+                    # Use different model for each scenario value
+                    model_path = model_paths[i]
+                    overrides.append(f"simulation.model_path={model_path}")
+                    logger.info(f"Using model path for {scenario_type}={value}: {model_path}")
+                elif not retrain_model and len(model_paths) > 0:
+                    # Use the first (or only) model path for all scenario values
+                    model_path = model_paths[0]
+                    overrides.append(f"simulation.model_path={model_path}")
+                    logger.info(f"Reusing model path for {scenario_type}={value}: {model_path}")
+                else:
+                    # No model path available for this iteration
+                    overrides.append("simulation.model_path=null")
             else:
                 # Ensure model_path is set to null if no model paths provided
                 overrides.append("simulation.model_path=null")
@@ -1114,7 +1139,38 @@ class Simulation:
                 
             scenario_results[value] = result
             
+            # Collect drift detection dicts if available (only for online learning results)
+            if (self.config.simulation.load_model and not self.config.simulation.train_model and 
+                result.get("status") == "success" and "drift_detection_dicts" in result):
+                all_drift_detection_dicts.extend(result["drift_detection_dicts"])
+        
         self.results[scenario_type] = scenario_results
+        
+        # Save drift detection dicts as JSON if we have any and we're in online learning mode
+        if (self.config.simulation.load_model and not self.config.simulation.train_model and 
+            all_drift_detection_dicts):
+            import json
+            output_path = Path("/Users/UliKonstantin4/Documents/subspaceNet_Online_learning/experiments/results/online_learning_eta_sweep")
+            output_path.mkdir(parents=True, exist_ok=True)
+            json_path = output_path / "drift_detection_dicts.json"
+            
+            # Convert numpy types to native Python types for JSON serialization
+            def convert_to_serializable(obj):
+                if isinstance(obj, (np.integer, np.int32, np.int64)):
+                    return int(obj)
+                elif isinstance(obj, (np.floating, np.float32, np.float64)):
+                    return float(obj)
+                return obj
+            
+            serializable_dicts = [
+                {k: convert_to_serializable(v) for k, v in d.items()}
+                for d in all_drift_detection_dicts
+            ]
+            
+            with open(json_path, 'w') as f:
+                json.dump(serializable_dicts, f, indent=2)
+            logger.info(f"Saved {len(all_drift_detection_dicts)} drift detection dicts to {json_path}")
+        
         return scenario_results
 
     def _create_trajectory_handler(self) -> None:

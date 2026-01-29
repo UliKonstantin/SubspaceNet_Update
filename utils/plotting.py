@@ -916,35 +916,47 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
     logger.info(f"Completed eta comparison plotting: {len(saved_plots)} plots saved to {plot_dir}")
     return saved_plots
 
-def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
+def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_type: str = 'snr') -> None:
     """
     Plot scenario results comparing average dB loss of online learning vs pretrained models.
     
     Args:
-        scenario_results: Dictionary mapping SNR values to their results
+        scenario_results: Dictionary mapping scenario values (SNR or eta) to their results
         output_dir: Output directory for saving the plot
+        scenario_type: Type of scenario ('snr' or 'eta'), defaults to 'snr'
     """
     import matplotlib.pyplot as plt
     import numpy as np
     from pathlib import Path
     
     logger = logging.getLogger(__name__)
-    logger.info("Creating scenario results plot...")
+    logger.info(f"Creating scenario results plot for {scenario_type.upper()} scenario...")
     
-    # Extract SNR values and sort them
-    snr_values = sorted([float(snr) for snr in scenario_results.keys()])
+    # Extract scenario values and sort them (preserve original key type for lookup)
+    # Keys can be int, float, or string depending on how they were stored
+    scenario_keys = [key for key in scenario_results.keys() if scenario_results[key] is not None]
+    scenario_values = sorted([float(key) for key in scenario_keys])
+    
+    # Use appropriate labels based on scenario type
+    value_label = scenario_type.upper() if scenario_type.lower() == 'snr' else 'Eta'
+    value_unit = ' (dB)' if scenario_type.lower() == 'snr' else ''
     
     # Initialize lists to store average dB losses
     online_avg_db_losses = []
     pretrained_avg_db_losses = []
     supervised_avg_db_losses = []
     
-    for snr in snr_values:
-        if snr not in scenario_results:
-            logger.warning(f"SNR {snr} not found in results, skipping...")
+    for val in scenario_values:
+        # Try to find the matching key (could be float, int, or string)
+        result = None
+        for key in scenario_keys:
+            if abs(float(key) - val) < 1e-10:  # Handle floating point comparison
+                result = scenario_results[key]
+                break
+        
+        if result is None:
+            logger.warning(f"{value_label} {val} not found in results, skipping...")
             continue
-            
-        result = scenario_results[snr]
         
         # Extract averaged results (use the already calculated averages)
         online_avg_db = None
@@ -963,7 +975,7 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
                     # Use last 10 windows or all if fewer than 10
                     num_windows_to_use = min(10, len(online_db_losses))
                     online_avg_db = np.mean(online_db_losses[-num_windows_to_use:])
-                    logger.info(f"SNR {snr}: Online model - averaged from last {num_windows_to_use} windows, avg dB loss = {online_avg_db:.2f}")
+                    logger.info(f"{value_label} {val}: Online model - averaged from last {num_windows_to_use} windows, avg dB loss = {online_avg_db:.2f}")
             
             # Get averaged pretrained model dB losses (use last 10 windows for consistency)
             if 'averaged_pretrained_trajectory' in averaged_data:
@@ -973,7 +985,7 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
                     # Use last 10 windows or all if fewer than 10
                     num_windows_to_use = min(10, len(pretrained_db_losses))
                     pretrained_avg_db = np.mean(pretrained_db_losses[-num_windows_to_use:])
-                    logger.info(f"SNR {snr}: Pretrained model - averaged from last {num_windows_to_use} windows, avg dB loss = {pretrained_avg_db:.2f}")
+                    logger.info(f"{value_label} {val}: Pretrained model - averaged from last {num_windows_to_use} windows, avg dB loss = {pretrained_avg_db:.2f}")
             
             # Get averaged supervised model dB losses (use last 10 windows for consistency)
             if 'averaged_supervised_trajectory' in averaged_data:
@@ -983,11 +995,11 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
                     # Use last 10 windows or all if fewer than 10
                     num_windows_to_use = min(10, len(supervised_db_losses))
                     supervised_avg_db = np.mean(supervised_db_losses[-num_windows_to_use:])
-                    logger.info(f"SNR {snr}: Supervised trained model - averaged from last {num_windows_to_use} windows, avg dB loss = {supervised_avg_db:.2f}")
+                    logger.info(f"{value_label} {val}: Supervised trained model - averaged from last {num_windows_to_use} windows, avg dB loss = {supervised_avg_db:.2f}")
         
         # Fallback to individual trajectory results if averaged results not available
         if online_avg_db is None or pretrained_avg_db is None or supervised_avg_db is None:
-            logger.warning(f"SNR {snr}: Some averaged results not available, falling back to individual trajectory extraction")
+            logger.warning(f"{value_label} {val}: Some averaged results not available, falling back to individual trajectory extraction")
             
             if 'online_learning_results' in result:
                 online_learning_data = result['online_learning_results']
@@ -1006,7 +1018,7 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
                                 post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
                         if post_learning_db_losses:
                             online_avg_db = np.mean(post_learning_db_losses)
-                            logger.info(f"SNR {snr}: Online model (fallback) - last {len(post_learning_db_losses)} windows, avg dB loss = {online_avg_db:.2f}")
+                            logger.info(f"{value_label} {val}: Online model (fallback) - last {len(post_learning_db_losses)} windows, avg dB loss = {online_avg_db:.2f}")
                 
                 # Get pretrained model trajectory results  
                 if pretrained_avg_db is None and 'pretrained_trajectory_results' in online_learning_data:
@@ -1022,7 +1034,7 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
                                 post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
                         if post_learning_db_losses:
                             pretrained_avg_db = np.mean(post_learning_db_losses)
-                            logger.info(f"SNR {snr}: Pretrained model (fallback) - last {len(post_learning_db_losses)} windows, avg dB loss = {pretrained_avg_db:.2f}")
+                            logger.info(f"{value_label} {val}: Pretrained model (fallback) - last {len(post_learning_db_losses)} windows, avg dB loss = {pretrained_avg_db:.2f}")
                 
                 # Get supervised model trajectory results (fallback)
                 if supervised_avg_db is None and 'supervised_model_trajectory_results' in online_learning_data:
@@ -1038,44 +1050,52 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
                                 post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
                         if post_learning_db_losses:
                             supervised_avg_db = np.mean(post_learning_db_losses)
-                            logger.info(f"SNR {snr}: Supervised trained model (fallback) - last {len(post_learning_db_losses)} windows, avg dB loss = {supervised_avg_db:.2f}")
+                            logger.info(f"{value_label} {val}: Supervised trained model (fallback) - last {len(post_learning_db_losses)} windows, avg dB loss = {supervised_avg_db:.2f}")
         
         # Store results
         online_avg_db_losses.append(online_avg_db if online_avg_db is not None else np.nan)
         pretrained_avg_db_losses.append(pretrained_avg_db if pretrained_avg_db is not None else np.nan)
         supervised_avg_db_losses.append(supervised_avg_db if supervised_avg_db is not None else np.nan)
         
-        logger.info(f"SNR {snr}: Online avg dB loss = {online_avg_db:.2f}, Pretrained avg dB loss = {pretrained_avg_db:.2f}, Supervised avg dB loss = {supervised_avg_db:.2f}" if supervised_avg_db is not None else f"SNR {snr}: Online avg dB loss = {online_avg_db:.2f}, Pretrained avg dB loss = {pretrained_avg_db:.2f}")
+        logger.info(f"{value_label} {val}: Online avg dB loss = {online_avg_db:.2f}, Pretrained avg dB loss = {pretrained_avg_db:.2f}, Supervised avg dB loss = {supervised_avg_db:.2f}" if supervised_avg_db is not None else f"{value_label} {val}: Online avg dB loss = {online_avg_db:.2f}, Pretrained avg dB loss = {pretrained_avg_db:.2f}")
     
     # Create the plot
     plt.figure(figsize=(10, 6))
     
     # Plot all three models
-    plt.plot(snr_values, online_avg_db_losses, 'o-', label='Algorithm 1', linewidth=2, markersize=8)
-    plt.plot(snr_values, pretrained_avg_db_losses, 's-', label='Pretrained Model', linewidth=2, markersize=8)
+    plt.plot(scenario_values, online_avg_db_losses, 'o-', label='Algorithm 1', linewidth=2, markersize=8)
+    plt.plot(scenario_values, pretrained_avg_db_losses, 's-', label='Pretrained Model', linewidth=2, markersize=8)
     
     # Add supervised model if data is available
     if any(not np.isnan(loss) for loss in supervised_avg_db_losses):
-        plt.plot(snr_values, supervised_avg_db_losses, '^-', label='Supervised Trained Model', linewidth=2, markersize=8)
+        plt.plot(scenario_values, supervised_avg_db_losses, '^-', label='Supervised Trained Model', linewidth=2, markersize=8)
     
-    # Customize the plot
-    plt.xlabel('SNR (dB)', fontsize=20)
+    # Customize the plot with scenario-appropriate labels
+    plt.xlabel(f'{value_label}{value_unit}', fontsize=20)
     plt.ylabel('Average RMSPE (Supervised) (dB)', fontsize=20)
-    plt.title('Averaged RMSPE (Supervised) vs SNR', fontsize=24, fontweight='bold')
+    title_text = f'Averaged RMSPE (Supervised) vs {value_label}'
+    if scenario_type.lower() == 'snr':
+        title_text += ' (SNR)'
+    plt.title(title_text, fontsize=24, fontweight='bold')
     plt.legend(fontsize=18)
     plt.grid(True, alpha=0.3)
     
-    # Set custom x-axis ticks with 5dB spacing
-    min_snr = min(snr_values)
-    max_snr = max(snr_values)
+    # Set custom x-axis ticks based on scenario type
+    min_val = min(scenario_values)
+    max_val = max(scenario_values)
     
-    # Create ticks with 5dB spacing, starting from the nearest 5dB value below min_snr
-    start_tick = int(min_snr // 5) * 5  # Round down to nearest 5
-    end_tick = int(max_snr // 5) * 5 + 5  # Round up to nearest 5
-    
-    # Generate ticks with 5dB spacing
-    x_ticks = list(range(start_tick, end_tick + 1, 5))
-    plt.xticks(x_ticks, fontsize=18)
+    if scenario_type.lower() == 'snr':
+        # For SNR: use 5dB spacing
+        start_tick = int(min_val // 5) * 5  # Round down to nearest 5
+        end_tick = int(max_val // 5) * 5 + 5  # Round up to nearest 5
+        x_ticks = list(range(start_tick, end_tick + 1, 5))
+        plt.xticks(x_ticks, fontsize=18)
+        # Set axis limits with exact SNR range (0-10) if applicable
+        if min_val >= 0 and max_val <= 10:
+            plt.xlim(0, 10)
+    else:
+        # For eta: use automatic ticks
+        plt.xticks(fontsize=18)
     
     # Set custom y-axis ticks with 5dB spacing
     all_losses = online_avg_db_losses + pretrained_avg_db_losses
@@ -1095,9 +1115,11 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
     y_ticks = list(range(start_y_tick, end_y_tick + 1, 5))
     plt.yticks(y_ticks, fontsize=18)
     
-    # Set axis limits with exact SNR range (0-10) and minimal y padding
-    plt.xlim(0, 10)  # Exact SNR range without extra margins
-    plt.ylim(min_loss - 2.5, max_loss + 2.5)
+    # Set y-axis limits
+    if scenario_type.lower() == 'snr' and min_val >= 0 and max_val <= 10:
+        plt.ylim(min_loss - 2.5, max_loss + 2.5)
+    else:
+        plt.ylim(min_loss - 2.5, max_loss + 2.5)
     
     # Add some styling
     plt.tight_layout()
@@ -1106,6 +1128,159 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path) -> None:
     plot_path = output_dir / 'scenario_results_comparison.png'
     plt.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close()
+    logger.info(f"Saved scenario results plot to {plot_path}")
+
+
+def plot_eta_scenario_comparison(scenario_results: dict, output_dir: Path) -> None:
+    """
+    Plot eta scenario comparison showing drift detection metrics.
+    
+    Creates 3 subplots:
+    1. Change detection window vs eta
+    2. GLRT z-score at detection vs eta  
+    3. Learning rate at detection vs eta
+    
+    Args:
+        scenario_results: Dictionary mapping eta values (as strings) to their results
+        output_dir: Output directory for saving the plot
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from pathlib import Path
+    
+    logger = logging.getLogger(__name__)
+    logger.info("Creating eta scenario comparison plot...")
+    
+    # Extract eta values and sort them (preserve original key type for lookup)
+    # Keys can be int, float, or string depending on how they were stored
+    eta_keys = [key for key in scenario_results.keys() if scenario_results[key] is not None]
+    eta_values = sorted([float(key) for key in eta_keys])
+    
+    if not eta_values:
+        logger.warning("No valid eta values found in scenario results")
+        return
+    
+    # Initialize lists to store metrics
+    detection_windows = []
+    detection_window_stds = []
+    z_scores = []
+    z_score_stds = []
+    learning_rates = []
+    learning_rate_stds = []
+    
+    for eta in eta_values:
+        # Try to find the matching key (could be float, int, or string)
+        result = None
+        for key in eta_keys:
+            if abs(float(key) - eta) < 1e-10:  # Handle floating point comparison
+                result = scenario_results[key]
+                break
+        
+        if result is None:
+            logger.warning(f"Eta {eta} not found in results, skipping...")
+            detection_windows.append(np.nan)
+            detection_window_stds.append(np.nan)
+            z_scores.append(np.nan)
+            z_score_stds.append(np.nan)
+            learning_rates.append(np.nan)
+            learning_rate_stds.append(np.nan)
+            continue
+        
+        # Extract GLRT results
+        detection_window = None
+        detection_window_std = None
+        z_score = None
+        z_score_std = None
+        learning_rate = None
+        learning_rate_std = None
+        
+        # Try to get from glrt_results (top level)
+        if 'glrt_results' in result and 'main_loss' in result['glrt_results']:
+            main_glrt = result['glrt_results']['main_loss']
+            detection_window = main_glrt.get('avg_changepoint_window')
+            detection_window_std = main_glrt.get('std_changepoint_window')
+            z_score = main_glrt.get('avg_z_score')
+            z_score_std = main_glrt.get('std_z_score')
+            learning_rate = main_glrt.get('avg_learning_rate')
+            learning_rate_std = main_glrt.get('std_learning_rate')
+        
+        # Fallback to averaged_results -> glrt_results
+        if detection_window is None and 'averaged_results' in result:
+            averaged_data = result['averaged_results']
+            if 'glrt_results' in averaged_data and 'main_loss' in averaged_data['glrt_results']:
+                main_glrt = averaged_data['glrt_results']['main_loss']
+                detection_window = main_glrt.get('avg_changepoint_window')
+                detection_window_std = main_glrt.get('std_changepoint_window')
+                z_score = main_glrt.get('avg_z_score')
+                z_score_std = main_glrt.get('std_z_score')
+                learning_rate = main_glrt.get('avg_learning_rate')
+                learning_rate_std = main_glrt.get('std_learning_rate')
+        
+        # Store results (use None as np.nan for plotting)
+        detection_windows.append(detection_window if detection_window is not None else np.nan)
+        detection_window_stds.append(detection_window_std if detection_window_std is not None else 0.0)
+        z_scores.append(z_score if z_score is not None else np.nan)
+        z_score_stds.append(z_score_std if z_score_std is not None else 0.0)
+        learning_rates.append(learning_rate if learning_rate is not None else np.nan)
+        learning_rate_stds.append(learning_rate_std if learning_rate_std is not None else 0.0)
+        
+        logger.info(f"Eta {eta}: Detection window = {detection_window:.2f} ± {detection_window_std:.2f}, "
+                   f"Z-score = {z_score:.4f} ± {z_score_std:.4f}, "
+                   f"LR = {learning_rate:.6f} ± {learning_rate_std:.6f}" 
+                   if detection_window is not None and z_score is not None and learning_rate is not None 
+                   else f"Eta {eta}: Incomplete GLRT data")
+    
+    # Create figure with 3 subplots
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    
+    # Subplot 1: Change detection window vs eta
+    ax1 = axes[0]
+    valid_mask = ~np.isnan(detection_windows)
+    if np.any(valid_mask):
+        ax1.errorbar(np.array(eta_values)[valid_mask], np.array(detection_windows)[valid_mask],
+                    yerr=np.array(detection_window_stds)[valid_mask], 
+                    fmt='o-', linewidth=2, markersize=8, capsize=5, capthick=2, label='Detection Window')
+    ax1.set_xlabel('Eta', fontsize=14)
+    ax1.set_ylabel('Change Detection Window', fontsize=14)
+    ax1.set_title('Drift Detection Window vs Eta', fontsize=16, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(fontsize=12)
+    
+    # Subplot 2: GLRT z-score vs eta
+    ax2 = axes[1]
+    valid_mask = ~np.isnan(z_scores)
+    if np.any(valid_mask):
+        ax2.errorbar(np.array(eta_values)[valid_mask], np.array(z_scores)[valid_mask],
+                    yerr=np.array(z_score_stds)[valid_mask],
+                    fmt='s-', linewidth=2, markersize=8, capsize=5, capthick=2, 
+                    color='green', label='GLRT Z-Score')
+    ax2.set_xlabel('Eta', fontsize=14)
+    ax2.set_ylabel('GLRT Z-Score at Detection', fontsize=14)
+    ax2.set_title('GLRT Z-Score vs Eta', fontsize=16, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(fontsize=12)
+    
+    # Subplot 3: Learning rate vs eta
+    ax3 = axes[2]
+    valid_mask = ~np.isnan(learning_rates)
+    if np.any(valid_mask):
+        ax3.errorbar(np.array(eta_values)[valid_mask], np.array(learning_rates)[valid_mask],
+                    yerr=np.array(learning_rate_stds)[valid_mask],
+                    fmt='^-', linewidth=2, markersize=8, capsize=5, capthick=2,
+                    color='orange', label='Learning Rate')
+    ax3.set_xlabel('Eta', fontsize=14)
+    ax3.set_ylabel('Learning Rate at Detection', fontsize=14)
+    ax3.set_title('Learning Rate vs Eta', fontsize=16, fontweight='bold')
+    ax3.grid(True, alpha=0.3)
+    ax3.legend(fontsize=12)
+    
+    plt.tight_layout()
+    
+    # Save the plot
+    plot_path = output_dir / "eta_scenario_drift_detection_comparison.png"
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    logger.info(f"Saved eta scenario comparison plot to {plot_path}")
     
     logger.info(f"Scenario results plot saved to: {plot_path}")
     
@@ -1442,11 +1617,9 @@ def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metric
         supervised_training_losses = averaged_supervised_metrics.get("training_reference_losses", [])
         supervised_eta_values = averaged_supervised_metrics.get("window_eta_values", [])
     
-    # Create the plot with 2 subplots
-    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
-    
-    # Plot 1: Main Loss Comparison
-    ax1 = axes[0]
+    # Create separate figure for Main Loss Comparison
+    fig1 = plt.figure(figsize=(14, 5))
+    ax1 = fig1.add_subplot(111)
     if pretrained_main_losses and pretrained_window_indices:
         ax1.plot(pretrained_window_indices, pretrained_main_losses, 'b-', linewidth=3, 
                 label='Pretrained Model', marker='o', markersize=6)
@@ -1478,13 +1651,26 @@ def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metric
     ax1.set_xlabel('Window Index', fontsize=20)
     ax1.set_ylabel('RMSPE (Supervised)', fontsize=20)
     ax1.set_title('RMSPE (Supervised)', fontsize=22, fontweight='bold')
-    ax1.legend(fontsize=20)
     ax1.grid(True, alpha=0.3)
     ax1.tick_params(axis='both', which='major', labelsize=16)
-    ax1.set_xlim(0, 60)  # Set exact x-axis range 0-60
+    # Set x-axis range dynamically based on available data
+    all_window_indices = []
+    if pretrained_window_indices:
+        all_window_indices.extend(pretrained_window_indices)
+    if online_window_indices:
+        all_window_indices.extend(online_window_indices)
+    if supervised_window_indices:
+        all_window_indices.extend(supervised_window_indices)
+    if all_window_indices:
+        max_window = max(all_window_indices)
+        ax1.set_xlim(0, max_window + 1)  # Add small padding
+    else:
+        ax1.set_xlim(0, 60)  # Fallback if no data
+    plt.tight_layout()
     
-    # Plot 2: Training Reference Loss Comparison
-    ax2 = axes[1]
+    # Create separate figure for Training Reference Loss Comparison
+    fig2 = plt.figure(figsize=(14, 5))
+    ax2 = fig2.add_subplot(111)
     if pretrained_training_losses and pretrained_window_indices:
         ax2.plot(pretrained_window_indices, pretrained_training_losses, 'b-', linewidth=3, 
                 label='Pretrained Model', marker='o', markersize=6)
@@ -1513,20 +1699,26 @@ def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metric
     ax2.set_xlabel('Window Index', fontsize=20)
     ax2.set_ylabel('MSIE (Unsupervised)', fontsize=20)
     ax2.set_title('MSIE (Unsupervised)', fontsize=22, fontweight='bold')
-    ax2.legend(fontsize=20)
     ax2.grid(True, alpha=0.3)
     ax2.tick_params(axis='both', which='major', labelsize=16)
-    ax2.set_xlim(0, 60)  # Set exact x-axis range 0-60
-    
+    # Set x-axis range dynamically based on available data (same as ax1)
+    if all_window_indices:
+        max_window = max(all_window_indices)
+        ax2.set_xlim(0, max_window + 1)  # Add small padding
+    else:
+        ax2.set_xlim(0, 60)  # Fallback if no data
     plt.tight_layout()
     
-    # Save the plot
-    plot_path = os.path.join(output_dir, 'averaged_online_learning_comparison.png')
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-    plt.close()
+    # Save the plots separately
+    plot_path_main = os.path.join(output_dir, 'averaged_online_learning_comparison_main_loss.png')
+    plot_path_training = os.path.join(output_dir, 'averaged_online_learning_comparison_training_loss.png')
+    fig1.savefig(plot_path_main, dpi=150, bbox_inches='tight')
+    fig2.savefig(plot_path_training, dpi=150, bbox_inches='tight')
+    plt.close(fig1)
+    plt.close(fig2)
     
-    logger.info(f"Averaged online learning comparison plot saved to: {plot_path}")
-    return plot_path
+    logger.info(f"Averaged online learning comparison plots saved to: {plot_path_main} and {plot_path_training}")
+    return plot_path_main, plot_path_training
 
 
 def plot_performance_improvement_table(scenario_results: dict, output_dir: Path) -> Path:
@@ -1734,6 +1926,237 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
     
     # Save the plot with absolute minimal whitespace
     plot_path = output_dir / 'performance_improvement_table.png'
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight', pad_inches=0)
+    plt.close()
+    logger.info(f"Saved performance improvement table to {plot_path}")
+    return plot_path
+
+
+def plot_performance_improvement_table_eta(scenario_results: dict, output_dir: Path) -> Path:
+    """
+    Create a performance improvement table comparing online learning vs pretrained models for eta scenario.
+    
+    Similar to plot_performance_improvement_table but for eta values instead of SNR.
+    
+    Args:
+        scenario_results: Dictionary mapping eta values to their results (same as plot_scenario_results)
+        output_dir: Output directory for saving the plot
+        
+    Returns:
+        Path to saved plot
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    
+    logger = logging.getLogger(__name__)
+    logger.info("Creating performance improvement table for eta scenario...")
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Extract and sort eta values (preserve original key type for lookup)
+    # Keys can be int, float, or string depending on how they were stored
+    eta_keys = [key for key in scenario_results.keys() if scenario_results[key] is not None]
+    eta_values = sorted([float(key) for key in eta_keys])
+    
+    if not eta_values:
+        logger.warning("No valid eta values found in scenario results")
+        return None
+    
+    # Initialize data structures for the table
+    rmspe_improvements = []
+    msie_improvements = []
+    supervised_rmspe_improvements = []
+    supervised_msie_improvements = []
+    
+    for eta in eta_values:
+        # Try to find the matching key (could be float, int, or string)
+        result = None
+        for key in eta_keys:
+            if abs(float(key) - eta) < 1e-10:  # Handle floating point comparison
+                result = scenario_results[key]
+                break
+        
+        if result is None:
+            logger.warning(f"Eta {eta} not found in results, using NaN...")
+            rmspe_improvements.append(np.nan)
+            msie_improvements.append(np.nan)
+            supervised_rmspe_improvements.append(np.nan)
+            supervised_msie_improvements.append(np.nan)
+            continue
+        
+        # Initialize improvements as NaN
+        rmspe_improvement = np.nan
+        msie_improvement = np.nan
+        supervised_rmspe_improvement = np.nan
+        supervised_msie_improvement = np.nan
+        
+        # Try to get averaged results first
+        if 'averaged_results' in result:
+            averaged_data = result['averaged_results']
+            
+            # Get averaged metrics for all models
+            if ('averaged_pretrained_trajectory' in averaged_data and 
+                'averaged_online_trajectory' in averaged_data):
+                
+                pretrained_metrics = averaged_data['averaged_pretrained_trajectory']
+                online_metrics = averaged_data['averaged_online_trajectory']
+                supervised_metrics = averaged_data.get('averaged_supervised_trajectory')
+                
+                # Get last 15 windows for RMSPE (main losses)
+                pretrained_rmspe = pretrained_metrics.get('main_losses', [])
+                online_rmspe = online_metrics.get('main_losses', [])
+                
+                if pretrained_rmspe and online_rmspe:
+                    # Use last 15 windows or all if fewer than 15
+                    num_windows = min(15, len(pretrained_rmspe), len(online_rmspe))
+                    pretrained_last15 = pretrained_rmspe[-num_windows:]
+                    online_last15 = online_rmspe[-num_windows:]
+                    
+                    # Calculate standalone values
+                    pretrained_rmspe_avg = np.mean(pretrained_last15)
+                    online_rmspe_avg = np.mean(online_last15)
+                    
+                    # Calculate L2 distance (average improvement)
+                    # Positive means online model is better (lower loss)
+                    improvements = [pre - onl for pre, onl in zip(pretrained_last15, online_last15)]
+                    rmspe_improvement = np.mean(improvements)
+                    
+                    logger.info(f"Eta {eta}: RMSPE - Pretrained: {pretrained_rmspe_avg:.6f} rad ({(pretrained_rmspe_avg / np.pi) * 180:.3f}°), Algorithm 1: {online_rmspe_avg:.6f} rad ({(online_rmspe_avg / np.pi) * 180:.3f}°), Improvement: {rmspe_improvement:.6f} rad ({(rmspe_improvement / np.pi) * 180:.3f}°)")
+                
+                # Calculate supervised model RMSPE improvement if available
+                if supervised_metrics is not None:
+                    supervised_rmspe = supervised_metrics.get('main_losses', [])
+                    if supervised_rmspe:
+                        num_windows = min(15, len(pretrained_rmspe), len(supervised_rmspe))
+                        supervised_last15 = supervised_rmspe[-num_windows:]
+                        
+                        # Calculate supervised model improvement vs pretrained
+                        supervised_improvements = [pre - sup for pre, sup in zip(pretrained_last15, supervised_last15)]
+                        supervised_rmspe_improvement = np.mean(supervised_improvements)
+                        
+                        supervised_rmspe_avg = np.mean(supervised_last15)
+                        logger.info(f"Eta {eta}: RMSPE Supervised - Supervised Trained: {supervised_rmspe_avg:.6f} rad ({(supervised_rmspe_avg / np.pi) * 180:.3f}°), vs Pretrained Improvement: {supervised_rmspe_improvement:.6f} rad ({(supervised_rmspe_improvement / np.pi) * 180:.3f}°)")
+                
+                # Get last 15 windows for MSIE (training reference losses)
+                pretrained_msie = pretrained_metrics.get('training_reference_losses', [])
+                online_msie = online_metrics.get('training_reference_losses', [])
+                
+                if pretrained_msie and online_msie:
+                    # Use last 15 windows or all if fewer than 15
+                    num_windows = min(15, len(pretrained_msie), len(online_msie))
+                    pretrained_last15 = pretrained_msie[-num_windows:]
+                    online_last15 = online_msie[-num_windows:]
+                    
+                    # Calculate standalone values
+                    pretrained_msie_avg = np.mean(pretrained_last15)
+                    online_msie_avg = np.mean(online_last15)
+                    
+                    # Calculate L2 distance (average improvement)
+                    improvements = [pre - onl for pre, onl in zip(pretrained_last15, online_last15)]
+                    msie_improvement = np.mean(improvements)
+                    
+                    logger.info(f"Eta {eta}: MSIE - Pretrained: {pretrained_msie_avg:.6f} rad ({(pretrained_msie_avg / np.pi) * 180:.3f}°), Algorithm 1: {online_msie_avg:.6f} rad ({(online_msie_avg / np.pi) * 180:.3f}°), Improvement: {msie_improvement:.6f} rad ({(msie_improvement / np.pi) * 180:.3f}°)")
+                
+                # Calculate supervised model MSIE improvement if available
+                if supervised_metrics is not None:
+                    supervised_msie = supervised_metrics.get('training_reference_losses', [])
+                    if supervised_msie:
+                        num_windows = min(15, len(pretrained_msie), len(supervised_msie))
+                        supervised_last15 = supervised_msie[-num_windows:]
+                        
+                        # Calculate supervised model improvement vs pretrained
+                        supervised_improvements = [pre - sup for pre, sup in zip(pretrained_last15, supervised_last15)]
+                        supervised_msie_improvement = np.mean(supervised_improvements)
+                        
+                        supervised_msie_avg = np.mean(supervised_last15)
+                        logger.info(f"Eta {eta}: MSIE Supervised - Supervised Trained: {supervised_msie_avg:.6f} rad ({(supervised_msie_avg / np.pi) * 180:.3f}°), vs Pretrained Improvement: {supervised_msie_improvement:.6f} rad ({(supervised_msie_improvement / np.pi) * 180:.3f}°)")
+        
+        # Store the improvements
+        rmspe_improvements.append(rmspe_improvement)
+        msie_improvements.append(msie_improvement)
+        supervised_rmspe_improvements.append(supervised_rmspe_improvement)
+        supervised_msie_improvements.append(supervised_msie_improvement)
+    
+    # Create the table plot with minimal margins
+    fig, ax = plt.subplots(figsize=(8, 12))
+    ax.axis('off')  # Turn off axes for table
+    
+    # Remove all margins and set tight spacing
+    fig.subplots_adjust(left=0, right=1, top=0.85, bottom=0.02)
+    
+    # Prepare table data (Eta as rows, loss types as columns)
+    eta_labels = [f'Eta {eta:.2f}' for eta in eta_values]
+    table_headers = ['Eta', 'RMSPE (Alg 1)', 'MSIE (Alg 1)', 'RMSPE (Supervised)']
+    
+    # Format the improvement values with degree conversion
+    table_data = []
+    for i, eta in enumerate(eta_values):
+        # Convert to degrees and add degree symbol
+        rmspe_val = f'{(rmspe_improvements[i] / np.pi) * 180:.3f}°' if not np.isnan(rmspe_improvements[i]) else 'N/A'
+        msie_val = f'{(msie_improvements[i] / np.pi) * 180:.3f}°' if not np.isnan(msie_improvements[i]) else 'N/A'
+        supervised_rmspe_val = f'{(supervised_rmspe_improvements[i] / np.pi) * 180:.3f}°' if not np.isnan(supervised_rmspe_improvements[i]) else 'N/A'
+        table_data.append([eta_labels[i], rmspe_val, msie_val, supervised_rmspe_val])
+    
+    # Create the table positioned to avoid overlap with titles
+    table = ax.table(cellText=table_data, colLabels=table_headers,
+                    cellLoc='center', loc='center',
+                    colWidths=[0.2, 0.267, 0.267, 0.267])
+    
+    # Style the table
+    table.auto_set_font_size(False)
+    table.set_fontsize(16)
+    table.scale(1.2, 2.5)
+    
+    # Style header row
+    for i in range(len(table_headers)):
+        table[(0, i)].set_facecolor('#4472C4')
+        table[(0, i)].set_text_props(weight='bold', color='white')
+        table[(0, i)].set_fontsize(16)
+    
+    # Style data rows with color coding based on improvement
+    for i in range(len(table_data)):
+        for j in range(len(table_headers)):
+            if j == 0:  # First column (Eta labels)
+                table[(i+1, j)].set_facecolor('#E7E6E6')
+                table[(i+1, j)].set_text_props(weight='bold')
+                table[(i+1, j)].set_fontsize(16)
+            else:  # Data columns (RMSPE and MSIE for both algorithms)
+                # Color code based on improvement value
+                if j == 1:  # Algorithm 1 RMSPE
+                    improvement = rmspe_improvements[i]
+                elif j == 2:  # Algorithm 1 MSIE
+                    improvement = msie_improvements[i]
+                elif j == 3:  # Supervised RMSPE
+                    improvement = supervised_rmspe_improvements[i]
+                else:
+                    improvement = np.nan
+                
+                if not np.isnan(improvement):
+                    if improvement > 0:  # Algorithm is better than pretrained
+                        table[(i+1, j)].set_facecolor('#C6EFCE')
+                    elif improvement < 0:  # Pretrained model is better
+                        table[(i+1, j)].set_facecolor('#FFC7CE')
+                    else:  # No difference
+                        table[(i+1, j)].set_facecolor('#FFFFFF')
+                else:
+                    table[(i+1, j)].set_facecolor('#F2F2F2')
+                
+                table[(i+1, j)].set_fontsize(16)
+    
+    # Add title and subtitle with proper spacing
+    plt.suptitle('Performance Improvement of Algorithms vs Pretrained Model (Eta Scenario)', 
+                 fontsize=20, fontweight='bold', y=0.95)
+    ax.text(0.5, 0.82, 'Average L2 Distance (Pretrained - Algorithm) over Last 15 Windows', 
+            ha='center', va='center', transform=ax.transAxes, fontsize=18, style='italic')
+    
+    # Save the plot
+    plot_path = output_dir / 'performance_improvement_table_eta.png'
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight', pad_inches=0)
+    plt.close()
+    logger.info(f"Saved performance improvement table for eta scenario to {plot_path}")
+    return plot_path
     plt.savefig(plot_path, dpi=300, bbox_inches='tight', pad_inches=0.02)
     plt.close()
     

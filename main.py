@@ -363,6 +363,16 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
                 from utils.plotting import plot_scenario_results, plot_performance_improvement_table
                 plot_scenario_results(results, sim.output_dir)
                 plot_performance_improvement_table(results, sim.output_dir)
+            
+            # Plot scenario results if it's an eta scenario
+            if scenario.lower() == 'eta' and mode == 'online_learning':
+                from utils.plotting import plot_eta_scenario_comparison, plot_performance_improvement_table_eta, plot_scenario_results
+                # Plot drift detection comparison (detection window, z-score, learning rate)
+                plot_eta_scenario_comparison(results, sim.output_dir)
+                # Plot performance improvement table for eta scenario
+                plot_performance_improvement_table_eta(results, sim.output_dir)
+                # Plot averaged comparison (same as SNR case but with eta values)
+                plot_scenario_results(results, sim.output_dir, scenario_type='eta')
         else:
             if mode == 'full':
                 logger.info("Running full simulation (training, evaluation, and online learning)")

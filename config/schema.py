@@ -184,6 +184,14 @@ class OnlineLearningConfig(BaseModel):
     
     # Online learning start configuration
     time_to_learn: Optional[int] = Field(default=None, description="Window index at which to start online learning. If None, online learning will not start automatically based on window index.")
+    
+    # Adaptive learning rate configuration
+    use_adaptive_learning_rate: bool = Field(default=False, description="If True, learning rate adapts based on GLRT z-score. If False, uses fixed learning_rate.")
+    
+    # GLRT statistical detection parameters
+    glrt_detection_z_threshold: float = Field(default=2.5, description="Z-score threshold for GLRT-based drift detection. Drift is detected when GLRT z-score exceeds this value.")
+    glrt_baseline_window_size: int = Field(default=20, description="Number of recent GLRT values to use for baseline estimation (mean/std calculation).")
+    glrt_min_samples_for_statistics: int = Field(default=10, description="Minimum number of GLRT samples required before using statistical baseline for drift detection.")
 
 
 class ScenarioSystemModelOverride(BaseModel):

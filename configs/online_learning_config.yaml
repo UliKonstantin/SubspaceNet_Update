@@ -140,7 +140,7 @@ online_learning:
   #   training_loss_type: "unsupervised_rmspe"  # Use unsupervised RMSPE loss for training
   
   # Online learning start configuration
-  time_to_learn: 35  # Window index at which to start online learning
+  time_to_learn: 10  # Window index at which to start online learning
 
 # Logging configuration
 logging:

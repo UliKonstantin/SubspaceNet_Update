@@ -254,12 +254,9 @@ def average_online_learning_results_across_trajectories(results_list: list) -> d
         
         # Extract metadata
         metadata = {
-            "drift_detected_count": ol_results.get("drift_detected_count", 0),
-            "model_updated_count": ol_results.get("model_updated_count", 0),
             "window_count": ol_results.get("window_count", 0),
             "window_size": ol_results.get("window_size", 0),
             "stride": ol_results.get("stride", 0),
-            "loss_threshold": ol_results.get("loss_threshold", 0.0),
         }
         metadata_list.append(metadata)
     
@@ -436,21 +433,11 @@ def _calculate_trajectory_summary_statistics(metadata_list: list) -> dict:
         return {}
     
     # Extract statistics
-    drift_counts = [meta["drift_detected_count"] for meta in metadata_list]
-    model_update_counts = [meta["model_updated_count"] for meta in metadata_list]
     window_counts = [meta["window_count"] for meta in metadata_list]
-    loss_thresholds = [meta["loss_threshold"] for meta in metadata_list]
     
     summary = {
         "total_trajectories": len(metadata_list),
-        "avg_drift_detected": np.mean(drift_counts),
-        "std_drift_detected": np.std(drift_counts),
-        "avg_model_updates": np.mean(model_update_counts),
-        "std_model_updates": np.std(model_update_counts),
         "avg_window_count": np.mean(window_counts),
-        "avg_loss_threshold": np.mean(loss_thresholds),
-        "total_drift_detected": sum(drift_counts),
-        "total_model_updates": sum(model_update_counts),
     }
     
     return summary
@@ -482,6 +469,11 @@ def _average_glrt_results(results_list: list) -> dict:
     main_changepoint_windows = []
     ref_likelihoods = []
     main_likelihoods = []
+    # Collect z-scores and learning rates at detection
+    ref_z_scores = []
+    main_z_scores = []
+    ref_learning_rates = []
+    main_learning_rates = []
     
     # Collect GLRT results from all trajectories
     for result in results_list:
@@ -505,6 +497,12 @@ def _average_glrt_results(results_list: list) -> dict:
                 main_changepoint_windows.append(online_results["glrt_main_loss_changepoint_window"])
             if online_results.get("glrt_main_loss_likelihood") is not None:
                 main_likelihoods.append(online_results["glrt_main_loss_likelihood"])
+        
+        # Collect z-scores and learning rates at detection time (from main loss GLRT)
+        if online_results.get("glrt_z_score_at_detection") is not None:
+            main_z_scores.append(online_results["glrt_z_score_at_detection"])
+        if online_results.get("learning_rate_at_detection") is not None:
+            main_learning_rates.append(online_results["learning_rate_at_detection"])
     
     glrt_results = {}
     
@@ -546,16 +544,28 @@ def _average_glrt_results(results_list: list) -> dict:
         avg_main_likelihood = float(np.mean(main_likelihoods)) if main_likelihoods else None
         std_main_likelihood = float(np.std(main_likelihoods)) if main_likelihoods else None
         
+        # Calculate z-score and learning rate statistics
+        avg_z_score = float(np.mean(main_z_scores)) if main_z_scores else None
+        std_z_score = float(np.std(main_z_scores)) if main_z_scores else None
+        avg_learning_rate = float(np.mean(main_learning_rates)) if main_learning_rates else None
+        std_learning_rate = float(np.std(main_learning_rates)) if main_learning_rates else None
+        
         glrt_results["main_loss"] = {
             "avg_losses": avg_main_losses,
             "avg_changepoint_window": avg_main_changepoint,
             "std_changepoint_window": std_main_changepoint,
             "avg_likelihood": avg_main_likelihood,
             "std_likelihood": std_main_likelihood,
+            "avg_z_score": avg_z_score,
+            "std_z_score": std_z_score,
+            "avg_learning_rate": avg_learning_rate,
+            "std_learning_rate": std_learning_rate,
             "trajectory_count": len(main_loss_sequences),
             "min_segment_size": min_segment_size,
             "individual_changepoint_windows": main_changepoint_windows,
-            "individual_likelihoods": main_likelihoods
+            "individual_likelihoods": main_likelihoods,
+            "individual_z_scores": main_z_scores,
+            "individual_learning_rates": main_learning_rates
         }
     
     return glrt_results
