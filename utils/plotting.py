@@ -3,6 +3,7 @@ import numpy as np
 from pathlib import Path
 import logging
 import datetime
+from typing import Dict
 
 def plot_loss_vs_scenario(scenario_results, scenario, output_dir):
     """
@@ -916,6 +917,20 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
     logger.info(f"Completed eta comparison plotting: {len(saved_plots)} plots saved to {plot_dir}")
     return saved_plots
 
+def _unwrap_result_for_lr_sweep(result: dict) -> dict:
+    """When LR sweep is enabled, result has lr_sweep_results; extract the nested online-learning result."""
+    if not isinstance(result, dict) or 'lr_sweep_results' not in result:
+        return result
+    lr_results = result['lr_sweep_results']
+    # Prefer adaptive result; otherwise use first available
+    if 'adaptive' in lr_results and isinstance(lr_results['adaptive'], dict) and lr_results['adaptive'].get('result'):
+        return lr_results['adaptive']['result']
+    for k, v in lr_results.items():
+        if isinstance(v, dict) and v.get('result'):
+            return v['result']
+    return result
+
+
 def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_type: str = 'snr') -> None:
     """
     Plot scenario results comparing average dB loss of online learning vs pretrained models.
@@ -957,7 +972,7 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_typ
         if result is None:
             logger.warning(f"{value_label} {val} not found in results, skipping...")
             continue
-        
+        result = _unwrap_result_for_lr_sweep(result)
         # Extract averaged results (use the already calculated averages)
         online_avg_db = None
         pretrained_avg_db = None
@@ -1057,7 +1072,19 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_typ
         pretrained_avg_db_losses.append(pretrained_avg_db if pretrained_avg_db is not None else np.nan)
         supervised_avg_db_losses.append(supervised_avg_db if supervised_avg_db is not None else np.nan)
         
-        logger.info(f"{value_label} {val}: Online avg dB loss = {online_avg_db:.2f}, Pretrained avg dB loss = {pretrained_avg_db:.2f}, Supervised avg dB loss = {supervised_avg_db:.2f}" if supervised_avg_db is not None else f"{value_label} {val}: Online avg dB loss = {online_avg_db:.2f}, Pretrained avg dB loss = {pretrained_avg_db:.2f}")
+        # Log with proper None handling
+        parts = []
+        if online_avg_db is not None:
+            parts.append(f"Online avg dB loss = {online_avg_db:.2f}")
+        if pretrained_avg_db is not None:
+            parts.append(f"Pretrained avg dB loss = {pretrained_avg_db:.2f}")
+        if supervised_avg_db is not None:
+            parts.append(f"Supervised avg dB loss = {supervised_avg_db:.2f}")
+        
+        if parts:
+            logger.info(f"{value_label} {val}: {', '.join(parts)}")
+        else:
+            logger.info(f"{value_label} {val}: No loss data available")
     
     # Create the plot
     plt.figure(figsize=(10, 6))
@@ -1185,7 +1212,7 @@ def plot_eta_scenario_comparison(scenario_results: dict, output_dir: Path) -> No
             learning_rates.append(np.nan)
             learning_rate_stds.append(np.nan)
             continue
-        
+        result = _unwrap_result_for_lr_sweep(result)
         # Extract GLRT results
         detection_window = None
         detection_window_std = None
@@ -1325,10 +1352,14 @@ def _plot_glrt_scenario_results(scenario_results: dict, output_dir: Path) -> Non
     likelihood_data_by_scenario = {}   # {scenario_value: [list of likelihoods]}
     
     for scenario_val in scenario_values:
-        result = scenario_results.get(str(scenario_val))
+        result = None
+        for key in scenario_results:
+            if scenario_results[key] is not None and abs(float(key) - scenario_val) < 1e-10:
+                result = scenario_results[key]
+                break
         if not result:
             continue
-        
+        result = _unwrap_result_for_lr_sweep(result)
         # Try to get GLRT results from different locations
         glrt_results = None
         if "glrt_results" in result:
@@ -1932,6 +1963,155 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
     return plot_path
 
 
+def plot_lr_sweep_heatmap(heatmap_data: Dict, output_dir: Path) -> Path:
+    """
+    Create heatmap of average RMSPE loss vs eta and LR values.
+    
+    Args:
+        heatmap_data: Dictionary with keys:
+        - eta_values: List of eta values
+        - lr_values: List of LR values
+        - lr_types: List of "static" or "adaptive"
+        - lr_row_ids: List of unique row IDs (int for static run index, "ADAPTIVE" for adaptive)
+        - avg_losses: List of average RMSPE losses
+        output_dir: Output directory for saving plot
+    
+    Returns:
+        Path to saved plot file
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    
+    logger = logging.getLogger(__name__)
+    logger.info("Creating LR sweep heatmap...")
+    
+    # Build DataFrame with lr_row_id for unique rows (allows duplicate LRs as separate rows)
+    df_dict = {
+        'eta': heatmap_data['eta_values'],
+        'lr': heatmap_data['lr_values'],
+        'lr_type': heatmap_data['lr_types'],
+        'loss': heatmap_data['avg_losses']
+    }
+    if 'lr_row_ids' in heatmap_data and heatmap_data['lr_row_ids']:
+        df_dict['lr_row_id'] = heatmap_data['lr_row_ids']
+    else:
+        # Fallback: use lr for static, ADAPTIVE for adaptive (old behavior, collapses duplicates)
+        df_dict['lr_row_id'] = [
+            'ADAPTIVE' if lt == 'adaptive' else lr
+            for lt, lr in zip(heatmap_data['lr_types'], heatmap_data['lr_values'])
+        ]
+    
+    df = pd.DataFrame(df_dict)
+    
+    # Get unique eta values
+    eta_unique = sorted(df['eta'].unique())
+    
+    # Separate static and adaptive
+    static_df = df[df['lr_type'] == 'static'].copy()
+    adaptive_df = df[df['lr_type'] == 'adaptive'].copy()
+    
+    # Build row order: static runs by lr_row_id (0, 1, 2, ...), then ADAPTIVE
+    static_row_ids = sorted([r for r in df['lr_row_id'].unique() if r != 'ADAPTIVE'], key=lambda x: x if isinstance(x, (int, np.integer)) else 999)
+    row_order = static_row_ids.copy()
+    if not adaptive_df.empty and 'ADAPTIVE' in df['lr_row_id'].values:
+        row_order.append('ADAPTIVE')
+    
+    # Create pivot table using lr_row_id (unique per run, so duplicate LRs get separate rows)
+    pivot_all = df.pivot_table(
+        values='loss',
+        index='lr_row_id',
+        columns='eta',
+        aggfunc='mean'
+    )
+    
+    # Reindex to match desired row order
+    pivot_all = pivot_all.reindex(row_order)
+    
+    # Ensure all eta columns are present
+    pivot_all = pivot_all.reindex(columns=eta_unique)
+    
+    # Create figure with appropriate height based on number of rows
+    fig, ax = plt.subplots(figsize=(14, max(8, len(row_order) * 0.8)))
+    
+    # Create proper discrete heatmap using pcolormesh
+    # Get the data matrix
+    data_matrix = pivot_all.values
+    
+    # Create meshgrid for proper cell positioning
+    y_positions = np.arange(len(row_order) + 1)
+    x_positions = np.arange(len(eta_unique) + 1)
+    
+    # Create heatmap using pcolormesh for proper discrete cells
+    # Use reversed viridis: yellow = low error, dark = high error
+    im = ax.pcolormesh(x_positions, y_positions, data_matrix, 
+                       cmap='viridis_r', shading='flat', edgecolors='white', linewidths=1.5)
+    
+    # Set ticks at cell centers
+    ax.set_xticks(x_positions[:-1] + 0.5)
+    ax.set_yticks(y_positions[:-1] + 0.5)
+    ax.set_xticklabels([f"{eta:.2f}" for eta in eta_unique])
+    
+    # Create row labels: lr_value for each row (from first occurrence), "Adaptive" for adaptive
+    y_labels = []
+    for row_id in row_order:
+        if row_id == 'ADAPTIVE':
+            y_labels.append("Adaptive")
+        else:
+            row_data = df[df['lr_row_id'] == row_id]
+            lr_val = row_data['lr'].iloc[0] if not row_data.empty else row_id
+            y_labels.append(f"{lr_val:.6f}" if isinstance(lr_val, (int, float, np.floating)) else str(row_id))
+    
+    ax.set_yticklabels(y_labels)
+    
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label('Average RMSPE Loss', rotation=270, labelpad=20)
+    
+    # Add text annotations in each cell
+    for i, lr_val in enumerate(row_order):
+        for j, eta_val in enumerate(eta_unique):
+            cell_value = pivot_all.iloc[i, j]
+            if pd.notna(cell_value):
+                # For adaptive row, also show the LR value
+                if lr_val == 'ADAPTIVE':
+                    # This is adaptive row - get the actual LR value for this eta
+                    adaptive_row_data = adaptive_df[adaptive_df['eta'] == eta_val]
+                    if not adaptive_row_data.empty:
+                        adaptive_lr_val = adaptive_row_data.iloc[0]['lr']
+                        cell_text = f"{cell_value:.4f}\nLR: {adaptive_lr_val:.6f}"
+                    else:
+                        cell_text = f"{cell_value:.4f}"
+                else:
+                    cell_text = f"{cell_value:.4f}"
+                
+                # Determine text color based on cell value (white for dark, black for light)
+                # Use median as threshold
+                median_loss = np.nanmedian(data_matrix)
+                text_color = 'white' if cell_value > median_loss else 'black'
+                
+                ax.text(j + 0.5, i + 0.5, cell_text,
+                       ha="center", va="center", color=text_color, fontsize=9, weight='bold')
+    
+    # Labels and title
+    ax.set_xlabel('Eta Value', fontsize=12)
+    ax.set_ylabel('Learning Rate Value', fontsize=12)
+    ax.set_title('Average RMSPE Loss Heatmap: Eta vs Learning Rate', fontsize=14)
+    
+    # Invert y-axis so first row is at top
+    ax.invert_yaxis()
+    
+    plt.tight_layout()
+    
+    # Save plot
+    plot_path = output_dir / "lr_sweep_heatmap.png"
+    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    
+    logger.info(f"LR sweep heatmap saved to {plot_path}")
+    return plot_path
+
+
 def plot_performance_improvement_table_eta(scenario_results: dict, output_dir: Path) -> Path:
     """
     Create a performance improvement table comparing online learning vs pretrained models for eta scenario.
@@ -1985,7 +2165,7 @@ def plot_performance_improvement_table_eta(scenario_results: dict, output_dir: P
             supervised_rmspe_improvements.append(np.nan)
             supervised_msie_improvements.append(np.nan)
             continue
-        
+        result = _unwrap_result_for_lr_sweep(result)
         # Initialize improvements as NaN
         rmspe_improvement = np.nan
         msie_improvement = np.nan

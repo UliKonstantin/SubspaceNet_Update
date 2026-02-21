@@ -192,6 +192,11 @@ class OnlineLearningConfig(BaseModel):
     glrt_detection_z_threshold: float = Field(default=2.5, description="Z-score threshold for GLRT-based drift detection. Drift is detected when GLRT z-score exceeds this value.")
     glrt_baseline_window_size: int = Field(default=20, description="Number of recent GLRT values to use for baseline estimation (mean/std calculation).")
     glrt_min_samples_for_statistics: int = Field(default=10, description="Minimum number of GLRT samples required before using statistical baseline for drift detection.")
+    
+    # LR sweep configuration
+    enable_lr_sweep: bool = Field(default=False, description="If True, enable LR sweep within scenario sweeps. For each scenario value, sweep over static LR values and optionally run adaptive LR.")
+    static_lr_list: Optional[List[float]] = Field(default=None, description="List of static LR values to sweep over. Required if enable_lr_sweep=True.")
+    adaptive_base_lr: Optional[float] = Field(default=None, description="Base learning rate for adaptive LR when running LR sweep. If None, uses learning_rate from config.")
 
 
 class ScenarioSystemModelOverride(BaseModel):

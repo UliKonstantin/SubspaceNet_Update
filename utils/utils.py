@@ -474,6 +474,8 @@ def _average_glrt_results(results_list: list) -> dict:
     main_z_scores = []
     ref_learning_rates = []
     main_learning_rates = []
+    # Collect actual per-window LRs used during training (for heatmap)
+    main_actual_lrs = []
     
     # Collect GLRT results from all trajectories
     for result in results_list:
@@ -503,6 +505,9 @@ def _average_glrt_results(results_list: list) -> dict:
             main_z_scores.append(online_results["glrt_z_score_at_detection"])
         if online_results.get("learning_rate_at_detection") is not None:
             main_learning_rates.append(online_results["learning_rate_at_detection"])
+        # Collect actual LRs used during training (for heatmap - matches optimizer)
+        if online_results.get("actual_lr_per_training_window"):
+            main_actual_lrs.extend(online_results["actual_lr_per_training_window"])
     
     glrt_results = {}
     
@@ -549,6 +554,8 @@ def _average_glrt_results(results_list: list) -> dict:
         std_z_score = float(np.std(main_z_scores)) if main_z_scores else None
         avg_learning_rate = float(np.mean(main_learning_rates)) if main_learning_rates else None
         std_learning_rate = float(np.std(main_learning_rates)) if main_learning_rates else None
+        avg_actual_learning_rate = float(np.mean(main_actual_lrs)) if main_actual_lrs else None
+        std_actual_learning_rate = float(np.std(main_actual_lrs)) if main_actual_lrs else None
         
         glrt_results["main_loss"] = {
             "avg_losses": avg_main_losses,
@@ -560,6 +567,8 @@ def _average_glrt_results(results_list: list) -> dict:
             "std_z_score": std_z_score,
             "avg_learning_rate": avg_learning_rate,
             "std_learning_rate": std_learning_rate,
+            "avg_actual_learning_rate": avg_actual_learning_rate,
+            "std_actual_learning_rate": std_actual_learning_rate,
             "trajectory_count": len(main_loss_sequences),
             "min_segment_size": min_segment_size,
             "individual_changepoint_windows": main_changepoint_windows,

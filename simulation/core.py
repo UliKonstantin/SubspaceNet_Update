@@ -1068,83 +1068,357 @@ class Simulation:
             if hasattr(self.config.scenario_config, 'retrain_model'):
                 retrain_model = self.config.scenario_config.retrain_model
         
+        # Check if LR sweep is enabled
+        enable_lr_sweep = False
+        static_lr_list = None
+        adaptive_base_lr = None
+        use_adaptive_learning_rate = False
+        
+        if (scenario_type.lower() == "eta" and 
+            hasattr(self.config, 'online_learning') and 
+            self.config.online_learning.enable_lr_sweep):
+            enable_lr_sweep = True
+            static_lr_list = self.config.online_learning.static_lr_list
+            adaptive_base_lr = self.config.online_learning.adaptive_base_lr
+            use_adaptive_learning_rate = self.config.online_learning.use_adaptive_learning_rate
+            
+            if static_lr_list is None or len(static_lr_list) == 0:
+                logger.warning("enable_lr_sweep=True but static_lr_list is None or empty. Disabling LR sweep.")
+                enable_lr_sweep = False
+        
         for i, value in enumerate(values):
             logger.info(f"Running scenario with {scenario_type}={value}")
             
-            # Create overrides for this scenario
-            if scenario_type.lower() == "eta":
-                # For eta sweeps: start at 0, jump to target at specified window
-                # Set eta_increment = target value and max_eta = target value
-                # This makes the first update jump directly to the target, then stay there
-                overrides = [
-                    "system_model.eta=0.0",  # Always start at 0
-                    f"online_learning.eta_increment={value}",  # Jump directly to this value
-                    f"online_learning.max_eta={value}"  # Clamp to this value
-                ]
-            else:
-                overrides = [f"system_model.{scenario_type.lower()}={value}"]
-            
-            # Add model path override if available
-            if model_paths:
-                if retrain_model and i < len(model_paths):
-                    # Use different model for each scenario value
-                    model_path = model_paths[i]
-                    overrides.append(f"simulation.model_path={model_path}")
-                    logger.info(f"Using model path for {scenario_type}={value}: {model_path}")
-                elif not retrain_model and len(model_paths) > 0:
-                    # Use the first (or only) model path for all scenario values
-                    model_path = model_paths[0]
-                    overrides.append(f"simulation.model_path={model_path}")
-                    logger.info(f"Reusing model path for {scenario_type}={value}: {model_path}")
-                else:
-                    # No model path available for this iteration
-                    overrides.append("simulation.model_path=null")
-            else:
-                # Ensure model_path is set to null if no model paths provided
-                overrides.append("simulation.model_path=null")
-            
-            # Create a modified configuration for this scenario
-            from config.loader import apply_overrides
-            modified_config = apply_overrides(self.config, overrides)
-            
-            # Update components for this sweep value (important for system_model and model recreation)
-            from config_handler import update_components_for_sweep
-            updated_components = update_components_for_sweep(
-                components=self.components,
-                config=modified_config,
-                sweep_param=scenario_type,
-                sweep_value=value
-            )
-            
-            # Create a new simulation with the modified config and updated components
-            simulation = Simulation(
-                config=modified_config,
-                components=updated_components,  # Use updated components
-                output_dir=self.output_dir / f"{scenario_type}_{value}"
-            )
-            
-            # Run the simulation and store results
-            if full_mode:
-                result = simulation.run()  # Run complete pipeline
-            elif self.config.simulation.evaluate_model and not self.config.simulation.train_model:
-                # If in evaluation-only mode, run evaluation instead of training
-                logger.info(f"Running evaluation for {scenario_type}={value}")
-                result = simulation.run_evaluation()
-            elif self.config.simulation.load_model and not self.config.simulation.train_model:
-                # If in online learning mode, run online learning
-                logger.info(f"Running online learning for {scenario_type}={value}")
-                result = simulation.execute_online_learning()
-            else:
-                result = simulation.run_training()  # Run training only
+            # Handle LR sweep for eta scenarios
+            if enable_lr_sweep and scenario_type.lower() == "eta":
+                eta_value = value
+                logger.info(f"Running eta={eta_value} with LR sweep")
                 
-            scenario_results[value] = result
-            
-            # Collect drift detection dicts if available (only for online learning results)
-            if (self.config.simulation.load_model and not self.config.simulation.train_model and 
-                result.get("status") == "success" and "drift_detection_dicts" in result):
-                all_drift_detection_dicts.extend(result["drift_detection_dicts"])
+                # Use static LR list directly
+                static_lr_values = static_lr_list.copy() if static_lr_list else []
+                
+                # Store results for this eta
+                eta_lr_results = {}
+                
+                # Sweep over static LR values (use index for unique keys so duplicate LRs get separate rows)
+                for lr_idx, lr_value in enumerate(static_lr_values):
+                    logger.info(f"  Running static LR={lr_value} (run {lr_idx + 1}/{len(static_lr_values)}) for eta={eta_value}")
+                    
+                    # Create overrides with LR
+                    overrides = [
+                        "system_model.eta=0.0",
+                        f"online_learning.eta_increment={eta_value}",
+                        f"online_learning.max_eta={eta_value}",
+                        f"online_learning.learning_rate={lr_value}",
+                        "online_learning.use_adaptive_learning_rate=false"
+                    ]
+                    
+                    # Add model path override if available
+                    if model_paths:
+                        if retrain_model and i < len(model_paths):
+                            model_path = model_paths[i]
+                            overrides.append(f"simulation.model_path={model_path}")
+                        elif not retrain_model and len(model_paths) > 0:
+                            model_path = model_paths[0]
+                            overrides.append(f"simulation.model_path={model_path}")
+                        else:
+                            overrides.append("simulation.model_path=null")
+                    else:
+                        overrides.append("simulation.model_path=null")
+                    
+                    # Create modified config and run simulation
+                    from config.loader import apply_overrides
+                    modified_config = apply_overrides(self.config, overrides)
+                    
+                    from config_handler import update_components_for_sweep
+                    updated_components = update_components_for_sweep(
+                        components=self.components,
+                        config=modified_config,
+                        sweep_param=scenario_type,
+                        sweep_value=eta_value
+                    )
+                    
+                    simulation = Simulation(
+                        config=modified_config,
+                        components=updated_components,
+                        output_dir=self.output_dir / f"{scenario_type}_{eta_value}" / f"lr_run{lr_idx}_{lr_value}"
+                    )
+                    
+                    # Run simulation
+                    if full_mode:
+                        result = simulation.run()
+                    elif self.config.simulation.load_model and not self.config.simulation.train_model:
+                        logger.info(f"Running online learning for eta={eta_value}, LR={lr_value}")
+                        result = simulation.execute_online_learning()
+                    else:
+                        result = simulation.run_training()
+                    
+                    # Extract average RMSPE loss from post-learning windows
+                    avg_loss = self.extract_post_learning_avg_loss_from_result(result)
+                    
+                    # Store with unique key (index) so duplicate LRs get separate rows
+                    eta_lr_results[lr_idx] = {
+                        "lr_type": "static",
+                        "lr_value": lr_value,
+                        "lr_row_id": lr_idx,
+                        "result": result,
+                        "avg_rmspe_loss": avg_loss
+                    }
+                    
+                    # Collect drift detection dicts if available
+                    if (self.config.simulation.load_model and not self.config.simulation.train_model and 
+                        result.get("status") == "success" and "drift_detection_dicts" in result):
+                        all_drift_detection_dicts.extend(result["drift_detection_dicts"])
+                
+                # Run adaptive LR if enabled
+                if use_adaptive_learning_rate:
+                    logger.info(f"  [ADAPTIVE LR DEBUG] Starting adaptive LR run for eta={eta_value}")
+                    logger.info(f"  Running adaptive LR for eta={eta_value}")
+                    
+                    adaptive_base = adaptive_base_lr if adaptive_base_lr is not None else self.config.online_learning.learning_rate
+                    overrides = [
+                        "system_model.eta=0.0",
+                        f"online_learning.eta_increment={eta_value}",
+                        f"online_learning.max_eta={eta_value}",
+                        f"online_learning.learning_rate={adaptive_base}",
+                        "online_learning.use_adaptive_learning_rate=true"
+                    ]
+                    
+                    # Add model path override if available
+                    if model_paths:
+                        if retrain_model and i < len(model_paths):
+                            model_path = model_paths[i]
+                            overrides.append(f"simulation.model_path={model_path}")
+                        elif not retrain_model and len(model_paths) > 0:
+                            model_path = model_paths[0]
+                            overrides.append(f"simulation.model_path={model_path}")
+                        else:
+                            overrides.append("simulation.model_path=null")
+                    else:
+                        overrides.append("simulation.model_path=null")
+                    
+                    # Create modified config and run simulation
+                    from config.loader import apply_overrides
+                    modified_config = apply_overrides(self.config, overrides)
+                    
+                    from config_handler import update_components_for_sweep
+                    updated_components = update_components_for_sweep(
+                        components=self.components,
+                        config=modified_config,
+                        sweep_param=scenario_type,
+                        sweep_value=eta_value
+                    )
+                    
+                    simulation = Simulation(
+                        config=modified_config,
+                        components=updated_components,
+                        output_dir=self.output_dir / f"{scenario_type}_{eta_value}" / "lr_adaptive"
+                    )
+                    
+                    # Run simulation
+                    if full_mode:
+                        result = simulation.run()
+                    elif self.config.simulation.load_model and not self.config.simulation.train_model:
+                        logger.info(f"Running online learning for eta={eta_value}, adaptive LR")
+                        result = simulation.execute_online_learning()
+                    else:
+                        result = simulation.run_training()
+                    
+                    # Extract average RMSPE loss from post-learning windows
+                    logger.info(f"  [ADAPTIVE LR DEBUG] Extracting avg_loss for eta={eta_value}")
+                    avg_loss = self.extract_post_learning_avg_loss_from_result(result)
+                    logger.info(f"  [ADAPTIVE LR DEBUG] Extracted avg_loss for eta={eta_value}: {avg_loss} (type: {type(avg_loss)})")
+                    
+                    # Use actual per-window LR used during training (matches optimizer) for heatmap
+                    avg_adaptive_lr = None
+                    if result and result.get("status") == "success":
+                        logger.info(f"  [ADAPTIVE LR DEBUG] Result status is success for eta={eta_value}")
+                        # Primary: actual LR used during training (averaged across all windows/trajectories)
+                        avg_adaptive_lr = result.get("avg_actual_learning_rate")
+                        logger.info(f"  [ADAPTIVE LR DEBUG] avg_actual_learning_rate for eta={eta_value}: {avg_adaptive_lr}")
+                        if avg_adaptive_lr is None:
+                            avg_adaptive_lr = result.get("avg_learning_rate_at_detection")
+                            logger.info(f"  [ADAPTIVE LR DEBUG] avg_learning_rate_at_detection (fallback) for eta={eta_value}: {avg_adaptive_lr}")
+                        if avg_adaptive_lr is None:
+                            online_results = result.get("online_learning_results", {})
+                            avg_adaptive_lr = online_results.get("learning_rate_at_detection")
+                            logger.info(f"  [ADAPTIVE LR DEBUG] learning_rate_at_detection (fallback2) for eta={eta_value}: {avg_adaptive_lr}")
+                    else:
+                        logger.warning(f"  [ADAPTIVE LR DEBUG] Result status is NOT success for eta={eta_value}: {result.get('status') if result else 'result is None'}")
+                    if avg_adaptive_lr is None:
+                        avg_adaptive_lr = adaptive_base
+                        logger.info(f"  [ADAPTIVE LR DEBUG] Using adaptive_base as fallback for eta={eta_value}: {avg_adaptive_lr}")
+                    
+                    # Store adaptive result with special marker
+                    logger.info(f"  [ADAPTIVE LR DEBUG] Storing adaptive result for eta={eta_value}: lr_value={avg_adaptive_lr}, avg_rmspe_loss={avg_loss}")
+                    eta_lr_results["adaptive"] = {
+                        "lr_type": "adaptive",
+                        "lr_value": avg_adaptive_lr,
+                        "lr_row_id": "ADAPTIVE",
+                        "result": result,
+                        "avg_rmspe_loss": avg_loss
+                    }
+                    
+                    # Collect drift detection dicts if available
+                    if (self.config.simulation.load_model and not self.config.simulation.train_model and 
+                        result.get("status") == "success" and "drift_detection_dicts" in result):
+                        all_drift_detection_dicts.extend(result["drift_detection_dicts"])
+                
+                # Store all LR results for this eta with informative key
+                logger.info(f"Storing LR sweep results for eta={value}: {len(eta_lr_results)} entries")
+                scenario_results[value] = {
+                    "lr_sweep_results": eta_lr_results,
+                    "standard_result": None
+                }
+                
+                # Collect drift detection dicts from LR sweep results
+                for lr_key, lr_data in eta_lr_results.items():
+                    result = lr_data.get("result")
+                    if (result and 
+                        self.config.simulation.load_model and not self.config.simulation.train_model and 
+                        result.get("status") == "success" and "drift_detection_dicts" in result):
+                        all_drift_detection_dicts.extend(result["drift_detection_dicts"])
+            else:
+                # Standard scenario execution (no LR sweep)
+                # Create overrides for this scenario
+                if scenario_type.lower() == "eta":
+                    # For eta sweeps: start at 0, jump to target at specified window
+                    # Set eta_increment = target value and max_eta = target value
+                    # This makes the first update jump directly to the target, then stay there
+                    overrides = [
+                        "system_model.eta=0.0",  # Always start at 0
+                        f"online_learning.eta_increment={value}",  # Jump directly to this value
+                        f"online_learning.max_eta={value}"  # Clamp to this value
+                    ]
+                else:
+                    overrides = [f"system_model.{scenario_type.lower()}={value}"]
+                
+                # Add model path override if available
+                if model_paths:
+                    if retrain_model and i < len(model_paths):
+                        # Use different model for each scenario value
+                        model_path = model_paths[i]
+                        overrides.append(f"simulation.model_path={model_path}")
+                        logger.info(f"Using model path for {scenario_type}={value}: {model_path}")
+                    elif not retrain_model and len(model_paths) > 0:
+                        # Use the first (or only) model path for all scenario values
+                        model_path = model_paths[0]
+                        overrides.append(f"simulation.model_path={model_path}")
+                        logger.info(f"Reusing model path for {scenario_type}={value}: {model_path}")
+                    else:
+                        # No model path available for this iteration
+                        overrides.append("simulation.model_path=null")
+                else:
+                    # Ensure model_path is set to null if no model paths provided
+                    overrides.append("simulation.model_path=null")
+                
+                # Create a modified configuration for this scenario
+                from config.loader import apply_overrides
+                modified_config = apply_overrides(self.config, overrides)
+                
+                # Update components for this sweep value (important for system_model and model recreation)
+                from config_handler import update_components_for_sweep
+                updated_components = update_components_for_sweep(
+                    components=self.components,
+                    config=modified_config,
+                    sweep_param=scenario_type,
+                    sweep_value=value
+                )
+                
+                # Create a new simulation with the modified config and updated components
+                simulation = Simulation(
+                    config=modified_config,
+                    components=updated_components,  # Use updated components
+                    output_dir=self.output_dir / f"{scenario_type}_{value}"
+                )
+                
+                # Run the simulation and store results
+                if full_mode:
+                    result = simulation.run()  # Run complete pipeline
+                elif self.config.simulation.evaluate_model and not self.config.simulation.train_model:
+                    # If in evaluation-only mode, run evaluation instead of training
+                    logger.info(f"Running evaluation for {scenario_type}={value}")
+                    result = simulation.run_evaluation()
+                elif self.config.simulation.load_model and not self.config.simulation.train_model:
+                    # If in online learning mode, run online learning
+                    logger.info(f"Running online learning for {scenario_type}={value}")
+                    result = simulation.execute_online_learning()
+                else:
+                    result = simulation.run_training()  # Run training only
+                    
+                scenario_results[value] = result
+                
+                # Collect drift detection dicts if available (only for online learning results)
+                if (self.config.simulation.load_model and not self.config.simulation.train_model and 
+                    result.get("status") == "success" and "drift_detection_dicts" in result):
+                    all_drift_detection_dicts.extend(result["drift_detection_dicts"])
         
         self.results[scenario_type] = scenario_results
+        
+        # Aggregate results for heatmap if LR sweep was enabled
+        logger.info(f"Checking LR sweep aggregation: enable_lr_sweep={enable_lr_sweep}, scenario_results keys: {list(scenario_results.keys())}")
+        
+        if enable_lr_sweep:
+            heatmap_data = {
+                "eta_values": [],
+                "lr_values": [],
+                "lr_types": [],
+                "lr_row_ids": [],
+                "avg_losses": []
+            }
+            
+            logger.info(f"Aggregating heatmap data from {len(scenario_results)} scenario results")
+            
+            for eta_value, eta_data in scenario_results.items():
+                logger.info(f"Processing eta_value={eta_value}, eta_data type={type(eta_data)}")
+                
+                # Handle new structure: scenario_results[eta_value] = {"lr_sweep_results": {...}, ...}
+                if isinstance(eta_data, dict) and "lr_sweep_results" in eta_data:
+                    lr_results = eta_data.get("lr_sweep_results", {})
+                    logger.info(f"Eta {eta_value}: Found {len(lr_results)} LR results, keys: {list(lr_results.keys())}")
+                    
+                    if not lr_results:
+                        logger.warning(f"Eta {eta_value}: lr_sweep_results is empty!")
+                    else:
+                        has_adaptive = "adaptive" in lr_results
+                        logger.info(f"  [HEATMAP DEBUG] Eta {eta_value}: Has 'adaptive' key: {has_adaptive}, All keys: {list(lr_results.keys())}")
+                        for lr_key, lr_data in lr_results.items():
+                            lr_row_id = lr_data.get("lr_row_id", lr_key)
+                            logger.debug(f"  Adding LR entry: key={lr_key}, lr_row_id={lr_row_id}, lr_value={lr_data.get('lr_value')}, lr_type={lr_data.get('lr_type')}, avg_loss={lr_data.get('avg_rmspe_loss')}")
+                            heatmap_data["eta_values"].append(eta_value)
+                            heatmap_data["lr_values"].append(lr_data["lr_value"])
+                            heatmap_data["lr_types"].append(lr_data["lr_type"])
+                            heatmap_data["lr_row_ids"].append(lr_row_id)
+                            avg_loss = lr_data.get("avg_rmspe_loss")
+                            if avg_loss is None:
+                                logger.warning(f"  [HEATMAP DEBUG] avg_loss is None for eta={eta_value}, lr_key={lr_key}, lr_type={lr_data.get('lr_type')}")
+                            elif np.isnan(avg_loss):
+                                logger.warning(f"  [HEATMAP DEBUG] avg_loss is NaN for eta={eta_value}, lr_key={lr_key}, lr_type={lr_data.get('lr_type')}")
+                            heatmap_data["avg_losses"].append(avg_loss if avg_loss is not None else np.nan)
+                else:
+                    logger.warning(f"Eta {eta_value}: Data structure doesn't match expected format. Type: {type(eta_data)}, Is dict: {isinstance(eta_data, dict)}, Keys: {list(eta_data.keys()) if isinstance(eta_data, dict) else 'N/A'}")
+            
+            logger.info(f"Heatmap data aggregated: {len(heatmap_data['eta_values'])} entries (eta_values: {heatmap_data['eta_values']})")
+            
+            # Verify we have data before storing
+            if len(heatmap_data['eta_values']) == 0:
+                logger.error("WARNING: Heatmap data is empty! This should not happen if LR sweep ran successfully.")
+                logger.error(f"Debug info: scenario_results has {len(scenario_results)} entries")
+                for k, v in scenario_results.items():
+                    logger.error(f"  Key: {k}, Type: {type(v)}, Is dict: {isinstance(v, dict)}, Has lr_sweep_results: {'lr_sweep_results' in v if isinstance(v, dict) else False}")
+            
+            # Store heatmap data
+            self.results["lr_sweep_heatmap_data"] = heatmap_data
+            logger.info(f"Stored heatmap data in self.results['lr_sweep_heatmap_data'] with {len(heatmap_data['eta_values'])} entries")
+            
+            # Dump heatmap data to JSON for offline analysis
+            import json
+            heatmap_json_path = self.output_dir / "lr_sweep_heatmap_data.json"
+            with open(heatmap_json_path, "w") as f:
+                json.dump(heatmap_data, f, indent=2, default=str)
+            logger.info(f"Saved heatmap data to {heatmap_json_path}")
+        else:
+            logger.warning("LR sweep is disabled, skipping heatmap aggregation")
         
         # Save drift detection dicts as JSON if we have any and we're in online learning mode
         if (self.config.simulation.load_model and not self.config.simulation.train_model and 
@@ -1172,6 +1446,98 @@ class Simulation:
             logger.info(f"Saved {len(all_drift_detection_dicts)} drift detection dicts to {json_path}")
         
         return scenario_results
+
+    def extract_post_learning_avg_loss_from_result(self, result: Dict) -> Optional[float]:
+        """Extract average RMSPE loss from post-learning windows using existing result structure."""
+        import numpy as np
+        
+        try:
+            if result is None:
+                logger.warning("[EXTRACT DEBUG] result is None")
+                return None
+            
+            if result.get("status") != "success":
+                logger.warning(f"[EXTRACT DEBUG] result status is not success: {result.get('status')}")
+                return None
+            
+            averaged_results = result.get("averaged_results", {})
+            if not averaged_results:
+                logger.warning("[EXTRACT DEBUG] averaged_results is empty or missing, trying fallback to individual trajectory results")
+                # Fallback: try to extract from individual trajectory results
+                online_learning_results = result.get("online_learning_results", {})
+                online_trajectory_results = online_learning_results.get("online_trajectory_results", [])
+                if online_trajectory_results and len(online_trajectory_results) > 0:
+                    # Extract main_losses from first trajectory
+                    first_traj = online_trajectory_results[0]
+                    if hasattr(first_traj, 'window_results') and first_traj.window_results:
+                        main_losses = [wr.loss_metrics.main_loss for wr in first_traj.window_results if hasattr(wr, 'loss_metrics')]
+                        training_end_window = online_learning_results.get("training_end_window")
+                        training_start_window = online_learning_results.get("training_start_window")
+                        logger.info(f"[EXTRACT DEBUG] Fallback: extracted {len(main_losses)} losses from individual trajectory")
+                        if main_losses:
+                            # Use same logic as below
+                            if training_end_window is None:
+                                if training_start_window is not None and training_start_window + 1 < len(main_losses):
+                                    post_learning_losses = main_losses[training_start_window + 1:]
+                                    avg_loss = float(np.mean(post_learning_losses))
+                                    logger.info(f"[EXTRACT DEBUG] Fallback calculated avg_loss: {avg_loss}")
+                                    return avg_loss
+                            elif training_end_window + 1 < len(main_losses):
+                                post_learning_losses = main_losses[training_end_window + 1:]
+                                avg_loss = float(np.mean(post_learning_losses))
+                                logger.info(f"[EXTRACT DEBUG] Fallback calculated avg_loss: {avg_loss}")
+                                return avg_loss
+                logger.warning("[EXTRACT DEBUG] Fallback also failed, returning None")
+                return None
+            
+            averaged_online = averaged_results.get("averaged_online_trajectory", {})
+            if not averaged_online:
+                logger.warning("[EXTRACT DEBUG] averaged_online_trajectory is empty or missing")
+                return None
+            
+            main_losses = averaged_online.get("main_losses", [])
+            logger.info(f"[EXTRACT DEBUG] main_losses length: {len(main_losses)}")
+            
+            online_learning_results = result.get("online_learning_results", {})
+            training_end_window = online_learning_results.get("training_end_window")
+            training_start_window = online_learning_results.get("training_start_window")
+            logger.info(f"[EXTRACT DEBUG] training_end_window: {training_end_window}, training_start_window: {training_start_window}")
+            
+            if not main_losses:
+                logger.warning("[EXTRACT DEBUG] main_losses is empty, returning None")
+                return None
+            
+            # If training_end_window is None, learning never completed.
+            # Use fallback: calculate average from all windows after training_start_window
+            # If training_start_window is also None, return None
+            if training_end_window is None:
+                logger.info("[EXTRACT DEBUG] training_end_window is None, using fallback with training_start_window")
+                if training_start_window is not None and training_start_window + 1 < len(main_losses):
+                    # Use all windows after training started
+                    post_learning_losses = main_losses[training_start_window + 1:]
+                    avg_loss = float(np.mean(post_learning_losses))
+                    logger.info(f"[EXTRACT DEBUG] Calculated avg_loss using fallback: {avg_loss} (from {len(post_learning_losses)} windows)")
+                    return avg_loss
+                else:
+                    # No training info available, return None
+                    logger.warning(f"[EXTRACT DEBUG] Cannot use fallback: training_start_window={training_start_window}, main_losses_len={len(main_losses)}")
+                    return None
+            
+            # Normal case: training completed, use windows after training_end_window
+            if training_end_window + 1 >= len(main_losses):
+                # No post-learning windows available
+                logger.warning(f"[EXTRACT DEBUG] No post-learning windows: training_end_window={training_end_window}, main_losses_len={len(main_losses)}")
+                return None
+            
+            post_learning_losses = main_losses[training_end_window + 1:]
+            avg_loss = float(np.mean(post_learning_losses))
+            logger.info(f"[EXTRACT DEBUG] Calculated avg_loss (normal case): {avg_loss} (from {len(post_learning_losses)} windows)")
+            return avg_loss
+        except Exception as e:
+            logger.warning(f"[EXTRACT DEBUG] Exception in extract_post_learning_avg_loss_from_result: {e}")
+            import traceback
+            logger.warning(f"[EXTRACT DEBUG] Traceback: {traceback.format_exc()}")
+            return None
 
     def _create_trajectory_handler(self) -> None:
         """Create a trajectory data handler if not already present."""

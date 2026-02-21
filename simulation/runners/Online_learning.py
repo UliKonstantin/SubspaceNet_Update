@@ -506,7 +506,10 @@ class OnlineLearning:
                 "online_learning_results": {
                     "pretrained_trajectory_results": pretrained_trajectory_results,
                     "online_trajectory_results": online_trajectory_results,
-                    "dataset_size": dataset_size
+                    "dataset_size": dataset_size,
+                    "training_start_window": training_start_window,
+                    "training_end_window": training_end_window,
+                    "eta_change_windows": eta_change_windows
                 },
                 "drift_detection_dicts": all_drift_detection_dicts
             }
@@ -524,6 +527,8 @@ class OnlineLearning:
                         return_results["std_glrt_z_score"] = main_glrt.get("std_z_score")
                         return_results["avg_learning_rate_at_detection"] = main_glrt.get("avg_learning_rate")
                         return_results["std_learning_rate_at_detection"] = main_glrt.get("std_learning_rate")
+                        return_results["avg_actual_learning_rate"] = main_glrt.get("avg_actual_learning_rate")
+                        return_results["std_actual_learning_rate"] = main_glrt.get("std_actual_learning_rate")
             
             return return_results
             
@@ -682,6 +687,8 @@ class OnlineLearning:
             self.learning_done = False
             self.online_training_count = 0
             self.first_eta_change = True
+            self.adaptive_lr_fixed = None  # Fixed LR from first training window (adaptive mode)
+            self.actual_lr_per_training_window = []  # Track actual LR used per window for heatmap
             # Reset online optimizer to start fresh for new trajectory
             if hasattr(self, 'online_optimizer'):
                 delattr(self, 'online_optimizer')
@@ -894,7 +901,7 @@ class OnlineLearning:
                         # Compute statistical baseline and z-score
                         current_glrt_z_score = None
                         if len(self.glrt_history) >= self.glrt_min_samples_for_statistics:
-                            baseline_values = np.array(self.glrt_history[:-1])  # Use history excluding current value
+                            baseline_values = np.array(self.glrt_history[:-5])  # Use history excluding 5 current values
                             baseline_mean = np.mean(baseline_values)
                             baseline_std = np.std(baseline_values)
                             current_glrt_baseline_mean = baseline_mean  # Store baseline mean for adaptive LR calculation
@@ -918,7 +925,7 @@ class OnlineLearning:
                                 if self.use_adaptive_learning_rate:
                                     # Adaptive learning rate based on GLRT difference: LR = LR_base × (1 + k × max(0, G_t - G_baseline))
                                     # where k = 0.03, G_t = main_log_glr, G_baseline = baseline_mean
-                                    k = 0.03
+                                    k = 1.2
                                     glrt_diff = max(0.0, main_log_glr - baseline_mean)
                                     self.learning_rate_at_detection = base_lr * (1 + k * glrt_diff)
                                 else:
@@ -1164,6 +1171,8 @@ class OnlineLearning:
                     # GLRT z-score and learning rate at detection time
                     "glrt_z_score_at_detection": self.glrt_z_score_at_detection if hasattr(self, 'glrt_z_score_at_detection') else None,
                     "learning_rate_at_detection": self.learning_rate_at_detection if hasattr(self, 'learning_rate_at_detection') else None,
+                    # Actual per-window LR used during training (for heatmap - matches what optimizer used)
+                    "actual_lr_per_training_window": list(self.actual_lr_per_training_window) if hasattr(self, 'actual_lr_per_training_window') and self.actual_lr_per_training_window else [],
                     "drift_detection_dicts": drift_detection_dicts
                 }
             }
@@ -1204,8 +1213,8 @@ class OnlineLearning:
         self.online_training_count += 1
         logger.info(f"Online training step {self.online_training_count} called for trajectory {trajectory_idx}, window {window_idx}")
         
-        # Set learning done after 7 training calls
-        if self.online_training_count >= 10:
+        # Set learning done after 5 training calls
+        if self.online_training_count >= 5:
             self.learning_done = True
             logger.info(f"Online model training completed after {self.online_training_count} training windows")
         
@@ -1242,21 +1251,32 @@ class OnlineLearning:
         base_lr = getattr(self.config.online_learning, 'learning_rate', 1e-3)
         
         # Calculate learning rate: adaptive if flag is set, otherwise fixed
+        # Adaptive LR is fixed at first training window value and not changed per window
         if self.use_adaptive_learning_rate:
-            # Adaptive learning rate based on GLRT difference: LR = LR_base × (1 + k × max(0, G_t - G_baseline))
-            # where k = 0.03, G_t = glrt_likelihood, G_baseline = glrt_baseline_mean
-            k = 0.03
-            if glrt_likelihood is not None and glrt_baseline_mean is not None:
-                glrt_diff = max(0.0, glrt_likelihood - glrt_baseline_mean)
-                adaptive_lr = base_lr * (1 + k * glrt_diff)
-                logger.info(f"Adaptive learning rate: {adaptive_lr:.6f} (base: {base_lr:.6f}, GLRT: {glrt_likelihood:.4f}, baseline: {glrt_baseline_mean:.4f}, diff: {glrt_diff:.4f}, k={k})")
+            if self.adaptive_lr_fixed is not None:
+                # Reuse LR from first training window
+                adaptive_lr = self.adaptive_lr_fixed
+                logger.debug(f"Using fixed adaptive LR from first window: {adaptive_lr:.6f}")
             else:
-                adaptive_lr = base_lr
-                logger.info(f"Using base learning rate: {adaptive_lr:.6f} (GLRT statistics not available for adaptive LR)")
+                # First training window: compute and lock LR for all subsequent windows
+                k = 1
+                if glrt_likelihood is not None and glrt_baseline_mean is not None:
+                    glrt_diff = max(0.0, glrt_likelihood - glrt_baseline_mean)
+                    adaptive_lr = base_lr * (1 + k * glrt_diff)
+                    self.adaptive_lr_fixed = adaptive_lr
+                    logger.info(f"Adaptive LR (first window, fixed for all): {adaptive_lr:.6f} (base: {base_lr:.6f}, GLRT: {glrt_likelihood:.4f}, baseline: {glrt_baseline_mean:.4f}, diff: {glrt_diff:.4f}, k={k})")
+                else:
+                    adaptive_lr = base_lr
+                    self.adaptive_lr_fixed = base_lr
+                    logger.info(f"Using base learning rate (first window, fixed for all): {adaptive_lr:.6f} (GLRT statistics not available for adaptive LR)")
         else:
             # Fixed learning rate (not adaptive)
             adaptive_lr = base_lr
             logger.debug(f"Using fixed learning rate: {adaptive_lr:.6f} (adaptive LR disabled)")
+        
+        # Track actual LR used (for heatmap) - only when training online model to avoid duplicates
+        if training_model is self.online_model and hasattr(self, 'actual_lr_per_training_window'):
+            self.actual_lr_per_training_window.append(adaptive_lr)
         
         # Set up optimizer for training with adaptive learning rate
         if training_model is self.online_model:
@@ -1295,7 +1315,7 @@ class OnlineLearning:
         num_training_steps = 0
         
         # Number of gradient descent steps per window
-        num_gd_steps = 5
+        num_gd_steps = 3
         
         # Get loss configuration for training (use override if provided)
         base_loss_config = getattr(self.config.online_learning, 'loss_config', None)

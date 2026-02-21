@@ -366,13 +366,18 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
             
             # Plot scenario results if it's an eta scenario
             if scenario.lower() == 'eta' and mode == 'online_learning':
-                from utils.plotting import plot_eta_scenario_comparison, plot_performance_improvement_table_eta, plot_scenario_results
+                from utils.plotting import plot_eta_scenario_comparison, plot_performance_improvement_table_eta, plot_scenario_results, plot_lr_sweep_heatmap
                 # Plot drift detection comparison (detection window, z-score, learning rate)
                 plot_eta_scenario_comparison(results, sim.output_dir)
                 # Plot performance improvement table for eta scenario
                 plot_performance_improvement_table_eta(results, sim.output_dir)
                 # Plot averaged comparison (same as SNR case but with eta values)
                 plot_scenario_results(results, sim.output_dir, scenario_type='eta')
+                
+                # Plot LR sweep heatmap if enabled
+                if hasattr(sim.config, 'online_learning') and sim.config.online_learning.enable_lr_sweep:
+                    if "lr_sweep_heatmap_data" in sim.results:
+                        plot_lr_sweep_heatmap(sim.results["lr_sweep_heatmap_data"], sim.output_dir)
         else:
             if mode == 'full':
                 logger.info("Running full simulation (training, evaluation, and online learning)")
