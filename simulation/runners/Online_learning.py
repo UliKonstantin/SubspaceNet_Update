@@ -923,11 +923,16 @@ class OnlineLearning:
                                 # Calculate learning rate at detection time using the same formula as _online_training_window
                                 base_lr = getattr(self.config.online_learning, 'learning_rate', 1e-3)
                                 if self.use_adaptive_learning_rate:
-                                    # Adaptive learning rate based on GLRT difference: LR = LR_base × (1 + k × max(0, G_t - G_baseline))
-                                    # where k = 0.03, G_t = main_log_glr, G_baseline = baseline_mean
-                                    k = 1.2
-                                    glrt_diff = max(0.0, main_log_glr - baseline_mean)
-                                    self.learning_rate_at_detection = base_lr * (1 + k * glrt_diff)
+                                    import math
+                                    lr_min = 0.0005
+                                    lr_max = 0.0356
+                                    k_sig  = 0.8361
+                                    G0     = 74.4904
+                                    G = main_log_glr if main_log_glr is not None else G0
+                                    log_lr_min = math.log10(lr_min)
+                                    log_lr_max = math.log10(lr_max)
+                                    log_lr = log_lr_min + (log_lr_max - log_lr_min) / (1.0 + math.exp(-k_sig * (G - G0)))
+                                    self.learning_rate_at_detection = 10 ** log_lr
                                 else:
                                     # Fixed learning rate
                                     self.learning_rate_at_detection = base_lr
@@ -1250,27 +1255,27 @@ class OnlineLearning:
         # Get base learning rate from config or use default
         base_lr = getattr(self.config.online_learning, 'learning_rate', 1e-3)
         
-        # Calculate learning rate: adaptive if flag is set, otherwise fixed
-        # Adaptive LR is fixed at first training window value and not changed per window
+        # Calculate learning rate: adaptive sigmoid based on GLRT observable
+        # Sigmoid formula: LR*(G) = 10^(log10(LR_min) + (log10(LR_max) - log10(LR_min)) / (1 + exp(-k*(G - G0))))
+        # where G = main_log_glr at detection. Fitted from optimal LR vs GLRT sweep data.
         if self.use_adaptive_learning_rate:
             if self.adaptive_lr_fixed is not None:
-                # Reuse LR from first training window
                 adaptive_lr = self.adaptive_lr_fixed
                 logger.debug(f"Using fixed adaptive LR from first window: {adaptive_lr:.6f}")
             else:
-                # First training window: compute and lock LR for all subsequent windows
-                k = 1
-                if glrt_likelihood is not None and glrt_baseline_mean is not None:
-                    glrt_diff = max(0.0, glrt_likelihood - glrt_baseline_mean)
-                    adaptive_lr = base_lr * (1 + k * glrt_diff)
-                    self.adaptive_lr_fixed = adaptive_lr
-                    logger.info(f"Adaptive LR (first window, fixed for all): {adaptive_lr:.6f} (base: {base_lr:.6f}, GLRT: {glrt_likelihood:.4f}, baseline: {glrt_baseline_mean:.4f}, diff: {glrt_diff:.4f}, k={k})")
-                else:
-                    adaptive_lr = base_lr
-                    self.adaptive_lr_fixed = base_lr
-                    logger.info(f"Using base learning rate (first window, fixed for all): {adaptive_lr:.6f} (GLRT statistics not available for adaptive LR)")
+                import math
+                lr_min = 0.0005   # LR floor (low-drift regime)
+                lr_max = 0.0356   # LR ceiling (high-drift regime)
+                k_sig  = 0.8361   # transition steepness
+                G0     = 74.4904  # main_log_glr transition midpoint
+                G = glrt_likelihood if glrt_likelihood is not None else G0
+                log_lr_min = math.log10(lr_min)
+                log_lr_max = math.log10(lr_max)
+                log_lr = log_lr_min + (log_lr_max - log_lr_min) / (1.0 + math.exp(-k_sig * (G - G0)))
+                adaptive_lr = 10 ** log_lr
+                self.adaptive_lr_fixed = adaptive_lr
+                logger.info(f"Adaptive LR (sigmoid on GLRT, fixed for all): {adaptive_lr:.6f} (G={G:.4f}, LR_min={lr_min}, LR_max={lr_max}, k={k_sig}, G0={G0})")
         else:
-            # Fixed learning rate (not adaptive)
             adaptive_lr = base_lr
             logger.debug(f"Using fixed learning rate: {adaptive_lr:.6f} (adaptive LR disabled)")
         

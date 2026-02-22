@@ -79,7 +79,7 @@ fig, ax = plt.subplots(figsize=(7, 5))
 
 # Fit curve
 ax.plot(eta_dense, lr_fit, color="#888888", linewidth=1.8, linestyle="-", zorder=3,
-        label=r"$\mathrm{LR}^*(\eta) = 10^{\,\log_{10}\mathrm{LR}_{\min}\;+\;\frac{\log_{10}\mathrm{LR}_{\max}\,-\,\log_{10}\mathrm{LR}_{\min}}{1\,+\,e^{-k(\eta\,-\,\eta_0)}}}$")
+        label=r"$\mathrm{LR}^*(G) = 10^{\,\log_{10}\mathrm{LR}_{\min}\;+\;\frac{\log_{10}\mathrm{LR}_{\max}\,-\,\log_{10}\mathrm{LR}_{\min}}{1\,+\,e^{-k(G\,-\,G_0)}}}$")
 
 # Data points colored by type
 for i, (eta, lr, loss, lr_type) in enumerate(zip(etas, best_lrs, best_losses, best_types)):
