@@ -150,7 +150,7 @@ online_learning:
   
   # LR sweep configuration
   enable_lr_sweep: True  # If true, enable LR sweep within eta sweep
-  static_lr_list: [0.0001, 0.001, 0.002]  # List of static LR values to sweep over
+  static_lr_list: [0.0001, 0.0005, 0.001, 0.003,0.01,0.02]  # List of static LR values to sweep over
   adaptive_base_lr: 0.00075  # Base learning rate for adaptive LR when running LR sweep (optional, defaults to learning_rate)
     # Number of trajectories for online learning
   
