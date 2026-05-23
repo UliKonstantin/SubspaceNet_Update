@@ -210,7 +210,6 @@ class OnlineLearning:
         self.trained_model = trained_model
         self.output_dir = output_dir
         self.results = results
-        print(self.system_model.params.snr)
         # Dual model online learning state variables
         self.drift_detected = False
         self.learning_done = False
@@ -551,8 +550,6 @@ class OnlineLearning:
             
             # Create on-demand dataset using the factory function
             logger.info("Online learning is enabled, creating on-demand dataset and dataloader.")
-                # SET BREAKPOINT HERE - Before creating dataset
-            print(f"Creating dataset with SNR: {system_model_params.snr}")
             online_learning_dataset = create_online_learning_dataset(
                 system_model_params=system_model_params,
                 config=self.config,
