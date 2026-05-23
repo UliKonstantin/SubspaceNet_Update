@@ -1,4 +1,6 @@
 import json
+import sys
+import os
 import matplotlib.pyplot as plt
 import matplotlib
 import numpy as np
@@ -31,7 +33,9 @@ plt.rcParams.update({
     "ytick.minor.size": 3,
 })
 
-json_path = "experiments/results/online_learning_eta_sweep/lr_sweep_heatmap_data.json"
+results_dir = sys.argv[1] if len(sys.argv) > 1 else "experiments/results/online_learning_eta_sweep"
+json_path = os.path.join(results_dir, "lr_sweep_heatmap_data.json")
+print(f"Loading data from: {json_path}")
 with open(json_path, "r") as f:
     data = json.load(f)
 
@@ -107,7 +111,7 @@ ax.set_xlim(etas.min() - 0.08, etas.max() + 0.08)
 ax.legend(loc="lower right", framealpha=0.9, edgecolor="#CCCCCC")
 
 plt.tight_layout()
-out_path = "experiments/results/online_learning_eta_sweep/optimal_lr_vs_eta.png"
+out_path = os.path.join(results_dir, "optimal_lr_vs_eta.png")
 fig.savefig(out_path, bbox_inches="tight")
 plt.close(fig)
 print(f"Saved to {out_path}")
@@ -158,6 +162,7 @@ static_styles = [
     {"color": "#92C5DE", "marker": "^",  "ls": "-."},
     {"color": "#B2ABD2", "marker": "v",  "ls": ":"},
     {"color": "#762A83", "marker": "p",  "ls": "-"},
+    {"color": "#1B7837", "marker": "h",  "ls": "--"},
 ]
 adaptive_style = {"color": "#D6604D", "marker": "D", "ls": "-"}
 
@@ -188,7 +193,7 @@ ax2.set_xlim(etas.min() - 0.05, etas.max() + 0.05)
 ax2.legend(loc="upper left", framealpha=0.9, edgecolor="#CCCCCC", fontsize=11)
 
 plt.tight_layout()
-out_path2 = "experiments/results/online_learning_eta_sweep/loss_vs_eta_per_lr.png"
+out_path2 = os.path.join(results_dir, "loss_vs_eta_per_lr.png")
 fig2.savefig(out_path2, bbox_inches="tight")
 plt.close(fig2)
 print(f"\nSaved to {out_path2}")
