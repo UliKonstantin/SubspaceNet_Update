@@ -167,9 +167,6 @@ class Simulation:
             if self.config.simulation.save_model and self.trained_model is not None:
                 save_model_state(self.trained_model, self.output_dir, f"{self.config.model.type}_trained")
             
-            # Save results
-            self._save_results()
-            
             return {"status": "success", "trained_model": True if self.trained_model is not None else False}
             
         except Exception as e:
@@ -220,9 +217,6 @@ class Simulation:
             
             # Run the evaluation
             self._run_evaluation_pipeline()
-            
-            # Save results
-            self._save_results()
             
             return {"status": "success", "evaluation_results": self.results}
             
@@ -276,9 +270,6 @@ class Simulation:
             # Run online learning pipeline
             result = online_learning_handler.run_online_learning()
             
-            # Save results
-            self._save_results()
-            
             return result
             
         except Exception as e:
@@ -307,11 +298,6 @@ class Simulation:
         # For "evaluation" scenario, we only need the test dataset
         if scenario == "evaluation":
             self._prepare_test_dataset()
-            return
-            
-        # For "online_learning" scenario, we only need the online learning dataset
-        if scenario == "online_learning":
-            self._prepare_online_learning_dataset()
             return
             
         # For "training" scenario, we need training, validation, and test datasets
@@ -425,49 +411,6 @@ class Simulation:
         
         # Store test dataloader in components
         self.components["test_dataloader"] = self.test_dataloader
-    
-    def _prepare_online_learning_dataset(self) -> None:
-        """Create and set up the online learning dataset and dataloader."""
-        # Create online learning dataset and dataloader if enabled
-        if hasattr(self.config, 'online_learning') and getattr(self.config.online_learning, 'enabled', False):
-            logger.info("Online learning is enabled, creating on-demand dataset and dataloader.")
-            if not self.config.trajectory.enabled:
-                logger.warning("Online learning typically relies on trajectory mode for continuous data generation. Ensure config is appropriate if trajectory.enabled is False.")
-            
-            # Ensure system_model and its params are available, as they are crucial for the generator
-            if self.system_model is None or not hasattr(self.system_model, 'params') or self.system_model.params is None:
-                logger.error("SystemModel or its params not available for online learning dataset creation. Online learning will be skipped.")
-                self.online_learning_dataloader = None
-            else:
-                # Use the refactored factory from simulation.runners.data
-                from simulation.runners.data import create_online_learning_dataset 
-                
-                online_config = self.config.online_learning
-                window_size = getattr(online_config, 'window_size', 10)
-                stride = getattr(online_config, 'stride', 5) 
-                
-                try:
-                    # Key change: Pass the shared self.system_model.params object.
-                    # This allows dynamic eta updates within the generator to be reflected.
-                    online_dataset = create_online_learning_dataset(
-                        system_model_params=self.system_model.params, # Shared instance
-                        config=self.config, # Pass full config for trajectory_length etc.
-                        window_size=window_size,
-                        stride=stride
-                    )
-                    # Batch size is 1 for online learning as we process window by window
-                    self.online_learning_dataloader = online_dataset.get_dataloader(batch_size=1, shuffle=False) 
-                    logger.info(f"Created on-demand online learning dataloader for {len(self.online_learning_dataloader)} windows.")
-                    self.components["online_learning_dataloader"] = self.online_learning_dataloader
-                except ValueError as e:
-                    logger.error(f"Error creating online learning dataset: {e}. Online learning may not function.")
-                    self.online_learning_dataloader = None
-                except Exception as e:
-                    logger.exception(f"Unexpected error during online learning dataset creation: {e}")
-                    self.online_learning_dataloader = None
-        else:
-            self.online_learning_dataloader = None # Ensure it's defined even if not used
-            logger.info("Online learning is not enabled. Skipping online learning dataset creation.")
     
     def _create_trajectory_dataset(self) -> Tuple[Any, Any]:
         """Create a dataset with trajectory support."""
@@ -1037,11 +980,6 @@ class Simulation:
         
         print("\n" + "="*80)
         
-    def _save_results(self) -> None:
-        """Save simulation results to the output directory."""
-        logger.info(f"Saving results to {self.output_dir}")
-        # Placeholder for results saving implementation
-        
     def run_scenario(self, scenario_type: str, values: List[Any], full_mode: bool = False) -> Dict[str, Dict[str, Any]]:
         """
         Run a parametric scenario with multiple values.
@@ -1424,7 +1362,7 @@ class Simulation:
         if (self.config.simulation.load_model and not self.config.simulation.train_model and 
             all_drift_detection_dicts):
             import json
-            output_path = Path("/Users/UliKonstantin4/Documents/subspaceNet_Online_learning/experiments/results/online_learning_eta_sweep")
+            output_path = self.output_dir
             output_path.mkdir(parents=True, exist_ok=True)
             json_path = output_path / "drift_detection_dicts.json"
             

@@ -50,8 +50,7 @@ class TrajectoryDataHandler:
                      trajectory_length: int,
                      trajectory_type: Union[TrajectoryType, str] = TrajectoryType.RANDOM,
                      save_dataset: bool = False,
-                     dataset_path: Optional[Path] = None,
-                     custom_trajectory_fn: Optional[Callable] = None) -> Tuple[Dataset, Any]:
+                     dataset_path: Optional[Path] = None) -> Tuple[Dataset, Any]:
         """
         Create a synthetic dataset with trajectory support.
         
@@ -61,7 +60,6 @@ class TrajectoryDataHandler:
             trajectory_type: Type of trajectory to generate
             save_dataset: Whether to save the dataset
             dataset_path: Path where to save the dataset
-            custom_trajectory_fn: Custom function for trajectory generation
             
         Returns:
             Tuple of (dataset, samples_model)
@@ -72,8 +70,7 @@ class TrajectoryDataHandler:
         trajectory_data = self._generate_trajectories(
             samples_size, 
             trajectory_length, 
-            trajectory_type,
-            custom_trajectory_fn
+            trajectory_type
         )
         
         # Create observations and labels based on trajectories
@@ -90,30 +87,11 @@ class TrajectoryDataHandler:
             
         return dataset, self.samples_model
     
-    def load_dataset(self, 
-                   filename: Path,
-                   dataset_path: Path) -> Dataset:
-        """
-        Load a dataset from file.
-        
-        Args:
-            filename: Name of the dataset file
-            dataset_path: Path to the dataset
-            
-        Returns:
-            Loaded dataset
-        """
-        logger.info(f"Loading dataset from {dataset_path / filename}")
-        dataset = TrajectoryDataset(None, None, None)
-        dataset.load(dataset_path / filename)
-        return dataset
-    
     def _generate_trajectories(
         self,
         samples_size: int,
         trajectory_length: int,
-        trajectory_type: Union[TrajectoryType, str],
-        custom_trajectory_fn: Optional[Callable] = None
+        trajectory_type: Union[TrajectoryType, str]
     ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], List[int]]:
         """
         Generate angle and distance trajectories.
@@ -122,7 +100,6 @@ class TrajectoryDataHandler:
             samples_size: Number of distinct trajectories
             trajectory_length: Length of each trajectory
             trajectory_type: Type of trajectory to generate
-            custom_trajectory_fn: Custom function for trajectory generation
             
         Returns:
             Tuple containing:
@@ -189,8 +166,6 @@ class TrajectoryDataHandler:
             logger.info("Using LINEAR trajectory type: linear interpolation between random start and end angles")
         elif trajectory_type == TrajectoryType.CIRCULAR:
             logger.info("Using CIRCULAR trajectory type: angles follow sinusoidal motion around center points")
-        elif trajectory_type == TrajectoryType.CUSTOM:
-            logger.info("Using CUSTOM trajectory type with provided trajectory function")
         elif trajectory_type == TrajectoryType.FULL_RANDOM:
             logger.info("Using FULL_RANDOM trajectory type: completely independent random angles for each source and step")
         elif trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
@@ -406,16 +381,6 @@ class TrajectoryDataHandler:
                 
                 for t in range(trajectory_length):
                     angle_trajectories[i, t, :num_sources] = static_angles
-            
-            elif trajectory_type == TrajectoryType.CUSTOM and custom_trajectory_fn:
-                # Use custom function to generate trajectories
-                custom_trajectories = custom_trajectory_fn(
-                    num_sources, 
-                    trajectory_length, 
-                    angle_min, 
-                    angle_max
-                )
-                angle_trajectories[i, :, :num_sources] = torch.FloatTensor(custom_trajectories)
             
             elif trajectory_type == TrajectoryType.FULL_RANDOM:
                 # Generate completely independent random angles for each step and each source

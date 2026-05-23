@@ -6,6 +6,5 @@ both single runs and parametric scenarios.
 """
 
 from .core import Simulation
-from .scenarios import ScenarioType
 
-__all__ = ['Simulation', 'ScenarioType'] 
+__all__ = ['Simulation'] 
