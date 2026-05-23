@@ -232,7 +232,13 @@ class OnlineLearning:
         self.glrt_baseline_window_size = getattr(online_config, 'glrt_baseline_window_size', 20)  # Number of windows to use for baseline
         self.glrt_detection_z_threshold = getattr(online_config, 'glrt_detection_z_threshold', 2.5)  # Z-score threshold for drift detection
         self.glrt_min_samples_for_statistics = getattr(online_config, 'glrt_min_samples_for_statistics', 10)  # Min samples before using statistics
-        self.use_adaptive_learning_rate = getattr(online_config, 'use_adaptive_learning_rate', False)  # Flag to enable adaptive learning rate
+        self.use_adaptive_learning_rate = getattr(online_config, 'use_adaptive_learning_rate', False)
+        self.adaptive_lr_min = getattr(online_config, 'adaptive_lr_min', 0.0005)
+        self.adaptive_lr_max = getattr(online_config, 'adaptive_lr_max', 0.0356)
+        self.adaptive_lr_k_sigmoid = getattr(online_config, 'adaptive_lr_k_sigmoid', 0.7336)
+        self.adaptive_lr_dG0 = getattr(online_config, 'adaptive_lr_dG0', 69.2599)
+        self.glrt_history_exclusion = getattr(online_config, 'glrt_history_exclusion', 5)
+        self.num_gd_steps = getattr(online_config, 'num_gd_steps', 3)
         
         logger.info(f"OnlineLearning handler initialized - using statistical GLRT-based drift detection (z-threshold: {self.glrt_detection_z_threshold}, baseline window: {self.glrt_baseline_window_size}, adaptive LR: {self.use_adaptive_learning_rate})")
     
@@ -732,7 +738,7 @@ class OnlineLearning:
                         # Compute statistical baseline and z-score
                         current_glrt_z_score = None
                         if len(self.glrt_history) >= self.glrt_min_samples_for_statistics:
-                            baseline_values = np.array(self.glrt_history[:-5])  # Use history excluding 5 current values
+                            baseline_values = np.array(self.glrt_history[:-self.glrt_history_exclusion])
                             baseline_mean = np.mean(baseline_values)
                             baseline_std = np.std(baseline_values)
                             current_glrt_baseline_mean = baseline_mean  # Store baseline mean for adaptive LR calculation
@@ -755,15 +761,11 @@ class OnlineLearning:
                                 base_lr = getattr(self.config.online_learning, 'learning_rate', 1e-3)
                                 if self.use_adaptive_learning_rate:
                                     import math
-                                    lr_min = 0.0005
-                                    lr_max = 0.0356
-                                    k_sig  = 0.7336
-                                    dG0    = 69.2599
-                                    G = main_log_glr if main_log_glr is not None else dG0
+                                    G = main_log_glr if main_log_glr is not None else self.adaptive_lr_dG0
                                     dG = G - baseline_mean if baseline_mean is not None else 0.0
-                                    log_lr_min = math.log10(lr_min)
-                                    log_lr_max = math.log10(lr_max)
-                                    log_lr = log_lr_min + (log_lr_max - log_lr_min) / (1.0 + math.exp(-k_sig * (dG - dG0)))
+                                    log_lr_min = math.log10(self.adaptive_lr_min)
+                                    log_lr_max = math.log10(self.adaptive_lr_max)
+                                    log_lr = log_lr_min + (log_lr_max - log_lr_min) / (1.0 + math.exp(-self.adaptive_lr_k_sigmoid * (dG - self.adaptive_lr_dG0)))
                                     self.learning_rate_at_detection = 10 ** log_lr
                                 else:
                                     # Fixed learning rate
@@ -1132,8 +1134,7 @@ class OnlineLearning:
         total_training_loss = 0.0
         num_training_steps = 0
         
-        # Number of gradient descent steps per window
-        num_gd_steps = 3
+        num_gd_steps = self.num_gd_steps
         
         # Get loss configuration for training (use override if provided)
         base_loss_config = getattr(self.config.online_learning, 'loss_config', None)

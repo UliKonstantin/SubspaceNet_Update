@@ -20,7 +20,7 @@ system_model:
   range_resolution: 1  # resolution of range values in meters
 
 dataset:
-  samples_size: 10  # overall dataset size
+  samples_size: 1 #10  # overall dataset size
   test_validation_train_split: [0.2, 0.2, 0.6]  # proportions for [test, validation, train] datasets
   create_data: true  # whether to create new data or use existing data
   save_dataset: false  # whether to save the dataset
@@ -53,7 +53,7 @@ training:
   gamma: 0.5
   training_objective: "angle"  # angle, range, (angle, range)
   use_wandb: False
-  simulation_name: "random_samples_base_model_eta_scenario"  # Base name - parameters will be added automatically
+  simulation_name: "unit_test" #"random_samples_base_model_eta_scenario"  # Base name - parameters will be added automatically
   save_checkpoint: true  # whether to save model checkpoints during training
 
 # CRITICAL: Model loading must happen before online learning
@@ -68,8 +68,8 @@ simulation:
   # Model path will be overridden by evaluation.model_paths array during scenario sweep
   model_path: null
   subspace_methods: []  # No classic methods needed for online learning
-  simulation_name: "online_learning_sineaccel_nonlinear_snr_sweep"
-  output_dir: "experiments/results/online_learning_snr_sweep"  # Output directory for SNR scenario sweep
+  simulation_name: "unit_test" #"online_learning_sineaccel_nonlinear_snr_sweep"
+  output_dir: "experiments/results//unit_test" #"experiments/results/online_learning_snr_sweep"  # Output directory for SNR scenario sweep
 
 # Enable trajectory with longer sequence for online learning
 trajectory:
@@ -141,12 +141,20 @@ online_learning:
   loss_threshold: 0.2  # Threshold for detecting drift and triggering online learning
   max_iterations: 2  # Maximum iterations for online training
   learning_rate: 0.001  # Learning rate for online training (smaller than main training)
-  trajectory_length: 300  # Length of trajectory specifically for online learning
-  dataset_size: 50
+  trajectory_length: 20  # Length of trajectory specifically for online learning
+  dataset_size: 2
   use_adaptive_learning_rate: true
   glrt_detection_z_threshold: 2.5  # optional, defaults to 2.5
-  glrt_baseline_window_size: 20     # optional, defaults to 20
+  glrt_baseline_window_size: 5    # optional, defaults to 20
   glrt_min_samples_for_statistics: 10  # optional, defaults to 10
+  
+  # Adaptive LR sigmoid parameters
+  adaptive_lr_min: 0.0005        # minimum LR for sigmoid mapping
+  adaptive_lr_max: 0.0356        # maximum LR for sigmoid mapping
+  adaptive_lr_k_sigmoid: 0.7336  # steepness of the sigmoid curve
+  adaptive_lr_dG0: 69.2599       # inflection point (dG offset)
+  glrt_history_exclusion: 5      # exclude N most recent GLRT values from baseline
+  num_gd_steps: 3                # gradient descent steps per online learning window
   
   # LR sweep configuration
   enable_lr_sweep: True  # If true, enable LR sweep within eta sweep
@@ -155,7 +163,7 @@ online_learning:
     # Number of trajectories for online learning
   
   # Dynamic Eta Update Parameters
-  eta_update_interval_windows: 20  # Update eta every N windows. If null or 0, eta is not periodically updated
+  eta_update_interval_windows: 3 #20  # Update eta every N windows. If null or 0, eta is not periodically updated
   #eta_increment: 1.5  # Amount to increment (if positive) or decrement (if negative) eta by when an update occurs
   #max_eta: 1.5  # Maximum allowed value for eta during dynamic updates
   #min_eta: 0.0  # Minimum allowed value for eta during dynamic updates
@@ -173,7 +181,7 @@ online_learning:
     #multimoment_beta: 0       # Custom beta (default: 1.0)  
     #multimoment_regularization_term: 0  # Custom regularization (default: 1.0)    
   # Online learning start configuration
-  time_to_learn: 10  # Window index at which to start online learning
+  time_to_learn:  3 #10  # Window index at which to start online learning
 
 # Logging configuration
 logging:

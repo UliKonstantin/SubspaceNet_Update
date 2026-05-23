@@ -187,6 +187,12 @@ class OnlineLearningConfig(BaseModel):
     
     # Adaptive learning rate configuration
     use_adaptive_learning_rate: bool = Field(default=False, description="If True, learning rate adapts based on GLRT z-score. If False, uses fixed learning_rate.")
+    adaptive_lr_min: float = Field(default=0.0005, description="Minimum learning rate for adaptive sigmoid mapping.")
+    adaptive_lr_max: float = Field(default=0.0356, description="Maximum learning rate for adaptive sigmoid mapping.")
+    adaptive_lr_k_sigmoid: float = Field(default=0.7336, description="Steepness of the sigmoid curve for adaptive LR mapping.")
+    adaptive_lr_dG0: float = Field(default=69.2599, description="Inflection point (dG offset) for the adaptive LR sigmoid.")
+    glrt_history_exclusion: int = Field(default=5, description="Number of most recent GLRT values to exclude from baseline calculation.")
+    num_gd_steps: int = Field(default=3, description="Number of gradient descent steps per online learning window.")
     
     # GLRT statistical detection parameters
     glrt_detection_z_threshold: float = Field(default=2.5, description="Z-score threshold for GLRT-based drift detection. Drift is detected when GLRT z-score exceeds this value.")
