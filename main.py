@@ -126,26 +126,15 @@ def evaluate_command(config: str, output: Optional[str], override: List[str],
                         config_values = eval_dict['sweep_values']
                         logger.info(f"Using sweep_values from __dict__: {config_values}")
             
-            # If scenario is "eta", use default calibration error values if not provided
-            if not values and not config_values and scenario.lower() == "eta":
-                config_values = [0.0, 0.01, 0.05, 0.1, 0.2, 0.3, 0.5]
-                logger.info(f"Using default eta values: {config_values}")
-                
-            # If scenario is "snr", use default SNR values if not provided
-            elif not values and not config_values and scenario.lower() == "snr":
-                config_values = [-10, -5, 0, 5, 10, 15, 20]
-                logger.info(f"Using default SNR values: {config_values}")
-                
-            # If scenario is "M", use default source count values if not provided
-            elif not values and not config_values and scenario.lower() == "m":
-                config_values = [1, 2, 3, 4, 5]
-                logger.info(f"Using default source count (M) values: {config_values}")
-                
-            # If scenario is "kalman_noise", handle measurement and process noise sweep
-            elif not values and not config_values and scenario.lower() == "kalman_noise":
-                # This is a special 2D sweep scenario - values will be handled differently
-                config_values = None
-                logger.info("Using Kalman noise sweep - will use default measurement and process noise ranges")
+            # Fallback defaults when no values provided via CLI or config
+            DEFAULT_SWEEP_VALUES = {
+                "eta": [0.0, 0.01, 0.05, 0.1, 0.2, 0.3, 0.5],
+                "snr": [-10, -5, 0, 5, 10, 15, 20],
+                "m": [1, 2, 3, 4, 5],
+            }
+            if not values and not config_values and scenario.lower() in DEFAULT_SWEEP_VALUES:
+                config_values = DEFAULT_SWEEP_VALUES[scenario.lower()]
+                logger.info(f"Using default {scenario} values: {config_values}")
                 
             # Use config values if available, otherwise use command line values
             if config_values:
@@ -155,14 +144,9 @@ def evaluate_command(config: str, output: Optional[str], override: List[str],
             if scenario.lower() == "kalman_noise":
                 logger.info("Running 2D evaluation sweep on Kalman filter noise parameters")
                 
-                # Define default ranges for measurement and process noise std dev
                 measurement_noise_values = [0.001, 0.005, 0.01, 0.05, 0.1, 0.2, 0.5] if not values else values[:len(values)//2] if len(values) > 1 else [0.001, 0.01, 0.1]
                 process_noise_values = [0.001, 0.005, 0.01, 0.05, 0.1, 0.2, 0.5] if not values else values[len(values)//2:] if len(values) > 1 else [0.001, 0.01, 0.1]
                 
-                logger.info(f"Measurement noise std dev values: {measurement_noise_values}")
-                logger.info(f"Process noise std dev values: {process_noise_values}")
-                
-                # 2D sweep over all combinations
                 scenario_results = {}
                 total_combinations = len(measurement_noise_values) * len(process_noise_values)
                 combination_count = 0
@@ -173,37 +157,15 @@ def evaluate_command(config: str, output: Optional[str], override: List[str],
                         combination_count += 1
                         logger.info(f"Evaluating combination {combination_count}/{total_combinations}: measurement_noise={meas_noise}, process_noise={proc_noise}")
                         
-                        # Create overrides for both noise parameters
                         overrides = [
                             f"kalman_filter.measurement_noise_std_dev={meas_noise}",
                             f"kalman_filter.process_noise_std_dev={proc_noise}"
                         ]
-                        
-                        # Create a modified configuration for this parameter combination
-                        from config.loader import apply_overrides
-                        modified_config = apply_overrides(config_obj, overrides)
-                        
-                        # Update components for this sweep combination
-                        from config_handler import update_components_for_sweep
-                        updated_components = update_components_for_sweep(
-                            components=components,
-                            config=modified_config,
-                            sweep_param="kalman_noise",
-                            sweep_value=(meas_noise, proc_noise)
+                        result = sim._run_sweep_iteration(
+                            overrides, "kalman_noise", (meas_noise, proc_noise),
+                            f"kalman_noise_m{meas_noise}_p{proc_noise}", full_mode=False
                         )
-                        
-                        # Create a new simulation with the modified config and updated components
-                        scenario_sim = Simulation(
-                            config=modified_config,
-                            components=updated_components,
-                            output_dir=output_dir / f"kalman_noise_m{meas_noise}_p{proc_noise}"
-                        )
-                        
-                        # Run evaluation with this configuration
-                        result = scenario_sim.run_evaluation()
                         scenario_results[meas_noise][proc_noise] = result
-                        
-                        logger.info(f"Completed combination {combination_count}/{total_combinations}")
                 
             else:
                 # Make sure we have values to sweep over for single parameter scenarios
@@ -212,47 +174,7 @@ def evaluate_command(config: str, output: Optional[str], override: List[str],
                     sys.exit(1)
                     
                 logger.info(f"Running evaluation sweep on {scenario} with values {values}")
-                
-                # For each value, run evaluation
-                scenario_results = {}
-                for value in values:
-                    logger.info(f"Evaluating with {scenario}={value}")
-                    
-                    # Determine the correct config section for the scenario parameter
-                    if scenario.lower() in ['trajectory_length']:
-                        override_path = f"trajectory.{scenario.lower()}={value}"
-                    elif scenario.lower() in ['snr', 'm', 'n', 't', 'eta', 'bias', 'sv_noise_var']:
-                        override_path = f"system_model.{scenario.lower()}={value}"
-                    else:
-                        # Default to system_model for backward compatibility
-                        override_path = f"system_model.{scenario.lower()}={value}"
-                    
-                    # Create a modified configuration for this scenario value
-                    from config.loader import apply_overrides
-                    modified_config = apply_overrides(
-                        config_obj,
-                        [override_path]
-                    )
-                    
-                    # Update components for this sweep value
-                    from config_handler import update_components_for_sweep
-                    updated_components = update_components_for_sweep(
-                        components=components,
-                        config=modified_config,
-                        sweep_param=scenario,
-                        sweep_value=value
-                    )
-                    
-                    # Create a new simulation with the modified config and updated components
-                    scenario_sim = Simulation(
-                        config=modified_config,
-                        components=updated_components,
-                        output_dir=output_dir / f"{scenario}_{value}"
-                    )
-                    
-                    # Run evaluation with this configuration
-                    result = scenario_sim.run_evaluation()
-                    scenario_results[value] = result
+                scenario_results = sim.run_scenario(scenario, list(values), full_mode=False)
             
             # Store and log results
             sim.results[scenario] = scenario_results
@@ -488,32 +410,13 @@ def online_learning_command(config: str, output: Optional[str], override: List[s
                                 f"kalman_filter.measurement_noise_std_dev={kf_meas_noise}"
                             ]
                             
-                            # Create a modified configuration for this parameter combination
-                            grid_modified_config = apply_overrides(modified_config, grid_overrides)
-                            
-                            # Update components for this sweep combination
-                            from config_handler import update_components_for_sweep
-                            updated_components = update_components_for_sweep(
-                                components=components,
-                                config=grid_modified_config,
-                                sweep_param="4d_grid",
-                                sweep_value=(proc_noise, kf_proc_noise, kf_meas_noise, eta)
+                            grid_sim = Simulation(modified_config, components, output_dir)
+                            result = grid_sim._run_sweep_iteration(
+                                grid_overrides, "4d_grid", (proc_noise, kf_proc_noise, kf_meas_noise, eta),
+                                f"4d_grid_pn{proc_noise}_kf_pn{kf_proc_noise}_kf_mn{kf_meas_noise}_eta{eta}",
+                                full_mode=False
                             )
-                            
-                            # Create output directory with descriptive name
-                            grid_output_dir = output_dir / f"4d_grid_pn{proc_noise}_kf_pn{kf_proc_noise}_kf_mn{kf_meas_noise}_eta{eta}"
-                            
-                            # Create a new simulation with the modified config and updated components
-                            scenario_sim = Simulation(
-                                config=grid_modified_config,
-                                components=updated_components,
-                                output_dir=grid_output_dir
-                            )
-                            
-                            # Run online learning with this configuration
-                            result = scenario_sim.execute_online_learning()
                             scenario_results[proc_noise][kf_proc_noise][kf_meas_noise][eta] = result
-                            
                             logger.info(f"Completed combination {combination_count}/{total_combinations}")
             
             # Store results and log summary
