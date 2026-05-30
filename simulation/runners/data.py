@@ -196,82 +196,34 @@ class TrajectoryDataHandler:
             
             # Generate angle trajectories based on selected type
             if trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
-                # Start with random angles
+                from simulation.runners.trajectory_physics import sine_accel_step
+
                 angle_trajectories[i, 0, :num_sources] = torch.FloatTensor(
                     np.random.uniform(-30, 30, size=num_sources)
                 )
-                
-                # Get oscillatory model parameters (support both single values and arrays)
-                sa_omega0 = config.trajectory.sine_accel_omega0
-                sa_kappa = config.trajectory.sine_accel_kappa
-                sa_noise_sd = config.trajectory.sine_accel_noise_std
-                
-                # Convert single values to arrays for source-specific parameters
-                if isinstance(sa_omega0, (int, float)):
-                    sa_omega0 = [sa_omega0] * num_sources
-                if isinstance(sa_kappa, (int, float)):
-                    sa_kappa = [sa_kappa] * num_sources
-                
-                # Ensure arrays have correct length
-                if len(sa_omega0) != num_sources:
-                    raise ValueError(f"sine_accel_omega0 array length ({len(sa_omega0)}) must match number of sources ({num_sources})")
-                if len(sa_kappa) != num_sources:
-                    raise ValueError(f"sine_accel_kappa array length ({len(sa_kappa)}) must match number of sources ({num_sources})")
-                
-                # Convert to tensors for efficient computation
-                sa_omega0_tensor = torch.tensor(sa_omega0, dtype=torch.float32)
-                sa_kappa_tensor = torch.tensor(sa_kappa, dtype=torch.float32)
-                
-                # Apply oscillatory model: θ_{k+1} = θ_k + κ sin(ω0 * t) + η_k
-                # This creates oscillatory behavior instead of drifting in one direction
+
+                omega0_arr = np.atleast_1d(np.broadcast_to(np.array(sa_omega0, dtype=float), num_sources))
+                kappa_arr = np.atleast_1d(np.broadcast_to(np.array(sa_kappa, dtype=float), num_sources))
+
                 for t in range(1, trajectory_length):
-                    theta_prev = angle_trajectories[i, t-1, :num_sources]
-                    
-                    # Calculate oscillatory term: κ sin(ω0 * t) for each source
-                    # Each source has its own frequency and amplitude
-                    oscillation = sa_kappa_tensor * torch.sin(sa_omega0_tensor * t) * 1.0  # T = 1 s
-                    
-                    # Add noise
-                    noise = torch.randn(num_sources) * sa_noise_sd
-                    
-                    # Update angle: θ_{k+1} = θ_k + oscillation + noise
-                    theta_new = 0.99*theta_prev + oscillation + noise
-                    
-                    # Ensure angles stay within bounds
+                    theta_prev = angle_trajectories[i, t-1, :num_sources].numpy()
+                    theta_next = sine_accel_step(theta_prev, t, omega0_arr, kappa_arr, sa_noise_sd)
                     angle_trajectories[i, t, :num_sources] = torch.clamp(
-                        theta_new, 
-                        min=angle_min, 
-                        max=angle_max
+                        torch.from_numpy(theta_next).float(), min=angle_min, max=angle_max
                     )
+
             elif trajectory_type == TrajectoryType.MULT_NOISE_NONLINEAR:
-                # Start with random angles
+                from simulation.runners.trajectory_physics import mult_noise_step
+
                 angle_trajectories[i, 0, :num_sources] = torch.FloatTensor(
                     np.random.uniform(angle_min, angle_max, size=num_sources)
                 )
-                
-                # Apply multiplicative noise model: θ_{k+1} = θ_k + ω0 T + σ(θ_k) η_k
+
                 for t in range(1, trajectory_length):
-                    theta_prev = angle_trajectories[i, t-1, :num_sources]
-                    # Convert to radians for trigonometric functions
-                    theta_prev_rad = theta_prev * (np.pi / 180.0)
-                    
-                    # Deterministic part
-                    deterministic = mn_omega0 * 1.0  # T = 1 s
-                    
-                    # State-dependent noise standard deviation
-                    std = mn_base_sd * (1.0 + mn_amp * torch.sin(theta_prev_rad)**2)
-                    
-                    # Generate noise
-                    noise = torch.randn(num_sources) * std
-                    
-                    # Update angle
-                    theta_new = theta_prev + deterministic + noise
-                    
-                    # Ensure angles stay within bounds
+                    theta_prev = angle_trajectories[i, t-1, :num_sources].numpy()
+                    theta_next = mult_noise_step(theta_prev, mn_omega0, mn_amp, mn_base_sd)
                     angle_trajectories[i, t, :num_sources] = torch.clamp(
-                        theta_new, 
-                        min=angle_min, 
-                        max=angle_max
+                        torch.from_numpy(theta_next).float(), min=angle_min, max=angle_max
                     )
                     
             elif trajectory_type == TrajectoryType.RANDOM:
@@ -286,29 +238,17 @@ class TrajectoryDataHandler:
                     )
                     
             elif trajectory_type == TrajectoryType.RANDOM_WALK:
-                # Start with random angles
+                from simulation.runners.trajectory_physics import random_walk_step
+
                 angle_trajectories[i, 0, :num_sources] = torch.FloatTensor(
-                    np.random.uniform(
-                        angle_min, 
-                        angle_max, 
-                        size=num_sources
-                    )
+                    np.random.uniform(angle_min, angle_max, size=num_sources)
                 )
-                
-                # Apply state-space model: θ_k = θ_{k-1} + w_k
-                # where w_k is zero-mean Gaussian noise with std_dev = random_walk_std_dev
+
                 for t in range(1, trajectory_length):
-                    # Generate process noise
-                    w_k = torch.randn(num_sources) * random_walk_std_dev
-                    
-                    # Update angle using state transition: θ_k = θ_{k-1} + w_k
-                    angle_trajectories[i, t, :num_sources] = angle_trajectories[i, t-1, :num_sources] + w_k
-                    
-                    # Ensure angles stay within bounds
+                    theta_prev = angle_trajectories[i, t-1, :num_sources].numpy()
+                    theta_next = random_walk_step(theta_prev, random_walk_std_dev)
                     angle_trajectories[i, t, :num_sources] = torch.clamp(
-                        angle_trajectories[i, t, :num_sources], 
-                        min=angle_min, 
-                        max=angle_max
+                        torch.from_numpy(theta_next).float(), min=angle_min, max=angle_max
                     )
                     
             elif trajectory_type == TrajectoryType.LINEAR:
@@ -931,74 +871,32 @@ class OnlineLearningTrajectoryGenerator:
         # This should be more sophisticated, using self.trajectory_config.trajectory_type
         # and other parameters like self.trajectory_config.random_walk_std_dev
         
-        # Simplified Random Walk for now:
+        from simulation.runners.trajectory_physics import sine_accel_step, mult_noise_step, random_walk_step
+
         if self.trajectory_config.trajectory_type == TrajectoryType.RANDOM_WALK:
             std_dev = self.trajectory_config.random_walk_std_dev if self.trajectory_config.random_walk_std_dev is not None else 1.0
-            noise = (torch.randn(self.current_M) * std_dev).numpy()
-            next_angles = self.last_true_angles + noise
+            next_angles = random_walk_step(self.last_true_angles, std_dev)
             self.last_true_angles = np.clip(next_angles, self.angle_min, self.angle_max)
         elif self.trajectory_config.trajectory_type == TrajectoryType.STATIC:
-            # Angles remain the same as self.last_true_angles (initialized once)
-            pass # No change needed for static
+            pass
         elif self.trajectory_config.trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
-            # Get parameters for oscillatory model (support both single values and arrays)
             sa_omega0 = self.trajectory_config.sine_accel_omega0 if hasattr(self.trajectory_config, 'sine_accel_omega0') else 0.2
             sa_kappa = self.trajectory_config.sine_accel_kappa if hasattr(self.trajectory_config, 'sine_accel_kappa') else 0.1
             sa_noise_sd = self.trajectory_config.sine_accel_noise_std if hasattr(self.trajectory_config, 'sine_accel_noise_std') else 0.01
-            
-            # Convert single values to arrays for source-specific parameters
-            if isinstance(sa_omega0, (int, float)):
-                sa_omega0 = [sa_omega0] * self.current_M
-            if isinstance(sa_kappa, (int, float)):
-                sa_kappa = [sa_kappa] * self.current_M
-            
-            # Ensure arrays have correct length
-            if len(sa_omega0) != self.current_M:
-                raise ValueError(f"sine_accel_omega0 array length ({len(sa_omega0)}) must match number of sources ({self.current_M})")
-            if len(sa_kappa) != self.current_M:
-                raise ValueError(f"sine_accel_kappa array length ({len(sa_kappa)}) must match number of sources ({self.current_M})")
-            
-            # Convert to numpy arrays for computation
-            sa_omega0_array = np.array(sa_omega0)
-            sa_kappa_array = np.array(sa_kappa)
-            
-            # Apply oscillatory model: θ_{k+1} = θ_k + κ sin(ω0 * t) + η_k
-            # Each source has its own frequency and amplitude
-            oscillation = sa_kappa_array * np.sin(sa_omega0_array * self.current_step_in_session) * 1.0  # T = 1 s
-            
-            # Add noise (in degrees)
-            noise = (torch.randn(self.current_M) * sa_noise_sd).numpy()
-            
-            # Update angle: θ_{k+1} = θ_k + oscillation + noise
-            next_angles = 0.99*self.last_true_angles + oscillation + noise
-            
-            # Ensure angles stay within bounds
+
+            omega0_arr = np.atleast_1d(np.broadcast_to(np.array(sa_omega0, dtype=float), self.current_M))
+            kappa_arr = np.atleast_1d(np.broadcast_to(np.array(sa_kappa, dtype=float), self.current_M))
+
+            next_angles = sine_accel_step(self.last_true_angles, self.current_step_in_session, omega0_arr, kappa_arr, sa_noise_sd)
             self.last_true_angles = np.clip(next_angles, self.angle_min, self.angle_max)
         elif self.trajectory_config.trajectory_type == TrajectoryType.MULT_NOISE_NONLINEAR:
-            # Get parameters for multiplicative noise model
             mn_omega0 = self.trajectory_config.mult_noise_omega0 if hasattr(self.trajectory_config, 'mult_noise_omega0') else 0.0
             mn_amp = self.trajectory_config.mult_noise_amp if hasattr(self.trajectory_config, 'mult_noise_amp') else 0.5
             mn_base_sd = self.trajectory_config.mult_noise_base_std if hasattr(self.trajectory_config, 'mult_noise_base_std') else 0.1
-            
-            # Apply multiplicative noise model: θ_{k+1} = θ_k + ω0 T + σ(θ_k) η_k
-            # Convert to radians for trigonometric functions only
-            theta_prev_rad = self.last_true_angles * (np.pi / 180.0)
-            
-            # Deterministic part (in degrees)
-            deterministic = mn_omega0 * 1.0  # T = 1 s
-            
-            # State-dependent noise standard deviation
-            std = mn_base_sd * (1.0 + mn_amp * np.sin(theta_prev_rad)**2)
-            
-            # Generate noise (in degrees)
-            noise = (torch.randn(self.current_M) * std).numpy()
-            
-            # Update angle (all in degrees)
-            next_angles = self.last_true_angles + deterministic + noise
-            
-            # Ensure angles stay within bounds
+
+            next_angles = mult_noise_step(self.last_true_angles, mn_omega0, mn_amp, mn_base_sd)
             self.last_true_angles = np.clip(next_angles, self.angle_min, self.angle_max)
-        else: # Default to RANDOM if not specified or other types not implemented here yet
+        else:
             self.last_true_angles = (torch.rand(self.current_M) * (self.angle_max - self.angle_min) + self.angle_min).numpy()
             
         # TODO: Implement other trajectory types (LINEAR, CIRCULAR etc.) if needed for online generation
