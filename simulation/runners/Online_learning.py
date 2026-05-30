@@ -486,49 +486,18 @@ class OnlineLearning:
                 logger.error("No model available for online learning")
                 return {"status": "error", "message": "No model available for online learning"}
             
-            # Initialize online model as copy of trained model using the same factory function
             import torch
-            from copy import deepcopy
+            from config.factory import create_model
             
-            # Create a new model instance using the same factory function that created the trained model
-            try:
-                # Method 1: Use the same factory function to ensure identical architecture
-                from config.factory import create_model
-                self.online_model = create_model(self.config, self.system_model)
-                self.online_model.load_state_dict(self.trained_model.state_dict())
-                self.online_model.eval()  # Set to eval mode like the trained model
-                logger.info("Initialized online model as copy of trained model using factory function")
-            except Exception as e:
-                logger.warning(f"Factory function copy failed ({e}), trying clone approach")
-                try:
-                    # Method 2: Use torch.clone() for parameters
-                    self.online_model = deepcopy(self.trained_model.cpu())
-                    if torch.cuda.is_available() and next(self.trained_model.parameters()).is_cuda:
-                        self.online_model = self.online_model.cuda()
-                    logger.info("Initialized online model using CPU deepcopy then moved to GPU")
-                except Exception as e2:
-                    logger.error(f"All model copying methods failed: {e2}")
-                    raise RuntimeError(f"Failed to create online model copy. Factory function failed: {e}, Deepcopy failed: {e2}. Cannot proceed with online learning.")
+            # Initialize online model as copy of trained model
+            self.online_model = create_model(self.config, self.system_model)
+            self.online_model.load_state_dict(self.trained_model.state_dict())
+            self.online_model.eval()
             
-            # Create supervised trained model as copy of trained model (same approach as online model)
-            try:
-                # Method 1: Use the same factory function to ensure identical architecture
-                self.supervised_trained_model = create_model(self.config, self.system_model)
-                self.supervised_trained_model.load_state_dict(self.trained_model.state_dict())
-                self.supervised_trained_model.train()  # Set to training mode for supervised learning
-                logger.info("Initialized supervised trained model as copy of trained model using factory function")
-            except Exception as e:
-                logger.warning(f"Factory function copy failed for supervised model ({e}), trying clone approach")
-                try:
-                    # Method 2: Use torch.clone() for parameters
-                    self.supervised_trained_model = deepcopy(self.trained_model.cpu())
-                    if torch.cuda.is_available() and next(self.trained_model.parameters()).is_cuda:
-                        self.supervised_trained_model = self.supervised_trained_model.cuda()
-                    self.supervised_trained_model.train()  # Set to training mode for supervised learning
-                    logger.info("Initialized supervised trained model using CPU deepcopy then moved to GPU")
-                except Exception as e2:
-                    logger.error(f"All supervised model copying methods failed: {e2}")
-                    raise RuntimeError(f"Failed to create supervised trained model copy. Factory function failed: {e}, Deepcopy failed: {e2}. Cannot proceed with supervised learning.")
+            # Initialize supervised model as copy of trained model
+            self.supervised_trained_model = create_model(self.config, self.system_model)
+            self.supervised_trained_model.load_state_dict(self.trained_model.state_dict())
+            self.supervised_trained_model.train()
             
             # Reset dual model state for new trajectory
             self.drift_detected = False
@@ -707,90 +676,76 @@ class OnlineLearning:
                     main_losses = [wr.loss_metrics.main_loss for wr in trajectory_results.window_results]
                     
                     # Run GLRT on reference loss
-                    try:
-                        ref_changepoint, ref_log_glr, ref_all_log_glr, ref_candidate_points = glrt_changepoint_detection(ref_losses, min_segment_size=min_segment_size)
-                        glrt_ref_loss_changepoint_window = ref_changepoint
-                        glrt_ref_loss_likelihood = ref_log_glr
-                        glrt_ref_loss_all_log_glr = ref_all_log_glr
-                        glrt_ref_loss_candidate_points = ref_candidate_points
-                        glrt_ref_losses = ref_losses
-                        logger.info(f"GLRT (ref_loss) - Window {window_idx}: Changepoint at window {ref_changepoint}, Log-GLR: {ref_log_glr:.4f}")
-                    except Exception as e:
-                        logger.warning(f"GLRT (ref_loss) failed at window {window_idx}: {e}")
+                    ref_changepoint, ref_log_glr, ref_all_log_glr, ref_candidate_points = glrt_changepoint_detection(ref_losses, min_segment_size=min_segment_size)
+                    glrt_ref_loss_changepoint_window = ref_changepoint
+                    glrt_ref_loss_likelihood = ref_log_glr
+                    glrt_ref_loss_all_log_glr = ref_all_log_glr
+                    glrt_ref_loss_candidate_points = ref_candidate_points
+                    glrt_ref_losses = ref_losses
+                    logger.info(f"GLRT (ref_loss) - Window {window_idx}: Changepoint at window {ref_changepoint}, Log-GLR: {ref_log_glr:.4f}")
                     
                     # Run GLRT on main loss
-                    try:
-                        main_changepoint, main_log_glr, main_all_log_glr, main_candidate_points = glrt_changepoint_detection(main_losses, min_segment_size=min_segment_size)
-                        glrt_main_loss_changepoint_window = main_changepoint
-                        glrt_main_loss_likelihood = main_log_glr
-                        glrt_main_loss_all_log_glr = main_all_log_glr
-                        glrt_main_loss_candidate_points = main_candidate_points
-                        glrt_main_losses = main_losses
-                        # Update current GLRT likelihood (persist across windows for adaptive learning rate)
-                        current_glrt_likelihood = main_log_glr
+                    main_changepoint, main_log_glr, main_all_log_glr, main_candidate_points = glrt_changepoint_detection(main_losses, min_segment_size=min_segment_size)
+                    glrt_main_loss_changepoint_window = main_changepoint
+                    glrt_main_loss_likelihood = main_log_glr
+                    glrt_main_loss_all_log_glr = main_all_log_glr
+                    glrt_main_loss_candidate_points = main_candidate_points
+                    glrt_main_losses = main_losses
+                    current_glrt_likelihood = main_log_glr
+                    
+                    # Update GLRT history for statistical baseline
+                    self.glrt_history.append(main_log_glr)
+                    if len(self.glrt_history) > self.glrt_baseline_window_size:
+                        self.glrt_history = self.glrt_history[-self.glrt_baseline_window_size:]
+                    
+                    # Compute statistical baseline and z-score
+                    current_glrt_z_score = None
+                    if len(self.glrt_history) >= self.glrt_min_samples_for_statistics:
+                        baseline_values = np.array(self.glrt_history[:-self.glrt_history_exclusion])
+                        baseline_mean = np.mean(baseline_values)
+                        baseline_std = np.std(baseline_values)
+                        current_glrt_baseline_mean = baseline_mean
                         
-                        # Update GLRT history for statistical baseline
-                        self.glrt_history.append(main_log_glr)
-                        # Keep only recent values for baseline calculation
-                        if len(self.glrt_history) > self.glrt_baseline_window_size:
-                            self.glrt_history = self.glrt_history[-self.glrt_baseline_window_size:]
-                        
-                        # Compute statistical baseline and z-score
-                        current_glrt_z_score = None
-                        if len(self.glrt_history) >= self.glrt_min_samples_for_statistics:
-                            baseline_values = np.array(self.glrt_history[:-self.glrt_history_exclusion])
-                            baseline_mean = np.mean(baseline_values)
-                            baseline_std = np.std(baseline_values)
-                            current_glrt_baseline_mean = baseline_mean  # Store baseline mean for adaptive LR calculation
-                            
-                            # Avoid division by zero
-                            if baseline_std > 1e-10:
-                                current_glrt_z_score = (main_log_glr - baseline_mean) / baseline_std
-                            else:
-                                current_glrt_z_score = 0.0
-                            
-                            logger.info(f"GLRT (main_loss) - Window {window_idx}: Changepoint at window {main_changepoint}, Log-GLR: {main_log_glr:.4f}, Z-score: {current_glrt_z_score:.4f} (baseline: {baseline_mean:.4f} ± {baseline_std:.4f})")
-                            
-                            # Statistical drift detection: detect when z-score exceeds threshold
-                            if current_glrt_z_score > self.glrt_detection_z_threshold and self.glrt_drift_detection_window is None and not self.drift_detected:
-                                self.glrt_drift_detection_window = window_idx
-                                # Store z-score at detection time
-                                self.glrt_z_score_at_detection = current_glrt_z_score
-                                
-                                # Calculate learning rate at detection time using the same formula as _online_training_window
-                                base_lr = getattr(self.config.online_learning, 'learning_rate', 1e-3)
-                                if self.use_adaptive_learning_rate:
-                                    import math
-                                    G = main_log_glr if main_log_glr is not None else self.adaptive_lr_dG0
-                                    dG = G - baseline_mean if baseline_mean is not None else 0.0
-                                    log_lr_min = math.log10(self.adaptive_lr_min)
-                                    log_lr_max = math.log10(self.adaptive_lr_max)
-                                    log_lr = log_lr_min + (log_lr_max - log_lr_min) / (1.0 + math.exp(-self.adaptive_lr_k_sigmoid * (dG - self.adaptive_lr_dG0)))
-                                    self.learning_rate_at_detection = 10 ** log_lr
-                                else:
-                                    # Fixed learning rate
-                                    self.learning_rate_at_detection = base_lr
-                                
-                                time_to_learn = self.time_to_learn if self.time_to_learn is not None else 0
-                                trigger_window = window_idx + time_to_learn
-                                logger.info(f"GLRT drift detected at window {window_idx} (GLRT z-score: {current_glrt_z_score:.4f} > {self.glrt_detection_z_threshold}, raw GLRT: {main_log_glr:.4f}). Learning will trigger at window {trigger_window} (after {time_to_learn} windows delay). LR at detection: {self.learning_rate_at_detection:.6f}")
-                                
-                                drift_detection_dicts.append({
-                                    "eta": self.system_model.params.eta,
-                                    "window_idx": window_idx,
-                                    "baseline_mean": baseline_mean,
-                                    "main_log_glr": main_log_glr,
-                                    "baseline_std": baseline_std,
-                                    "current_glrt_z_score": current_glrt_z_score,
-                                    "learning_rate_at_detection": self.learning_rate_at_detection
-                                })
+                        if baseline_std > 1e-10:
+                            current_glrt_z_score = (main_log_glr - baseline_mean) / baseline_std
                         else:
-                            # Not enough samples yet, log raw value only
-                            logger.info(f"GLRT (main_loss) - Window {window_idx}: Changepoint at window {main_changepoint}, Log-GLR: {main_log_glr:.4f} (building baseline: {len(self.glrt_history)}/{self.glrt_min_samples_for_statistics} samples)")
-                    except Exception as e:
-                        logger.warning(f"GLRT (main_loss) failed at window {window_idx}: {e}")
-                        # Keep previous GLRT likelihood value if calculation fails
-                        # current_glrt_likelihood remains unchanged (None initially, or last valid value)
+                            current_glrt_z_score = 0.0
+                        
+                        logger.info(f"GLRT (main_loss) - Window {window_idx}: Changepoint at window {main_changepoint}, Log-GLR: {main_log_glr:.4f}, Z-score: {current_glrt_z_score:.4f} (baseline: {baseline_mean:.4f} ± {baseline_std:.4f})")
+                        
+                        # Statistical drift detection: detect when z-score exceeds threshold
+                        if current_glrt_z_score > self.glrt_detection_z_threshold and self.glrt_drift_detection_window is None and not self.drift_detected:
+                            self.glrt_drift_detection_window = window_idx
+                            self.glrt_z_score_at_detection = current_glrt_z_score
+                            
+                            # Calculate learning rate at detection time
+                            import math
+                            base_lr = getattr(self.config.online_learning, 'learning_rate', 1e-3)
+                            if self.use_adaptive_learning_rate:
+                                G = main_log_glr if main_log_glr is not None else self.adaptive_lr_dG0
+                                dG = G - baseline_mean if baseline_mean is not None else 0.0
+                                log_lr_min = math.log10(self.adaptive_lr_min)
+                                log_lr_max = math.log10(self.adaptive_lr_max)
+                                log_lr = log_lr_min + (log_lr_max - log_lr_min) / (1.0 + math.exp(-self.adaptive_lr_k_sigmoid * (dG - self.adaptive_lr_dG0)))
+                                self.learning_rate_at_detection = 10 ** log_lr
+                            else:
+                                self.learning_rate_at_detection = base_lr
+                            
+                            time_to_learn = self.time_to_learn if self.time_to_learn is not None else 0
+                            trigger_window = window_idx + time_to_learn
+                            logger.info(f"GLRT drift detected at window {window_idx} (GLRT z-score: {current_glrt_z_score:.4f} > {self.glrt_detection_z_threshold}, raw GLRT: {main_log_glr:.4f}). Learning will trigger at window {trigger_window} (after {time_to_learn} windows delay). LR at detection: {self.learning_rate_at_detection:.6f}")
+                            
+                            drift_detection_dicts.append({
+                                "eta": self.system_model.params.eta,
+                                "window_idx": window_idx,
+                                "baseline_mean": baseline_mean,
+                                "main_log_glr": main_log_glr,
+                                "baseline_std": baseline_std,
+                                "current_glrt_z_score": current_glrt_z_score,
+                                "learning_rate_at_detection": self.learning_rate_at_detection
+                            })
+                    else:
+                        logger.info(f"GLRT (main_loss) - Window {window_idx}: Changepoint at window {main_changepoint}, Log-GLR: {main_log_glr:.4f} (building baseline: {len(self.glrt_history)}/{self.glrt_min_samples_for_statistics} samples)")
                 
                 # Check if we've reached the window to trigger drift detection (detection_window + time_to_learn)
                 # This check runs every window, not just when GLRT is calculated
