@@ -980,7 +980,13 @@ class Simulation:
         
         print("\n" + "="*80)
         
-    def run_scenario(self, scenario_type: str, values: List[Any], full_mode: bool = False) -> Dict[str, Dict[str, Any]]:
+    def run_scenario(
+        self,
+        scenario_type: str,
+        values: List[Any],
+        full_mode: bool = False,
+        goal: Optional[str] = None,
+    ) -> Dict[str, Dict[str, Any]]:
         """
         Run a parametric scenario with multiple values.
         
@@ -1053,7 +1059,8 @@ class Simulation:
                     
                     result = self._run_sweep_iteration(
                         overrides, scenario_type, eta_value,
-                        f"{scenario_type}_{eta_value}/lr_run{lr_idx}_{lr_value}", full_mode
+                        f"{scenario_type}_{eta_value}/lr_run{lr_idx}_{lr_value}", full_mode,
+                        goal=goal,
                     )
                     
                     avg_loss = self.extract_post_learning_avg_loss_from_result(result)
@@ -1085,7 +1092,8 @@ class Simulation:
                     
                     result = self._run_sweep_iteration(
                         overrides, scenario_type, eta_value,
-                        f"{scenario_type}_{eta_value}/lr_adaptive", full_mode
+                        f"{scenario_type}_{eta_value}/lr_adaptive", full_mode,
+                        goal=goal,
                     )
                     
                     avg_loss = self.extract_post_learning_avg_loss_from_result(result)
@@ -1144,7 +1152,8 @@ class Simulation:
                 
                 result = self._run_sweep_iteration(
                     overrides, scenario_type, value,
-                    f"{scenario_type}_{value}", full_mode
+                    f"{scenario_type}_{value}", full_mode,
+                    goal=goal,
                 )
                     
                 scenario_results[value] = result
@@ -1224,7 +1233,15 @@ class Simulation:
                 return f"simulation.model_path={model_paths[0]}"
         return "simulation.model_path=null"
 
-    def _run_sweep_iteration(self, overrides: List[str], scenario_type: str, sweep_value, output_subdir: str, full_mode: bool) -> Dict:
+    def _run_sweep_iteration(
+        self,
+        overrides: List[str],
+        scenario_type: str,
+        sweep_value,
+        output_subdir: str,
+        full_mode: bool,
+        goal: Optional[str] = None,
+    ) -> Dict:
         """Create a modified config, build a Simulation, and run it. Returns the result dict."""
         from config.loader import apply_overrides
         from config_handler import update_components_for_sweep
@@ -1242,11 +1259,21 @@ class Simulation:
             output_dir=self.output_dir / output_subdir
         )
 
+        if goal == "full" or (goal is None and full_mode):
+            return simulation.run()
+        if goal == "online_learning":
+            return simulation.execute_online_learning()
+        if goal == "evaluate":
+            return simulation.run_evaluation()
+        if goal == "train":
+            return simulation.run_training()
+
+        # Legacy routing from parent config flags (old main.py)
         if full_mode:
             return simulation.run()
         elif self.config.simulation.load_model and not self.config.simulation.train_model:
-            return simulation.execute_online_learning()
-        elif self.config.simulation.evaluate_model and not self.config.simulation.train_model:
+            if getattr(self.config, 'online_learning', None) and self.config.online_learning.enabled:
+                return simulation.execute_online_learning()
             return simulation.run_evaluation()
         else:
             return simulation.run_training()
