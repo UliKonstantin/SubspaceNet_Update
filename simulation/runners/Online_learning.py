@@ -777,25 +777,13 @@ class OnlineLearning:
                 if self.drift_detected:
                     if self.learning_done:
                         # Online model finished training, evaluate it normally
-                        logger.info(f"Evaluating online model (post-training) for window {window_idx}")
-                        online_window_result = self._evaluate_window(
-                            time_series_single_window, 
-                            sources_num_single_window_list, 
-                            labels_single_window_list_of_arrays,
-                            trajectory_idx,
-                            window_idx,
-                            is_first_window=(window_idx == 0),
-                            last_ekf_predictions=online_last_ekf_predictions,
-                            last_ekf_covariances=online_last_ekf_covariances,
-                            model=self.online_model
+                        online_window_result, online_last_ekf_predictions, online_last_ekf_covariances = self._evaluate_and_record(
+                            self.online_model, online_trajectory_results,
+                            time_series_single_window, sources_num_single_window_list, labels_single_window_list_of_arrays,
+                            trajectory_idx, window_idx, online_last_ekf_predictions, online_last_ekf_covariances,
+                            model_label="Online model"
                         )
                         
-                        # Add online model result to trajectory results
-                        online_trajectory_results.add_window_result(window_idx, online_window_result, self.system_model.params.eta, labels_single_window_list_of_arrays)
-                        
-                        logger.info(f"Online model - Window {window_idx}: Main Loss = {online_window_result.loss_metrics.main_loss:.6f} ({online_window_result.loss_metrics.main_loss_config}), Cov = {online_window_result.window_metrics.avg_covariance:.6f}")
-                        
-                        # Log online learning window summary (post-learning evaluation)
                         log_online_learning_window_summary(
                             subspacenet_loss=trained_subspacenet_loss,
                             ekf_loss=trained_ekf_loss,
@@ -808,32 +796,12 @@ class OnlineLearning:
                         )
                         
                         # Evaluate supervised trained model (post-training)
-                        logger.info(f"Evaluating supervised trained model (post-training) for window {window_idx}")
-                        supervised_window_result = self._evaluate_window(
-                            time_series_single_window, 
-                            sources_num_single_window_list, 
-                            labels_single_window_list_of_arrays,
-                            trajectory_idx,
-                            window_idx,
-                            is_first_window=(window_idx == 0),
-                            last_ekf_predictions=supervised_last_ekf_predictions,
-                            last_ekf_covariances=supervised_last_ekf_covariances,
-                            model=self.supervised_trained_model
+                        _, supervised_last_ekf_predictions, supervised_last_ekf_covariances = self._evaluate_and_record(
+                            self.supervised_trained_model, supervised_trajectory_results,
+                            time_series_single_window, sources_num_single_window_list, labels_single_window_list_of_arrays,
+                            trajectory_idx, window_idx, supervised_last_ekf_predictions, supervised_last_ekf_covariances,
+                            model_label="Supervised trained model"
                         )
-                        
-                        # Add supervised model result to trajectory results
-                        supervised_trajectory_results.add_window_result(window_idx, supervised_window_result, self.system_model.params.eta, labels_single_window_list_of_arrays)
-                        
-                        logger.info(f"Supervised trained model - Window {window_idx}: Main Loss = {supervised_window_result.loss_metrics.main_loss:.6f} ({supervised_window_result.loss_metrics.main_loss_config}), Cov = {supervised_window_result.window_metrics.avg_covariance:.6f}")
-                        
-                        # Update supervised EKF state for next window
-                        supervised_last_ekf_predictions = supervised_window_result.doa_metrics.ekf_predictions
-                        supervised_last_ekf_covariances = supervised_window_result.step_metrics.covariances
-                        
-                        # Update online EKF state for next window
-                        # online_window_result.doa_metrics.ekf_predictions is already in tensor format
-                        online_last_ekf_predictions = online_window_result.doa_metrics.ekf_predictions
-                        online_last_ekf_covariances = online_window_result.step_metrics.covariances
                     else:
                         # Online model still learning/adapting
                         logger.info(f"Training online model for window {window_idx}")
@@ -1127,44 +1095,14 @@ class OnlineLearning:
                     true_angles_this_step = labels_per_step_list[step][:num_sources_this_step]
                     
                     if not is_near_field:
-                        # Forward pass through training model (with gradients for training)
-                        angles_pred, _, _ = training_model(step_data_tensor, num_sources_this_step)
-                        
-                        # Convert predictions and true angles to proper format
-                        # Ensure angles_pred_tensor has shape [1, num_sources] for loss functions
-                        if angles_pred.dim() == 3:  # [batch, channels, sources] -> [batch, sources]
-                            angles_pred_tensor = angles_pred.squeeze(1)[:, :num_sources_this_step]
-                        elif angles_pred.dim() == 2:  # [batch, sources] or [batch, features]
-                            angles_pred_tensor = angles_pred.view(1, -1)[:, :num_sources_this_step]
-                        else:  # [sources] -> [1, sources]
-                            angles_pred_tensor = angles_pred.view(1, -1)[:, :num_sources_this_step]
-                        
-                        # Ensure true_angles_tensor has shape [1, num_sources]
-                        true_angles_tensor = torch.tensor(true_angles_this_step, device=device).unsqueeze(0)  # Shape: [1, num_sources]
-                        
-                        # Get optimal permutation for training
-                        angles_pred_np = angles_pred.detach().cpu().numpy().flatten()[:num_sources_this_step]
-                        model_perm = self._get_optimal_permutation(angles_pred_np, true_angles_this_step)
-                        angles_pred_tensor = angles_pred_tensor[:, model_perm]
-                        angles_pred_np = angles_pred_np[model_perm].flatten()
+                        # Forward pass with gradients + shape normalization + permutation alignment
+                        angles_pred_tensor, true_angles_tensor = self._forward_and_align(
+                            training_model, step_data_tensor, num_sources_this_step, true_angles_this_step, require_grad=True
+                        )
                         
                         # ============ EKF Processing for Training ============
-                        # Initialize EKF for this training step (create fresh filters for each step)
-                        # Calculate initial time for training EKF filters
-                        window_size = self.config.online_learning.window_size
-                        training_initial_time = window_idx * window_size + step
-                        
                         # Initialize training EKF filters (separate from evaluation EKF)
-                        self.training_ekf_filters = []
-                        for i in range(num_sources_this_step):
-                            training_ekf = ExtendedKalmanFilter1D.create_from_config(
-                                self.config, 
-                                trajectory_type=self.config.trajectory.trajectory_type,
-                                device=device,
-                                source_idx=i,  # Pass source index to use source-specific parameters
-                                initial_time=training_initial_time  # Pass initial time for correct oscillatory behavior
-                            )
-                            self.training_ekf_filters.append(training_ekf)
+                        self.training_ekf_filters = self._initialize_ekf_filters(num_sources_this_step, window_idx, step)
                         
                         # Use the _initialize_ekf_state method to properly initialize state and covariance
                         # This ensures we use the last predictions and covariances from the previous window
@@ -1381,6 +1319,27 @@ class OnlineLearning:
             logger.warning(f"No gradients computed in step {step}, GD {gd_step}")
             return False
 
+    def _evaluate_and_record(self, model, trajectory_results: 'TrajectoryResults',
+                            time_series, sources_num, labels, trajectory_idx: int, window_idx: int,
+                            last_ekf_predictions, last_ekf_covariances, model_label: str):
+        """
+        Evaluate a model on a window, record to trajectory results, and return updated EKF state.
+
+        Returns:
+            Tuple of (window_result, updated_ekf_predictions, updated_ekf_covariances)
+        """
+        window_result = self._evaluate_window(
+            time_series, sources_num, labels,
+            trajectory_idx, window_idx,
+            is_first_window=(window_idx == 0),
+            last_ekf_predictions=last_ekf_predictions,
+            last_ekf_covariances=last_ekf_covariances,
+            model=model
+        )
+        trajectory_results.add_window_result(window_idx, window_result, self.system_model.params.eta, labels)
+        logger.info(f"{model_label} - Window {window_idx}: Main Loss = {window_result.loss_metrics.main_loss:.6f} ({window_result.loss_metrics.main_loss_config}), Cov = {window_result.window_metrics.avg_covariance:.6f}")
+        return window_result, window_result.doa_metrics.ekf_predictions, window_result.step_metrics.covariances
+
     def _validate_inputs(self, window_time_series: torch.Tensor, window_sources_num: List[int], 
                         window_labels: List[np.ndarray]) -> Tuple[int, str]:
         """
@@ -1409,6 +1368,46 @@ class OnlineLearning:
             return 0, "Window has zero valid steps. Cannot evaluate."
         
         return current_window_len, ""
+
+    def _forward_and_align(self, model, step_data_tensor, num_sources: int, true_angles, require_grad: bool = False):
+        """
+        Run model forward pass and align predictions via optimal permutation.
+
+        Args:
+            model: The neural network model
+            step_data_tensor: Input tensor [1, N, T]
+            num_sources: Number of sources
+            true_angles: Ground truth angles for permutation alignment
+            require_grad: If True, run with gradients; if False, wrap in torch.no_grad()
+
+        Returns:
+            Tuple of (angles_pred_tensor, true_angles_tensor) both shaped [1, num_sources],
+            with permutation applied.
+        """
+        import torch
+
+        if require_grad:
+            angles_pred, _, _ = model(step_data_tensor, num_sources)
+        else:
+            with torch.no_grad():
+                angles_pred, _, _ = model(step_data_tensor, num_sources)
+
+        # Shape normalization to [1, num_sources]
+        if angles_pred.dim() == 3:
+            angles_pred_tensor = angles_pred.squeeze(1)[:, :num_sources]
+        elif angles_pred.dim() == 2:
+            angles_pred_tensor = angles_pred.view(1, -1)[:, :num_sources]
+        else:
+            angles_pred_tensor = angles_pred.view(1, -1)[:, :num_sources]
+
+        true_angles_tensor = torch.tensor(true_angles, device=device).unsqueeze(0)
+
+        # Optimal permutation alignment
+        angles_pred_np = angles_pred.detach().cpu().numpy().flatten()[:num_sources]
+        model_perm = self._get_optimal_permutation(angles_pred_np, true_angles)
+        angles_pred_tensor = angles_pred_tensor[:, model_perm]
+
+        return angles_pred_tensor, true_angles_tensor
 
     def _initialize_ekf_filters(self, max_sources: int, window_idx: int = 0, step_idx: int = 0) -> List[ExtendedKalmanFilter1D]:
         """
@@ -1523,14 +1522,10 @@ class OnlineLearning:
             model.eval()
             with torch.no_grad():
                 if not is_near_field:
-                    # Model expects num_sources as int or 0-dim tensor
-                    angles_pred, _, _ = model(step_data_tensor, num_sources_this_step)
-                    
-                    # Compare model weights properly
+                    # Weight comparison check (debug/safety)
                     model_state = model.state_dict()
                     trained_state = self.trained_model.state_dict()
                     weights_equal = all(torch.equal(model_state[key], trained_state[key]) for key in model_state.keys())
-                    true_angles_tensor = torch.tensor(true_angles_this_step, device=device).unsqueeze(0)
 
                     if weights_equal and not Pretrained_model:
                         logger.error("Model and trained model have the same weights - online model was not properly copied!")
@@ -1539,29 +1534,11 @@ class OnlineLearning:
                         logger.info("The evaluated model is not the online model,online model is not initialized yet or this is evaluation comparison")
                     else:
                         logger.info("Model and trained model dont have the same weights - online model is properly initialized")
-                        # Debug: Compare online model with pretrained model (no loss calculation)
-                        pretrained_model_angle_pred, _, _ = self.trained_model(step_data_tensor,num_sources_this_step)
-                        pretrained_model_angle_pred= pretrained_model_angle_pred.view(1, -1)[:, :num_sources_this_step]
-                        model_perm = self._get_optimal_permutation(pretrained_model_angle_pred.cpu().numpy().flatten(), true_angles_this_step)
-                        pretrained_model_angle_pred = pretrained_model_angle_pred[:, torch.tensor(model_perm, device=device)]
-                        model_perm = self._get_optimal_permutation(angles_pred.cpu().numpy().flatten(), true_angles_this_step)
-                        angles_pred = angles_pred[:, torch.tensor(model_perm, device=device)]
-                    # Prepare pre-EKF predictions tensor
-                    # Ensure pre_ekf_angles_pred has shape [1, num_sources] for loss functions
-                    if angles_pred.dim() == 3:  # [batch, channels, sources] -> [batch, sources]
-                        pre_ekf_angles_pred = angles_pred.squeeze(1)[:, :num_sources_this_step]
-                    elif angles_pred.dim() == 2:  # [batch, sources] or [batch, features]
-                        pre_ekf_angles_pred = angles_pred.view(1, -1)[:, :num_sources_this_step]
-                    else:  # [sources] -> [1, sources]
-                        pre_ekf_angles_pred = angles_pred.view(1, -1)[:, :num_sources_this_step]
-                    
-                    # Get optimal permutation for model predictions (need numpy for permutation)
-                    angles_pred_np = angles_pred.cpu().numpy().flatten()[:num_sources_this_step]
-                    model_perm = self._get_optimal_permutation(angles_pred_np, true_angles_this_step)
-                
-                    # Apply permutation to both numpy and tensor versions
-                    angles_pred_np = angles_pred_np[model_perm]
-                    pre_ekf_angles_pred = pre_ekf_angles_pred[:, model_perm]
+
+                    # Forward pass + shape normalization + permutation alignment
+                    pre_ekf_angles_pred, true_angles_tensor = self._forward_and_align(
+                        model, step_data_tensor, num_sources_this_step, true_angles_this_step, require_grad=False
+                    )
                 
                     # EKF update for each source - use tensor directly
                     step_predictions = []
