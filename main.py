@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#Train command over multiple snrs python3 main.py simulate -c configs/training_config/Random_basemodel_training_config.yaml -o experiments/results/my_snr_experiment -s snr -v -10 -v -5 -v 0 v 5 -v 10 --mode training
+#Train command over multiple snrs python3 main.py simulate -c configs/Used_for_paper/Random_base_model_training_snr_scenario_config.yaml -o experiments/results/snr_training_sweep -s snr -v -10 -v -5 -v 0 -v 5 -v 10 --mode training
 """
 SubspaceNet - Command Line Interface
 

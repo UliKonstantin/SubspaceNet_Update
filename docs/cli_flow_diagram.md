@@ -8,7 +8,7 @@
 | "Base Model Training (Full Model)" | `run` | `configs/Used_for_paper/Random_basemodel_training_config.yaml` | — (default: training) | — |
 | "Run Nonlinear Tracking Simulation" | `simulate` | `configs/nonlinear_tracking_config.yaml` | — | — (default: training) |
 | "Run Scenario Simulation" | `simulate` | `configs/default_config.yaml` | `SNR` [-v 0,5,10] | — (default: training) |
-| "Base Model SNR Scenario Training" | `simulate` | `configs/training_config/Random_basemodel_training_config.yaml` | `snr` [-v -10..10] | `training` |
+| "Base Model SNR Scenario Training" | `simulate` | `configs/Used_for_paper/Random_base_model_training_snr_scenario_config.yaml` | `snr` [-v -10..10] | `training` |
 | "Online Learning SNR Sweep Scenario" | `simulate` | `configs/Used_for_paper/SineAccel_base_model_Online_learning_snr_sweep_config.yaml` | `eta` | `online_learning` |
 | "Online Learning ETA Sweep Scenario" | `simulate` | `configs/Used_for_paper/SineAccel_base_model_Online_learning_eta_sweep_config.yaml` | `eta` | `online_learning` |
 | "unit_testOnline Learning ETA Sweep Scenario" | `simulate` | `configs/Used_for_paper/SineAccel_base_model_Online_learning_eta_sweep_config.yaml` | `eta` | `online_learning` |

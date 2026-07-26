@@ -65,10 +65,16 @@ class TestResolveRunRequest:
         req = resolve_run_request(str(CONFIGS_DIR / "test_training_snr_scenario.yaml"))
         assert req.retrain_per_sweep is True
 
+    def test_retrain_false_without_scenario_config(self):
+        req = resolve_run_request(str(CONFIGS_DIR / "test_training.yaml"))
+        assert req.retrain_per_sweep is False
+        assert req.retrain_per_sweep_cli is None
+
     def test_online_learning_infers_trajectory(self):
         req = resolve_run_request(str(CONFIGS_DIR / "test_online_learning_single.yaml"))
         assert req.goal == Goal.ONLINE_LEARNING
-        assert req.trajectory is True
+        assert req.trajectory_cli is False
+        assert req.trajectory_enabled is True
         assert req.model_path is not None
 
     def test_eta_sweep_axis_and_values(self):

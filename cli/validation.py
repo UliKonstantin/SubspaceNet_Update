@@ -13,7 +13,7 @@ def validate(request: RunRequest) -> None:
             f"--model (or simulation.model_path in YAML) is required for goal={request.goal.value}"
         )
 
-    if request.goal == Goal.ONLINE_LEARNING and not request.trajectory:
+    if request.goal == Goal.ONLINE_LEARNING and not request.trajectory_enabled:
         raise RoutingError(
             "Online learning requires trajectory data (--trajectory or trajectory.enabled=true in YAML)"
         )

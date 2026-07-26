@@ -3,7 +3,7 @@
 ###############################################################################
 
 system_model:
-  N: 9  # number of antennas
+  N: 8  # number of antennas
   M: 3   # number of sources
   T: 200  # number of snapshots
   snr: 3 # signal-to-noise ratio in dB

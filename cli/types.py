@@ -52,12 +52,14 @@ class RunRequest:
     output_dir: Optional[Path] = None
     overrides: List[str] = field(default_factory=list)
     model_path: Optional[Path] = None
-    trajectory: bool = False
+    trajectory_cli: bool = False
+    trajectory_enabled: bool = False
     sweep: SweepType = SweepType.NONE
     sweep_axis: Optional[SweepAxis] = None
     sweep_values: Optional[List[float]] = None
     lr_sweep: bool = False
-    retrain_per_sweep: bool = True
+    retrain_per_sweep: bool = False
+    retrain_per_sweep_cli: Optional[bool] = None
     grid_params: Optional[Grid4DParams] = None
 
     @property

@@ -29,8 +29,8 @@ Sweep types (`--sweep`, inferred from `scenario_config.type` when omitted):
 - **Goal**: `--goal` CLI → else infer from `simulation.*` / `online_learning.enabled` → else error
 - **Sweep axis**: `--axis` → `scenario_config.type` → `evaluation.sweep_parameter`
 - **Sweep values**: `-v` CLI → `scenario_config.values` → `evaluation.sweep_values` → axis defaults
-- **Retrain per sweep**: `--retrain-per-sweep/--no-retrain-per-sweep` → `scenario_config.retrain_model` → default `true`
-- **Trajectory**: `--trajectory` or `trajectory.enabled=true` in YAML
+- **Retrain per sweep**: `--retrain-per-sweep/--no-retrain-per-sweep` → else `scenario_config.retrain_model` → else `false` (matches legacy `run_scenario`)
+- **Trajectory**: `--trajectory` adds override (legacy simulate behavior); YAML `trajectory.enabled` alone is enough for training without extra override
 
 ## Legacy command mapping
 
@@ -60,10 +60,20 @@ python main_v2.py run \
 
 ```bash
 python main_v2.py run \
-  -c configs/training_config/Random_basemodel_training_config.yaml \
-  -o experiments/results/my_snr_experiment \
+  -c configs/Used_for_paper/Random_base_model_training_snr_scenario_config.yaml \
+  -o experiments/results/snr_training_sweep \
   --goal train --sweep 1d --axis snr \
   -v -10 -v -5 -v 0 -v 5 -v 10
+```
+
+Legacy equivalent:
+
+```bash
+python main.py simulate \
+  -c configs/Used_for_paper/Random_base_model_training_snr_scenario_config.yaml \
+  -o experiments/results/snr_training_sweep \
+  -s snr -v -10 -v -5 -v 0 -v 5 -v 10 \
+  --mode training
 ```
 
 ### Evaluate SNR sweep

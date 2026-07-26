@@ -77,7 +77,7 @@ retrain_option = option(
     "--retrain-per-sweep/--no-retrain-per-sweep",
     default=None,
     help="Retrain a separate model per sweep value (train sweeps). "
-    "Defaults to scenario_config.retrain_model in YAML.",
+    "Defaults to scenario_config.retrain_model in YAML, else false (legacy run_scenario).",
 )
 
 grid_eta_option = option(

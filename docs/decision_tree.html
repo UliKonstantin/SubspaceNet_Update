@@ -484,9 +484,9 @@
             <foreignObject x="178" y="732" width="164" height="108">
                 <div xmlns="http://www.w3.org/1999/xhtml" class="recipe-fo">
                     <div class="rlabel">▸ A · 1D sweep (SNR)</div>
-                    <div class="ryaml">training_config/Random_basemodel_training_config.yaml</div>
+                    <div class="ryaml">Used_for_paper/Random_base_model_training_snr_scenario_config.yaml</div>
                     <div class="rcmd">python3 main_v2.py run -c
-                        configs/training_config/Random_basemodel_training_config.yaml --goal train --sweep 1d --axis snr
+                        configs/Used_for_paper/Random_base_model_training_snr_scenario_config.yaml --goal train --sweep 1d --axis snr
                         -v -10 -v 0 -v 10</div>
                 </div>
             </foreignObject>
@@ -969,9 +969,9 @@
             <div class="recipe-card">
                 <div class="recipe-card-header">A · Train · 1D sweep (SNR example)</div>
                 <div class="recipe-card-body">
-                    <div class="ryaml">training_config/Random_basemodel_training_config.yaml</div>
+                    <div class="ryaml">Used_for_paper/Random_base_model_training_snr_scenario_config.yaml</div>
                     <div class="rcmd">python3 main_v2.py run -c
-                        configs/training_config/Random_basemodel_training_config.yaml --goal train --sweep 1d --axis snr
+                        configs/Used_for_paper/Random_base_model_training_snr_scenario_config.yaml --goal train --sweep 1d --axis snr
                         -v -10 -v -5 -v 0 -v 5 -v 10</div>
                     <div class="rnote">Other axes: swap --axis m|t|eta|trajectory_length. Values from YAML
                         scenario_config.values if omitted.</div>

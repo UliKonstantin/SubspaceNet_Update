@@ -63,7 +63,7 @@ flowchart TD
 | Branch | Leaf | YAML | Command |
 |--------|------|------|---------|
 | A | single train | `configs/Used_for_paper/Random_basemodel_training_config.yaml` | `python3 main_v2.py run -c configs/Used_for_paper/Random_basemodel_training_config.yaml --goal train` |
-| A | SNR train sweep | `configs/training_config/Random_basemodel_training_config.yaml` | `... --goal train --sweep 1d --axis snr -v -10 -v 0 -v 10` |
+| A | SNR train sweep | `configs/Used_for_paper/Random_base_model_training_snr_scenario_config.yaml` | `... --goal train --sweep 1d --axis snr -v -10 -v -5 -v 0 -v 5 -v 10` |
 | B | single eval | `configs/evaluation_configs/default_eval_config.yaml` | `... --goal evaluate -m path/to/checkpoint.pt` |
 | B | SNR eval sweep | `configs/evaluation_configs/snr_sweep_config.yaml` | `... --goal evaluate -m MODEL --sweep 1d --axis snr` |
 | B | kalman 2D | `configs/evaluation_configs/default_eval_config.yaml` | `... --goal evaluate -m MODEL --sweep 2d_kalman` |

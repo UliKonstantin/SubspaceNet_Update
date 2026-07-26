@@ -121,13 +121,17 @@ def build_overrides(request: RunRequest) -> List[str]:
     if request.model_path:
         overrides.append(f"simulation.model_path={request.model_path}")
 
-    if request.trajectory:
+    if request.trajectory_cli:
         overrides.append("trajectory.enabled=true")
 
     if request.lr_sweep:
         overrides.append("online_learning.enable_lr_sweep=true")
 
-    if request.goal == Goal.TRAIN and request.is_sweep:
+    if (
+        request.retrain_per_sweep_cli is not None
+        and request.goal == Goal.TRAIN
+        and request.is_sweep
+    ):
         overrides.append(
             f"scenario_config.retrain_model={'true' if request.retrain_per_sweep else 'false'}"
         )
@@ -159,7 +163,9 @@ def resolve_run_request(
     resolved_axis = _resolve_axis(axis, config, resolved_sweep)
 
     if not trajectory and config.trajectory.enabled:
-        trajectory = True
+        trajectory_enabled = True
+    else:
+        trajectory_enabled = trajectory
 
     model_path = Path(model) if model else None
     if not model_path and config.simulation.model_path:
@@ -178,12 +184,14 @@ def resolve_run_request(
         and resolved_axis == SweepAxis.ETA
     )
 
-    if retrain_per_sweep is not None:
-        retrain = retrain_per_sweep
+    retrain_cli = retrain_per_sweep
+    if retrain_cli is not None:
+        retrain = retrain_cli
     elif config.scenario_config:
         retrain = config.scenario_config.retrain_model
     else:
-        retrain = True
+        # Match simulation.core.run_scenario: retrain_model stays False without scenario_config
+        retrain = False
 
     sweep_values = _resolve_sweep_values(values or [], config, resolved_axis, resolved_goal)
 
@@ -210,11 +218,13 @@ def resolve_run_request(
         output_dir=Path(output_dir) if output_dir else None,
         overrides=list(overrides or []),
         model_path=model_path,
-        trajectory=trajectory,
+        trajectory_cli=trajectory,
+        trajectory_enabled=trajectory_enabled,
         sweep=resolved_sweep,
         sweep_axis=resolved_axis,
         sweep_values=sweep_values,
         lr_sweep=resolved_lr_sweep,
         retrain_per_sweep=retrain,
+        retrain_per_sweep_cli=retrain_cli,
         grid_params=grid_params,
     )

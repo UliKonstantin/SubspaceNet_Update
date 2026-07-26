@@ -43,13 +43,13 @@ SWEEPS (--sweep, or inferred from scenario_config):
 YAML overrides (when CLI is omitted):
   goal        simulation.* + online_learning.enabled
   sweep/axis  scenario_config.type or evaluation.sweep_parameter
-  values      -v > scenario_config.values > evaluation.sweep_values > defaults
+  values      -v > scenario_config.values > evaluation.sweep_values (evaluate) > axis defaults
   model       -m > simulation.model_path > scenario_config.model_paths[0]
 
 \b
 Examples:
   python3 main_v2.py run -c configs/default_config.yaml --goal train
-  python3 main_v2.py run -c configs/training_config/Random_basemodel_training_config.yaml --goal train --sweep 1d --axis snr -v -10 -v 0 -v 10
+  python3 main_v2.py run -c configs/Used_for_paper/Random_base_model_training_snr_scenario_config.yaml --goal train --sweep 1d --axis snr -v -10 -v -5 -v 0 -v 5 -v 10
   python3 main_v2.py run -c configs/evaluation_configs/snr_sweep_config.yaml --goal evaluate -m path/to/model.pt --sweep 1d --axis snr
   python3 main_v2.py run -c configs/Used_for_paper/SineAccel_base_model_Online_learning_eta_sweep_config.yaml --goal online_learning --trajectory --sweep 1d --axis eta --lr-sweep
 

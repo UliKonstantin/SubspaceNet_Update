@@ -1,7 +1,7 @@
 ###############################################################################
 # Hybrid Config: Default Training + Nonlinear Tracking parameters
 ###############################################################################
-#command : python3 main.py simulate -c configs/Used_for_paper/Random_base_model_training_snr_scenario_config.yaml -o experiments/results/snr_training_sweep -s snr --mode training
+#command : python3 main.py simulate -c configs/Used_for_paper/Random_base_model_training_snr_scenario_config.yaml -o experiments/results/snr_training_sweep -s snr -v -10 -v -5 -v 0 -v 5 -v 10 --mode training
 system_model:
   N: 8  # number of antennas
   M: 3   # number of sources
