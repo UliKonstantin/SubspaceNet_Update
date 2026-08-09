@@ -199,6 +199,17 @@ def resolve_plot_jobs(request: RunRequest, result: dict, sim) -> List[PlotKey]:
 
 def dispatch_plots(result: dict, request: RunRequest, output_dir: Path, sim) -> None:
     """Run registered plot handlers for the completed run. Failures are logged, not raised."""
+    ol_goals = {Goal.ONLINE_LEARNING, Goal.FULL}
+    if request.goal in ol_goals or any(
+        g in ol_goals for g, _ in resolve_plot_jobs(request, result, sim)
+    ):
+        from utils.plot_preflight import warn_online_learning_plot_budget
+
+        warn_online_learning_plot_budget(
+            sim.config,
+            context=f"goal={request.goal.value} sweep={request.sweep.value}",
+        )
+
     for goal, sweep in resolve_plot_jobs(request, result, sim):
         handler = PLOT_REGISTRY.get((goal, sweep))
         if handler is None:
