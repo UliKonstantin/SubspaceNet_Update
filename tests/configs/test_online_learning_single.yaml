@@ -71,13 +71,15 @@ trajectory:
   sine_accel_omega0: [-0.15, 0.25, 0.15]
   sine_accel_kappa: [3, -3, 2]
   sine_accel_noise_std: 0.03
+  sine_accel_dc_offset_range: [-15, 15]
   trajectory_length: 15
   save_trajectory: false
   plot_trajectory: false
 
 kalman_filter:
-  process_noise_std_dev: 0.05
-  measurement_noise_std_dev: 0.05
+  filter_type: "extended"
+  process_noise_std_dev: 0.03
+  measurement_noise_std_dev: 0.03
   initial_covariance: 0.001
 
 online_learning:

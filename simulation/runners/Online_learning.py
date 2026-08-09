@@ -26,6 +26,11 @@ from DCD_MUSIC.src.metrics.multimoment_innovation_consistency_loss import MultiM
 from DCD_MUSIC.src.signal_creation import Samples
 from DCD_MUSIC.src.evaluation import get_model_based_method, evaluate_model_based
 from simulation.kalman_filter.extended import ExtendedKalmanFilter1D
+from utils.ekf_handoff import (
+    ekf_handoff_reuse_step0,
+    ekf_handoff_step_index,
+    ekf_next_predict_time_index,
+)
 from simulation.runners.sandbox import glrt_changepoint_detection
 from utils import drift_gates
 
@@ -1050,9 +1055,10 @@ class OnlineLearning:
             # Fallback: create a temporary optimizer
             optimizer = optim.Adam(training_model.parameters(), lr=adaptive_lr)
         
-        # Initialize Extended Kalman Filters
+        # Initialize Extended Kalman Filters (eval + shared filter objects for training)
         max_sources = self.config.system_model.M
         ekf_filters = self._initialize_ekf_filters(max_sources, window_idx, 0)
+        training_ekf_filters = self._initialize_ekf_filters(max_sources, window_idx, 0)
         
         # Get current eta value from system model
         current_eta = self.system_model.params.eta
@@ -1084,6 +1090,8 @@ class OnlineLearning:
             last_ekf_covariances = windows_last_ekf_covariances
             last_ekf_predictions = windows_last_ekf_predictions
             # Process each step for training in this gradient descent iteration
+            handoff_predictions = windows_last_ekf_predictions
+            handoff_covariances = windows_last_ekf_covariances
             for step in range(current_window_len):
                 try:
                     # Extract data for this step
@@ -1093,9 +1101,6 @@ class OnlineLearning:
                     # Skip if no sources
                     if num_sources_this_step <= 0:
                         continue
-                    if step ==0:
-                        last_ekf_predictions = windows_last_ekf_predictions
-                        last_ekf_covariances = windows_last_ekf_covariances
 
                     # Get ground truth labels for this step
                     true_angles_this_step = labels_per_step_list[step][:num_sources_this_step]
@@ -1107,19 +1112,14 @@ class OnlineLearning:
                         )
                         
                         # ============ EKF Processing for Training ============
-                        # Initialize training EKF filters (separate from evaluation EKF)
-                        self.training_ekf_filters = self._initialize_ekf_filters(num_sources_this_step, window_idx, step)
-                        
-                        # Use the _initialize_ekf_state method to properly initialize state and covariance
-                        # This ensures we use the last predictions and covariances from the previous window
                         self._initialize_ekf_state(
-                            step=0,
+                            step=step,
                             num_sources_this_step=num_sources_this_step,
                             true_angles_this_step=true_angles_this_step,
-                            ekf_filters=self.training_ekf_filters,
-                            is_first_window=False,
-                            last_ekf_predictions=last_ekf_predictions,
-                            last_ekf_covariances=last_ekf_covariances,
+                            ekf_filters=training_ekf_filters,
+                            is_first_window=is_first_window,
+                            last_ekf_predictions=handoff_predictions if step == 0 else None,
+                            last_ekf_covariances=handoff_covariances if step == 0 else None,
                             window_idx=window_idx,
                         )
                         
@@ -1130,17 +1130,24 @@ class OnlineLearning:
                         y_s_inv_y_list = []  # Collect y*S^-1*y for training
                         step_Innovation_Covariance_list = []  # Collect Innovation Covariance for training
                         for i in range(num_sources_this_step):
-                            if i < len(self.training_ekf_filters) and i < angles_pred_tensor.size(2):
-                                ekf_filter = self.training_ekf_filters[i]
+                            if i < len(training_ekf_filters) and i < angles_pred_tensor.size(2):
+                                ekf_filter = training_ekf_filters[i]
                                 
                                 # Use tensor measurement to preserve gradients (shape: [batch, seq, sources])
                                 tensor_measurement = angles_pred_tensor[0, 0, i]
                                 
-                                # EKF predict and update with tensor measurement
-                                _, updated_state, _, kalman_gain, kalman_gain_times_innovation, y_s_inv_y,Innovation_Covariance = ekf_filter.predict_and_update(
-                                    measurement=tensor_measurement, 
-                                    true_state=true_angles_this_step[i]
-                                )
+                                if getattr(self, "_handoff_reuse_step0", False) and step == 0:
+                                    updated_state = ekf_filter.x
+                                    innovation = tensor_measurement - updated_state
+                                    kalman_gain = ekf_filter.P / (ekf_filter.P + ekf_filter.R)
+                                    kalman_gain_times_innovation = kalman_gain * innovation
+                                    y_s_inv_y = innovation * (innovation / (ekf_filter.P + ekf_filter.R))
+                                    Innovation_Covariance = ekf_filter.P + ekf_filter.R
+                                else:
+                                    _, updated_state, _, kalman_gain, kalman_gain_times_innovation, y_s_inv_y, Innovation_Covariance = ekf_filter.predict_and_update(
+                                        measurement=tensor_measurement,
+                                        true_state=true_angles_this_step[i],
+                                    )
                                 
                                 # Verify tensors maintain gradients - fail hard if not
                                 if not isinstance(updated_state, torch.Tensor):
@@ -1172,8 +1179,8 @@ class OnlineLearning:
                                 step_Innovation_Covariance_list.append(Innovation_Covariance)
                             else:
                                 # No fallback - fail hard if EKF not available or index out of bounds
-                                if i >= len(self.training_ekf_filters):
-                                    raise RuntimeError(f"EKF filter index {i} out of bounds. Expected {len(self.training_ekf_filters)} training EKF filters but got {num_sources_this_step} sources.")
+                                if i >= len(training_ekf_filters):
+                                    raise RuntimeError(f"EKF filter index {i} out of bounds. Expected {len(training_ekf_filters)} training EKF filters but got {num_sources_this_step} sources.")
                                 if i >= angles_pred_tensor.size(2):
                                     raise RuntimeError(f"Source index {i} out of bounds for tensor shape {angles_pred_tensor.shape}. Cannot access source {i} from {angles_pred_tensor.size(2)} sources.")
                                 raise RuntimeError(f"EKF filter {i} not available but should be. This indicates a serious configuration error.")
@@ -1184,8 +1191,6 @@ class OnlineLearning:
                         logger.debug(f"EKF predictions tensor shape: {ekf_angles_pred_tensor.shape} (expected [1, {num_sources_this_step}])")
                         ekf_covariances_tensor = torch.stack(ekf_covariances_pred).view(1, -1)  # Shape: [1, num_sources]
                         step_Innovation_Covariance_tensor = torch.stack(step_Innovation_Covariance_list).view(1, -1)  # Shape: [1, num_sources]
-                        last_ekf_predictions = ekf_angles_pred_tensor
-                        last_ekf_covariances = ekf_covariances_tensor
                         # Store step results for window-level loss calculation
                         step_result = {
                             'success': True,
@@ -1246,11 +1251,6 @@ class OnlineLearning:
         
         # Set model back to eval mode for EKF evaluation
         training_model.eval()
-        
-        # Clean up training EKF filters to free memory
-        if hasattr(self, 'training_ekf_filters'):
-            delattr(self, 'training_ekf_filters')
-            logger.debug(f"Cleaned up training EKF filters after window {window_idx}")
         
         # Now evaluate the trained model with EKF using the same pattern as _evaluate_window
         # Process each step in window
@@ -1486,6 +1486,7 @@ class OnlineLearning:
         _process_single_step) since stride < window_size revisits the same trajectory index.
         """
         stride = self.config.online_learning.stride
+        window_size = self.config.online_learning.window_size
         global_step = window_idx * stride + step
         self._handoff_reuse_step0 = False
 
@@ -1507,21 +1508,24 @@ class OnlineLearning:
             and last_ekf_predictions.shape[1] >= num_sources_this_step
             and last_ekf_covariances.shape[1] >= num_sources_this_step
         ):
-            last_predictions_pre_perm = last_ekf_predictions[-1, :num_sources_this_step]
+            prev_window_len = last_ekf_predictions.shape[0]
+            handoff_step_idx = ekf_handoff_step_index(stride, prev_window_len)
+            last_predictions_pre_perm = last_ekf_predictions[handoff_step_idx, :num_sources_this_step]
             true_angles_tensor = torch.tensor(true_angles_this_step, device=last_predictions_pre_perm.device)
             last_perm = self._get_optimal_permutation_tensor(last_predictions_pre_perm, true_angles_tensor)
             last_predictions = last_predictions_pre_perm[last_perm]
-            last_covariances_pre_perm = last_ekf_covariances[-1, :num_sources_this_step]
+            last_covariances_pre_perm = last_ekf_covariances[handoff_step_idx, :num_sources_this_step]
             last_covariances = last_covariances_pre_perm[last_perm]
 
-            next_predict_t = global_step + 1
+            handoff_reuse = ekf_handoff_reuse_step0(stride, window_size)
+            next_predict_t = ekf_next_predict_time_index(global_step, handoff_reuse)
             for i in range(num_sources_this_step):
                 ekf_filters[i].restore_handoff_state(
                     last_predictions.flatten()[i].item(),
                     last_covariances.flatten()[i].item(),
                     next_predict_t,
                 )
-            self._handoff_reuse_step0 = True
+            self._handoff_reuse_step0 = handoff_reuse
         else:
             logger.warning("No valid last predictions or covariances available, falling back to true angles")
             for i in range(num_sources_this_step):

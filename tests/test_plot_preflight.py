@@ -36,7 +36,7 @@ def test_production_like_config_is_clean():
     config = SimpleNamespace(
         online_learning=SimpleNamespace(
             enabled=True,
-            trajectory_length=125,
+            trajectory_length=200,
             window_size=5,
             stride=3,
             drift_warmup_windows=10,
@@ -50,6 +50,8 @@ def test_production_like_config_is_clean():
 
 def test_minimum_trajectory_length_covers_first_z():
     warmup, guard = 10, 3
-    min_traj = minimum_trajectory_length_for_drift(5, 3, warmup, guard, adaptation_window_count=5)
+    min_traj = minimum_trajectory_length_for_drift(
+        5, 3, warmup, guard, adaptation_window_count=5, post_eval_windows=15
+    )
     windows = estimate_ol_window_count(min_traj, 5, 3)
-    assert windows >= drift_gates.first_z_window(warmup, guard) + 1 + 5
+    assert windows >= drift_gates.first_z_window(warmup, guard) + 1 + 5 + 15

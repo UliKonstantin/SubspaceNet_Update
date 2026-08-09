@@ -78,13 +78,15 @@ trajectory:
   trajectory_type: "sine_accel_nonlinear"  # Type of trajectory for online learning
   # Sine acceleration non-linear model parameters (now oscillatory with source-specific patterns)
   sine_accel_omega0: [1, 0.5, 0.15]  # Frequency of oscillation (rad/s) - different for each source
-  sine_accel_kappa: [3, -3, 1]  # Amplitude of oscillation (rad) - different for each source  
-  sine_accel_noise_std: 0.03   # Noise standard deviation (rad) - controls randomness
+  sine_accel_kappa: [3, -3, 1]  # Amplitude of oscillation (deg) - different for each source
+  sine_accel_noise_std: 0.03   # Process noise std (deg) — matches trajectory_physics
+  sine_accel_dc_offset_range: [-15, 15]
   save_trajectory: false
 
 kalman_filter:
-  process_noise_std_dev: 0.03  # standard deviation of process noise (degrees), null to use trajectory.random_walk_std_dev
-  measurement_noise_std_dev: 0.03  # standard deviation of measurement noise (degrees)
+  filter_type: "extended"
+  process_noise_std_dev: 0.03  # ignored for sine_accel; EKF Q uses trajectory.sine_accel_noise_std
+  measurement_noise_std_dev: 0.03
   initial_covariance: 0.001  # initial state covariance
 
 # Enable online learning with Unsupervised RMAPE loss

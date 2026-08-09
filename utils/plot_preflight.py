@@ -26,7 +26,7 @@ def minimum_trajectory_length_for_drift(
     drift_warmup_windows: int,
     drift_guard_samples: int,
     adaptation_window_count: int = 5,
-    post_eval_windows: int = 5,
+    post_eval_windows: int = 15,
 ) -> int:
     """Smallest trajectory_length that yields enough windows for drift + adaptation + eval."""
     min_windows = (
