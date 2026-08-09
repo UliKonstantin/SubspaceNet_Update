@@ -73,35 +73,29 @@ simulation/drift/
 
 ## 6. Unified plot dispatch (end-of-recipe refactor)
 
-**Current state:** Plotting is **spread across** `cli/postprocess.py` (sweeps + partial single eval), `Online_learning.py` (GLRT, averaged OL, trajectory, KF comparison), and `training.py` (loss curves). Adding a plot requires hunting call sites.
+**Status:** Done (2026-08-09)
 
-**Target:**
-- Runners / `Simulation` **return structured results only** (no matplotlib).
-- **One dispatch** after run completes: `cli/postprocess.py` or `utils/plotting/dispatch.py` registry keyed by `(goal, sweep_type)`.
-- **`simulation.save_plots`** gates all PNG generation in that single place.
-- New plot = implement in `utils/plotting/` + register — no runner edits.
-
-**Interim (2026-08):** `eval_kf_gain_comparison.png` (single eval, postprocess); `averaged_kf_gain_comparison.png` (OL, still inline in runner). Move both to registry during this task.
-
-**When:** After recipe Steps 0–9 pass; re-run Steps 3–9 for plot regression. See [RECIPE_VERIFICATION_PLAN.md](./RECIPE_VERIFICATION_PLAN.md) plotting gap section.
+- `utils/plot_dispatch.py` — registry keyed by `(goal, sweep_type)`, `save_plots` gate
+- Runners return structured results only; `cli/postprocess.py` delegates to dispatch
+- Per-subdir OL plots restored for 1D sweeps (`dispatch_one_d_sweep_iteration_plots`)
+- Tests: `tests/test_plot_dispatch.py`
 
 ---
 
 ## 7. Stage 10 — split `utils/plotting.py`
 
-Large file (~2200 lines). Split by domain after scratch plots are moved in:
+**Status:** Done (2026-08-09)
 
 ```
 utils/plotting/
-  __init__.py          ← re-export public API
-  evaluation.py
-  online_learning.py
-  sweeps.py
-  lr_analysis.py       ← plots from tasks 1–2
-  style.py             ← shared rcParams / serif theme (dedupe scratch style blocks)
+  __init__.py          ← re-export public API (backward compat)
+  evaluation.py        ← eval + kalman 2D
+  online_learning.py   ← OL averaged, GLRT, KF gain, trajectory, training curves
+  sweeps.py            ← 1D/4D scenario sweeps, heatmap, improvement tables
+  lr_plots.py          ← optimal LR / GLRT observable plots
 ```
 
-Do **after** tasks 1–2 so new plots land in the right place.
+Monolithic `utils/plotting.py` removed. Call sites unchanged: `from utils.plotting import …`
 
 ---
 
