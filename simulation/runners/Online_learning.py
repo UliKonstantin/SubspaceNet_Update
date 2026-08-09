@@ -841,9 +841,13 @@ class OnlineLearning:
 
                                 drift_detection_dicts.append({
                                     "eta": self.system_model.params.eta,
+                                    "scenario_eta": getattr(
+                                        self.config.online_learning, "max_eta", self.system_model.params.eta
+                                    ),
                                     "window_idx": window_idx,
                                     "baseline_mean": baseline_mean,
                                     "adaptation_log_glr": adapt_log_glr,
+                                    "main_log_glr": adapt_log_glr,
                                     "baseline_std": baseline_std,
                                     "current_glrt_z_score": current_glrt_z_score,
                                     "learning_rate_at_detection": self.learning_rate_at_detection,

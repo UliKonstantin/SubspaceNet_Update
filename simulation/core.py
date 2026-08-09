@@ -1125,8 +1125,13 @@ class Simulation:
                     }
                     
                     if (self.config.simulation.load_model and not self.config.simulation.train_model and 
-                        result.get("status") == "success" and "drift_detection_dicts" in result):
-                        all_drift_detection_dicts.extend(result["drift_detection_dicts"])
+                        result.get("status") == "success"):
+                        if "drift_detection_dicts" in result:
+                            all_drift_detection_dicts.extend(result["drift_detection_dicts"])
+                        elif "drift_detection_dicts" in result.get("online_learning_results", {}):
+                            all_drift_detection_dicts.extend(
+                                result["online_learning_results"]["drift_detection_dicts"]
+                            )
                 
                 # Run adaptive LR if enabled
                 if use_adaptive_learning_rate:
@@ -1172,8 +1177,13 @@ class Simulation:
                     
                     # Collect drift detection dicts if available
                     if (self.config.simulation.load_model and not self.config.simulation.train_model and 
-                        result.get("status") == "success" and "drift_detection_dicts" in result):
-                        all_drift_detection_dicts.extend(result["drift_detection_dicts"])
+                        result.get("status") == "success"):
+                        if "drift_detection_dicts" in result:
+                            all_drift_detection_dicts.extend(result["drift_detection_dicts"])
+                        elif "drift_detection_dicts" in result.get("online_learning_results", {}):
+                            all_drift_detection_dicts.extend(
+                                result["online_learning_results"]["drift_detection_dicts"]
+                            )
                 
                 # Store all LR results for this eta with informative key
                 logger.info(f"Storing LR sweep results for eta={value}: {len(eta_lr_results)} entries")
@@ -1185,10 +1195,18 @@ class Simulation:
                 # Collect drift detection dicts from LR sweep results
                 for lr_key, lr_data in eta_lr_results.items():
                     result = lr_data.get("result")
-                    if (result and 
-                        self.config.simulation.load_model and not self.config.simulation.train_model and 
-                        result.get("status") == "success" and "drift_detection_dicts" in result):
-                        all_drift_detection_dicts.extend(result["drift_detection_dicts"])
+                    if (
+                        result
+                        and self.config.simulation.load_model
+                        and not self.config.simulation.train_model
+                        and result.get("status") == "success"
+                    ):
+                        if "drift_detection_dicts" in result:
+                            all_drift_detection_dicts.extend(result["drift_detection_dicts"])
+                        elif "drift_detection_dicts" in result.get("online_learning_results", {}):
+                            all_drift_detection_dicts.extend(
+                                result["online_learning_results"]["drift_detection_dicts"]
+                            )
             else:
                 # Standard scenario execution (no LR sweep)
                 if scenario_type.lower() == "eta":
@@ -1210,9 +1228,17 @@ class Simulation:
                     
                 scenario_results[value] = result
                 
-                if (self.config.simulation.load_model and not self.config.simulation.train_model and 
-                    result.get("status") == "success" and "drift_detection_dicts" in result):
-                    all_drift_detection_dicts.extend(result["drift_detection_dicts"])
+                if (
+                    self.config.simulation.load_model
+                    and not self.config.simulation.train_model
+                    and result.get("status") == "success"
+                ):
+                    if "drift_detection_dicts" in result:
+                        all_drift_detection_dicts.extend(result["drift_detection_dicts"])
+                    elif "drift_detection_dicts" in result.get("online_learning_results", {}):
+                        all_drift_detection_dicts.extend(
+                            result["online_learning_results"]["drift_detection_dicts"]
+                        )
         
         self.results[scenario_type] = scenario_results
         
@@ -1360,29 +1386,38 @@ class Simulation:
             training_start_window = online_learning_results.get("training_start_window")
 
             averaged_results = result.get("averaged_results", {})
-            averaged_online = averaged_results.get("averaged_online_trajectory", {}) if averaged_results else {}
-
-            if averaged_online.get("reference_metric_losses"):
-                window_indices = averaged_online.get("window_indices", [])
-                reference_metric_losses = averaged_online.get("reference_metric_losses", [])
+            for traj_key in (
+                "averaged_online_trajectory",
+                "averaged_pretrained_trajectory",
+                "averaged_supervised_trajectory",
+            ):
+                averaged_traj = averaged_results.get(traj_key, {}) if averaged_results else {}
+                ref_losses = averaged_traj.get("reference_metric_losses")
+                if not ref_losses:
+                    continue
+                window_indices = averaged_traj.get("window_indices", [])
                 avg_loss = mean_reference_loss_after_training(
                     window_indices,
-                    reference_metric_losses,
+                    ref_losses,
                     training_end_window,
                     training_start_window,
                 )
                 if avg_loss is not None:
                     logger.info(
-                        f"[EXTRACT DEBUG] avg_loss={avg_loss} from averaged_online "
-                        f"(n_losses={len(reference_metric_losses)}, training_end={training_end_window})"
+                        f"[EXTRACT DEBUG] avg_loss={avg_loss} from {traj_key} "
+                        f"(n_losses={len(ref_losses)}, training_end={training_end_window})"
                     )
                     return avg_loss
 
             # Fallback: first individual online trajectory
-            online_trajectory_results = online_learning_results.get("online_trajectory_results") or []
-            if not online_trajectory_results:
-                online_trajectory_results = online_learning_results.get("online_model_trajectory_results") or []
-            if isinstance(online_trajectory_results, list) and online_trajectory_results:
+            online_trajectory_results = (
+                online_learning_results.get("online_trajectory_results")
+                or online_learning_results.get("online_model_trajectory_results")
+                or []
+            )
+            if not isinstance(online_trajectory_results, list):
+                online_trajectory_results = [online_trajectory_results]
+            if online_trajectory_results:
                 first_traj = online_trajectory_results[0]
                 if hasattr(first_traj, "window_results") and first_traj.window_results:
                     window_indices = getattr(first_traj, "window_indices", [])
@@ -1398,7 +1433,7 @@ class Simulation:
                         training_start_window,
                     )
                     if avg_loss is not None:
-                        logger.info(f"[EXTRACT DEBUG] avg_loss={avg_loss} from individual trajectory fallback")
+                        logger.info("[EXTRACT DEBUG] avg_loss=%s from individual trajectory fallback", avg_loss)
                         return avg_loss
 
             logger.warning("[EXTRACT DEBUG] Could not extract post-learning avg loss")

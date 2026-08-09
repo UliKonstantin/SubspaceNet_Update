@@ -156,6 +156,20 @@ def fit_observable_to_lr_sigmoid(
     )
 
 
+def _drift_log_glr(entry: Dict[str, Any]) -> float:
+    if "main_log_glr" in entry:
+        return float(entry["main_log_glr"])
+    if "adaptation_log_glr" in entry:
+        return float(entry["adaptation_log_glr"])
+    raise KeyError("Drift dict missing main_log_glr/adaptation_log_glr")
+
+
+def _drift_scenario_eta(entry: Dict[str, Any]) -> float:
+    if "scenario_eta" in entry:
+        return float(entry["scenario_eta"])
+    return float(entry["eta"])
+
+
 def build_glrt_lr_mapping(
     heatmap_data: Dict[str, Any],
     drift_dicts: List[Dict[str, Any]],
@@ -168,16 +182,16 @@ def build_glrt_lr_mapping(
 
     eta_glrt: Dict[float, List[Dict[str, Any]]] = defaultdict(list)
     for entry in drift_dicts:
-        eta_glrt[float(entry["eta"])].append(entry)
+        eta_glrt[_drift_scenario_eta(entry)].append(entry)
 
     mapping: List[Dict[str, Any]] = []
     for eta in sorted(eta_best):
         if eta < eta_control_threshold or eta not in eta_glrt:
             continue
         group = eta_glrt[eta]
-        avg_log_glr = float(np.mean([d["main_log_glr"] for d in group]))
+        avg_log_glr = float(np.mean([_drift_log_glr(d) for d in group]))
         avg_glr_diff = float(
-            np.mean([d["main_log_glr"] - d["baseline_mean"] for d in group])
+            np.mean([_drift_log_glr(d) - d["baseline_mean"] for d in group])
         )
         mapping.append(
             {

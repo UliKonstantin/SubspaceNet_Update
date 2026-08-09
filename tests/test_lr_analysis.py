@@ -35,9 +35,9 @@ def _synthetic_heatmap() -> dict:
 
 def _synthetic_drift() -> list:
     return [
-        {"eta": 0.5, "main_log_glr": 70.0, "baseline_mean": 65.0},
-        {"eta": 1.0, "main_log_glr": 80.0, "baseline_mean": 65.0},
-        {"eta": 1.5, "main_log_glr": 85.0, "baseline_mean": 65.0},
+        {"eta": 0.0, "scenario_eta": 0.5, "adaptation_log_glr": 70.0, "main_log_glr": 70.0, "baseline_mean": 65.0},
+        {"eta": 0.0, "scenario_eta": 1.0, "adaptation_log_glr": 80.0, "main_log_glr": 80.0, "baseline_mean": 65.0},
+        {"eta": 0.0, "scenario_eta": 1.5, "adaptation_log_glr": 85.0, "main_log_glr": 85.0, "baseline_mean": 65.0},
     ]
 
 
