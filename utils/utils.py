@@ -3,6 +3,9 @@ import datetime
 import torch
 import logging
 from pathlib import Path
+from typing import Optional
+
+from utils.drift_gates import GLRT_MIN_SEGMENT_SIZE
 
 
 def log_window_summary(
@@ -13,568 +16,364 @@ def log_window_summary(
     trajectory_idx: int = 0,
     window_idx: int = 0
 ) -> None:
-    """
-    Log window summary results in a columnar format similar to evaluation results.
-    
-    Args:
-        loss_metrics: LossMetrics object containing all loss information
-        avg_window_cov: Average covariance for the window
-        current_eta: Current eta value
-        is_near_field: Whether this is near field scenario
-        trajectory_idx: Index of the current trajectory
-        window_idx: Index of the current window within the trajectory
-    """
+    """Log window summary results in a columnar format."""
     print(f"\n{'Online Mode; Vs Pretrained Model SUMMARY - WINDOW ' + str(window_idx) + ' TRAJECTORY ' + str(trajectory_idx):^100}")
     print("-"*100)
     print(f"{'Metric':<25} {'Loss Value':<20} {'Loss (degrees)':<25} {'Config':<15} {'Additional Info':<15}")
     print("-"*100)
-    
+
     if not is_near_field:
-        # Convert losses to degrees
-        pre_ekf_loss_degrees = loss_metrics.pre_ekf_loss * 180 / np.pi
-        main_loss_degrees = loss_metrics.main_loss * 180 / np.pi
-        ekf_gain_rmspe_degrees = loss_metrics.ekf_gain_rmspe * 180 / np.pi
-        ekf_gain_rmape_degrees = loss_metrics.ekf_gain_rmape * 180 / np.pi
-        
-        # Display all loss metrics
-        print(f"{'Supervised Loss':<25} {loss_metrics.main_loss:<20.6f} {main_loss_degrees:<25.6f} {loss_metrics.main_loss_config:<15} {f'w: {window_idx}':<15}")
-        print(f"{'Unsupervised loss':<25} {loss_metrics.online_training_reference_loss:<20.6f} {loss_metrics.online_training_reference_loss * 180 / np.pi:<25.6f} {loss_metrics.online_training_reference_loss_config:<15} {f't: {trajectory_idx}':<15}")
-        print(f"{'EKF Gain (RMSPE)':<25} {loss_metrics.ekf_gain_rmspe:<20.6f} {ekf_gain_rmspe_degrees:<25.6f} {'N/A':<15} {f'Cov: {avg_window_cov:.2e}':<15}")
-        print(f"{'EKF Gain (RMAPE)':<25} {loss_metrics.ekf_gain_rmape:<20.6f} {ekf_gain_rmape_degrees:<25.6f} {'N/A':<15} {'':<15}")
-        
-        # Display EKF improvement analysis
-        if ekf_gain_rmspe_degrees < 0:
-            improvement_text = f"EKF improves by {abs(ekf_gain_rmspe_degrees):.4f}°"
-            status_icon = "✓"
-        else:
-            improvement_text = f"EKF degrades by {ekf_gain_rmspe_degrees:.4f}°"
-            status_icon = "✗"
-        
-        print(f"{'EKF Performance':<25} {improvement_text:<45} {status_icon:<15} {'':<15}")
+        ref_deg = loss_metrics.reference_metric_loss * 180 / np.pi
+        adapt_deg = loss_metrics.adaptation_loss * 180 / np.pi
+        rmape_deg = loss_metrics.ekf_gain_rmape * 180 / np.pi
+
+        print(f"{'Reference metric':<25} {loss_metrics.reference_metric_loss:<20.6f} {ref_deg:<25.6f} {loss_metrics.reference_metric_config:<15} {f'w: {window_idx}':<15}")
+        print(f"{'Adaptation loss':<25} {loss_metrics.adaptation_loss:<20.6f} {adapt_deg:<25.6f} {loss_metrics.adaptation_loss_config:<15} {f't: {trajectory_idx}':<15}")
+        print(f"{'EKF gain (RMAPE)':<25} {loss_metrics.ekf_gain_rmape:<20.6f} {rmape_deg:<25.6f} {'N/A':<15} {f'Cov: {avg_window_cov:.2e}':<15}")
         print("-" * 100)
     else:
-        # Near field - display available metrics
-        main_loss_degrees = loss_metrics.main_loss * 180 / np.pi
-        print(f"{'Supervised Loss':<25} {loss_metrics.main_loss:<20.6f} {main_loss_degrees:<25.6f} {loss_metrics.main_loss_config:<15} {f'eta: {current_eta:.4f}':<15}")
-        print(f"{'Unsupervised Loss':<25} {loss_metrics.online_training_reference_loss:<20.6f} {loss_metrics.online_training_reference_loss * 180 / np.pi:<25.6f} {loss_metrics.online_training_reference_loss_config:<15} {f'w: {window_idx}':<15}")
+        ref_deg = loss_metrics.reference_metric_loss * 180 / np.pi
+        print(f"{'Reference metric':<25} {loss_metrics.reference_metric_loss:<20.6f} {ref_deg:<25.6f} {loss_metrics.reference_metric_config:<15} {f'eta: {current_eta:.4f}':<15}")
+        print(f"{'Adaptation loss':<25} {loss_metrics.adaptation_loss:<20.6f} {loss_metrics.adaptation_loss * 180 / np.pi:<25.6f} {loss_metrics.adaptation_loss_config:<15} {f'w: {window_idx}':<15}")
         print(f"{'Mode':<25} {'NEAR FIELD':<20} {'(No SubspaceNet comparison)':<25} {'N/A':<15} {f't: {trajectory_idx}':<15}")
         print("-" * 100)
 
 
 def save_model_state(model, output_dir, model_type=None):
-    """
-    Save model state dictionary to file.
-    
-    Args:
-        model: Model to save
-        output_dir: Output directory for saving model
-        model_type: Type identifier for filename
-        
-    Returns:
-        Path to saved model file
-    """
+    """Save model state dictionary to file."""
     logger = logging.getLogger(__name__)
-    
+
     if model_type is None:
         model_type = "model"
-    
-    # Create timestamp for unique filename
+
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Create model save directory
-    model_save_dir = Path(output_dir) / "checkpoints"
-    model_save_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Create filename
-    model_save_path = model_save_dir / f"saved_{model_type}_{timestamp}.pt"
-    
-    # Save only the state_dict, not the entire model
-    try:
-        torch.save(model.state_dict(), model_save_path)
-        logger.info(f"Model saved successfully to {model_save_path}")
-        return model_save_path
-    except Exception as e:
-        logger.error(f"Failed to save model: {e}")
-        return None
+    model_filename = f"{model_type}_{timestamp}.pt"
+    model_path = Path(output_dir) / model_filename
+
+    torch.save(model.state_dict(), model_path)
+    logger.info(f"Model saved to {model_path}")
+
+    return model_path
 
 
 def log_online_learning_window_summary(
-    subspacenet_loss: float,
-    ekf_loss: float,
-    online_ekf_loss: float,
-    current_eta: float,
-    is_near_field: bool,
-    trajectory_idx: int = 0,
-    window_idx: int = 0,
-    is_learning: bool = False
-) -> None:
-    """
-    Log online learning window summary results comparing SubspaceNet, EKF, and online learning EKF losses.
-    
-    Args:
-        subspacenet_loss: SubspaceNet loss for the window
-        ekf_loss: EKF loss for the window (trained model)
-        online_ekf_loss: Online learning EKF loss for the window
-        current_eta: Current eta value
-        is_near_field: Whether this is near field scenario
-        trajectory_idx: Index of the current trajectory
-        window_idx: Index of the current window within the trajectory
-        is_learning: Whether this is during learning phase (True) or post-learning evaluation (False)
-    """
-    print(f"\n{'ONLINE LEARNING WINDOW SUMMARY - WINDOW ' + str(window_idx) + ' TRAJECTORY ' + str(trajectory_idx):^100}")
-    print("-"*100)
-    print(f"{'Metric':<20} {'Loss Value':<20} {'Loss (degrees)':<25} {'Additional Info':<30}")
-    print("-"*100)
-    
-    if not is_near_field:
-        # Convert losses to degrees
-        subspacenet_loss_degrees = subspacenet_loss * 180 / np.pi
-        ekf_loss_degrees = ekf_loss * 180 / np.pi
-        online_ekf_loss_degrees = online_ekf_loss * 180 / np.pi
-        
-        # Determine best method
-        losses = [subspacenet_loss_degrees, ekf_loss_degrees, online_ekf_loss_degrees]
-        methods = ["SubspaceNet", "Pre-trained Model", "Online Model"]
-        best_idx = losses.index(min(losses))
-        best_method = methods[best_idx]
-        best_loss_degrees = min(losses)
-        
-        # Calculate improvements
-        online_vs_subspacenet = online_ekf_loss_degrees - subspacenet_loss_degrees
-        online_vs_ekf = online_ekf_loss_degrees - ekf_loss_degrees
-        
-        # Display individual losses
-        #print(f"{'SubspaceNet Loss':<20} {subspacenet_loss:<20.6f} {subspacenet_loss_degrees:<25.6f} {f'eta: {current_eta:.4f}, w: {window_idx}, t: {trajectory_idx}':<30}")
-        print(f"{'pre-trained Model Supervised Loss ':<20} {ekf_loss:<20.6f} {ekf_loss_degrees:<25.6f} {f'w: {window_idx}, t: {trajectory_idx}':<30}")
-        
-        # Display online learning status
-        if is_learning:
-            status_text = "LEARNING PHASE"
-            print(f"{'Online Model Supervised Loss':<20} {online_ekf_loss:<20.6f} {online_ekf_loss_degrees:<25.6f} {f'{status_text}, w: {window_idx}, t: {trajectory_idx}':<30}")
-        else:
-            status_text = "POST-LEARNING"
-            print(f"{'Online Model Supervised Loss':<20} {online_ekf_loss:<20.6f} {online_ekf_loss_degrees:<25.6f} {f'{status_text}, w: {window_idx}, t: {trajectory_idx}':<30}")
-        
-        # Display comparison results
-        print(f"{'WINNER':<20} {best_method:<20} {best_loss_degrees:<25.6f} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
-        
-        # Show online vs others comparison
-        if online_vs_subspacenet < 0:
-            online_vs_subspacenet_text = f"Online Model better than SubspaceNet by {abs(online_vs_subspacenet):.4f}°"
-        else:
-            online_vs_subspacenet_text = f"Online Model worse than SubspaceNet by {online_vs_subspacenet:.4f}°"
-            
-        if online_vs_ekf < 0:
-            online_vs_ekf_text = f"Online better than Pretrained by {abs(online_vs_ekf):.4f}°"
-        else:
-            online_vs_ekf_text = f"Online worse than Pretrained by {online_vs_ekf:.4f}°"
-        
-        print(f"{'Online Model vs SubspaceNet':<20} {online_vs_subspacenet_text:<45} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
-        print(f"{'Online Model vs Pretrained':<20} {online_vs_ekf_text:<45} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
-        print("-" * 100)
-    else:
-        # Near field - only EKF losses (no SubspaceNet comparison available)
-        ekf_loss_degrees = ekf_loss * 180 / np.pi
-        online_ekf_loss_degrees = online_ekf_loss * 180 / np.pi
-        
-        # Determine best method for near field
-        if online_ekf_loss_degrees < ekf_loss_degrees:
-            best_method = "Online Model"
-            best_loss_degrees = online_ekf_loss_degrees
-            improvement = ekf_loss_degrees - online_ekf_loss_degrees
-            status_text = f"Online better by {improvement:.4f}°"
-        else:
-            best_method = "Pretrained Model"
-            best_loss_degrees = ekf_loss_degrees
-            degradation = online_ekf_loss_degrees - ekf_loss_degrees
-            status_text = f"Online Model worse by {degradation:.4f}°"
-        
-        print(f"{'Pretrained model':<20} {ekf_loss:<20.6f} {ekf_loss_degrees:<25.6f} {f'eta: {current_eta:.4f}, w: {window_idx}, t: {trajectory_idx}':<30}")
-        
-        if is_learning:
-            status_text_full = "LEARNING PHASE"
-        else:
-            status_text_full = "POST-LEARNING"
-            
-        print(f"{'Online Model':<20} {online_ekf_loss:<20.6f} {online_ekf_loss_degrees:<25.6f} {f'{status_text_full}, w: {window_idx}, t: {trajectory_idx}':<30}")
-        print(f"{'WINNER':<20} {best_method:<20} {best_loss_degrees:<25.6f} {status_text + ', w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
-        print(f"{'Mode':<20} {'NEAR FIELD':<20} {'(No SubspaceNet comparison)':<25} {'w: ' + str(window_idx) + ', t: ' + str(trajectory_idx):<30}")
-        print("-" * 100)
+    subspacenet_loss,
+    ekf_loss,
+    online_ekf_loss,
+    current_eta,
+    is_near_field,
+    trajectory_idx=0,
+    window_idx=0,
+    is_learning=False
+):
+    """Log comparison between pretrained and online model for a window."""
+    mode = "LEARNING" if is_learning else "EVAL"
+    print(f"\n{'ONLINE LEARNING ' + mode + ' - Window ' + str(window_idx) + ' Trajectory ' + str(trajectory_idx):^80}")
+    print(f"Pretrained SubspaceNet Loss: {subspacenet_loss:.6f}")
+    print(f"Pretrained EKF (reference): {ekf_loss:.6f}")
+    print(f"Online EKF (reference):      {online_ekf_loss:.6f}")
+    print(f"Current eta: {current_eta:.4f}")
 
 
 def average_online_learning_results_across_trajectories(results_list: list) -> dict:
-    """
-    Average online learning results across multiple trajectories.
-    
-    This method takes a list of trajectory results and computes averaged metrics
-    across all trajectories for more robust analysis.
-    
-    Args:
-        results_list: List of dictionaries containing results from each trajectory.
-                     Each dictionary should have the structure returned by 
-                     _run_single_trajectory_online_learning()
-    
-    Returns:
-        Dictionary with averaged results containing:
-        - averaged_pretrained_trajectory: Averaged metrics from pretrained model
-        - averaged_online_trajectory: Averaged metrics from online model  
-        - summary_statistics: Overall statistics across trajectories
-        - trajectory_count: Number of trajectories averaged
-    """
+    """Average online learning results across multiple trajectories."""
     import numpy as np
-    from dataclasses import dataclass
-    from typing import List, Optional
-    
+
     logger = logging.getLogger(__name__)
-    
+
     if not results_list:
-        logger.warning("Empty results list provided for averaging")
         return {"status": "error", "message": "No results to average"}
-    
-    logger.info(f"Averaging results across {len(results_list)} trajectories")
-    
-    # Extract trajectory results from each result
+
     pretrained_trajectories = []
     online_trajectories = []
     supervised_trajectories = []
     metadata_list = []
-    
+
     for result in results_list:
         if result.get("status") != "success":
-            logger.warning(f"Skipping failed trajectory result: {result.get('message', 'Unknown error')}")
             continue
-            
-        ol_results = result["online_learning_results"]
-        pretrained_trajectories.append(ol_results["pretrained_model_trajectory_results"])
-        online_trajectories.append(ol_results["online_model_trajectory_results"])
-        
-        # Add supervised model results if available
+        ol_results = result.get("online_learning_results", {})
+        if "pretrained_model_trajectory_results" in ol_results:
+            pretrained_trajectories.append(ol_results["pretrained_model_trajectory_results"])
+        if "online_model_trajectory_results" in ol_results:
+            online_trajectories.append(ol_results["online_model_trajectory_results"])
         if "supervised_model_trajectory_results" in ol_results:
             supervised_trajectories.append(ol_results["supervised_model_trajectory_results"])
-        
-        # Extract metadata
-        metadata = {
-            "window_count": ol_results.get("window_count", 0),
-            "window_size": ol_results.get("window_size", 0),
-            "stride": ol_results.get("stride", 0),
-        }
-        metadata_list.append(metadata)
-    
+        metadata_list.append({
+            "training_start_window": ol_results.get("training_start_window"),
+            "training_end_window": ol_results.get("training_end_window"),
+            "eta_change_windows": ol_results.get("eta_change_windows", []),
+        })
+
     if not pretrained_trajectories:
-        logger.error("No valid trajectory results found for averaging")
-        return {"status": "error", "message": "No valid trajectory results"}
-    
-    # Average pretrained model trajectories
+        return {"status": "error", "message": "No valid trajectory results found"}
+
     averaged_pretrained = _average_trajectory_results(pretrained_trajectories, "pretrained")
-    
-    # Average online model trajectories  
-    averaged_online = _average_trajectory_results(online_trajectories, "online")
-    
-    # Average supervised model trajectories if available
-    averaged_supervised = None
-    if supervised_trajectories:
-        averaged_supervised = _average_trajectory_results(supervised_trajectories, "supervised")
-        logger.info(f"Successfully averaged supervised model results from {len(supervised_trajectories)} trajectories")
-    
-    # Calculate summary statistics
+    averaged_online = _average_trajectory_results(online_trajectories, "online") if online_trajectories else {}
+    averaged_supervised = _average_trajectory_results(supervised_trajectories, "supervised") if supervised_trajectories else None
+
     summary_stats = _calculate_trajectory_summary_statistics(metadata_list)
-    
-    # Average GLRT drift detection results
     glrt_results = _average_glrt_results(results_list)
-    
+
     logger.info(f"Successfully averaged results from {len(pretrained_trajectories)} trajectories")
-    
+
     result_dict = {
         "status": "success",
         "averaged_results": {
             "averaged_pretrained_trajectory": averaged_pretrained,
             "averaged_online_trajectory": averaged_online,
             "summary_statistics": summary_stats,
-            "trajectory_count": len(pretrained_trajectories)
-        }
+            "trajectory_count": len(pretrained_trajectories),
+        },
     }
-    
-    # Add supervised results if available
+
     if averaged_supervised is not None:
         result_dict["averaged_results"]["averaged_supervised_trajectory"] = averaged_supervised
-    
-    # Add GLRT results if available
+
     if glrt_results:
         result_dict["averaged_results"]["glrt_results"] = glrt_results
-    
+
     return result_dict
 
 
 def _average_trajectory_results(trajectory_list: list, model_type: str) -> dict:
-    """
-    Average trajectory results for a specific model type (pretrained or online).
-    
-    Args:
-        trajectory_list: List of TrajectoryResults objects
-        model_type: Type of model ("pretrained" or "online")
-        
-    Returns:
-        Dictionary with averaged trajectory metrics
-    """
+    """Average trajectory results for a specific model type."""
     import numpy as np
-    
-    logger = logging.getLogger(__name__)
-    
+
     if not trajectory_list:
         return {}
-    
-    # Get the number of windows from the first trajectory
+
     num_windows = len(trajectory_list[0].window_results)
-    
-    # Initialize averaged metrics (focus on meaningful metrics, not angle predictions)
+
     averaged_metrics = {
         "window_indices": [],
         "window_eta_values": [],
-        "main_losses": [],
-        "main_losses_db": [],
-        "training_reference_losses": [],
+        "reference_metric_losses": [],
+        "reference_metric_losses_db": [],
+        "pre_ekf_losses": [],
+        "adaptation_losses": [],
         "avg_covariances": [],
-        "ekf_gain_rmspe": [],
         "ekf_gain_rmape": [],
         "avg_innovations": [],
         "avg_kalman_gains": [],
         "avg_kalman_gain_times_innovation": [],
         "avg_y_s_inv_y": [],
     }
-    
-    # Average across all windows
+
     for window_idx in range(num_windows):
-        # Collect metrics from all trajectories for this window
-        window_main_losses = []
-        window_main_losses_db = []
-        window_training_ref_losses = []
+        window_ref_losses = []
+        window_ref_losses_db = []
+        window_pre_ekf_losses = []
+        window_adaptation_losses = []
         window_covariances = []
-        window_ekf_gains_rmspe = []
         window_ekf_gains_rmape = []
         window_eta_values = []
-        window_indices = []
+        actual_window_indices = []
         window_innovations = []
         window_kalman_gains = []
         window_kalman_gain_times_innovation = []
         window_y_s_inv_y = []
-        
-        valid_trajectories = 0
-        
+
         for traj in trajectory_list:
             if window_idx < len(traj.window_results):
                 window_result = traj.window_results[window_idx]
-                
                 if window_result.is_valid:
-                    # Loss metrics
-                    window_main_losses.append(window_result.loss_metrics.main_loss)
-                    window_main_losses_db.append(window_result.loss_metrics.main_loss_db)
-                    window_training_ref_losses.append(window_result.loss_metrics.online_training_reference_loss)
-                    
-                    # Window metrics
+                    actual_idx = (
+                        traj.window_indices[window_idx]
+                        if window_idx < len(traj.window_indices)
+                        else window_idx
+                    )
+                    window_ref_losses.append(window_result.loss_metrics.reference_metric_loss)
+                    window_ref_losses_db.append(window_result.loss_metrics.reference_metric_loss_db)
+                    window_pre_ekf_losses.append(window_result.loss_metrics.pre_ekf_loss)
+                    window_adaptation_losses.append(window_result.loss_metrics.adaptation_loss)
                     window_covariances.append(window_result.window_metrics.avg_covariance)
-                    
-                    # EKF gains
-                    window_ekf_gains_rmspe.append(window_result.loss_metrics.ekf_gain_rmspe)
                     window_ekf_gains_rmape.append(window_result.loss_metrics.ekf_gain_rmape)
-                    
-                    # Eta values and indices
-                    window_eta_values.append(traj.window_eta_values[window_idx])
-                    window_indices.append(traj.window_indices[window_idx])
-                    
-                    # EKF metrics averages (focus on performance metrics, not angle predictions)
-                    if window_result.window_metrics.avg_ekf_innovations is not None:
+                    window_eta_values.append(window_result.window_metrics.eta_value)
+                    actual_window_indices.append(actual_idx)
+
+                    if window_result.window_metrics.avg_ekf_innovations:
                         window_innovations.append(np.mean(window_result.window_metrics.avg_ekf_innovations))
-                    if window_result.window_metrics.avg_ekf_kalman_gains is not None:
+                    if window_result.window_metrics.avg_ekf_kalman_gains:
                         window_kalman_gains.append(np.mean(window_result.window_metrics.avg_ekf_kalman_gains))
-                    if window_result.window_metrics.avg_ekf_kalman_gain_times_innovation is not None:
-                        window_kalman_gain_times_innovation.append(np.mean(window_result.window_metrics.avg_ekf_kalman_gain_times_innovation))
-                    if window_result.window_metrics.avg_ekf_y_s_inv_y is not None:
+                    if window_result.window_metrics.avg_ekf_kalman_gain_times_innovation:
+                        window_kalman_gain_times_innovation.append(
+                            np.mean(window_result.window_metrics.avg_ekf_kalman_gain_times_innovation)
+                        )
+                    if window_result.window_metrics.avg_ekf_y_s_inv_y:
                         window_y_s_inv_y.append(np.mean(window_result.window_metrics.avg_ekf_y_s_inv_y))
-                    
-                    valid_trajectories += 1
-        
-        # Calculate averages for this window
-        if valid_trajectories > 0:
-            averaged_metrics["window_indices"].append(int(np.mean(window_indices)) if window_indices else window_idx)
+
+        if actual_window_indices:
+            averaged_metrics["window_indices"].append(int(np.mean(actual_window_indices)))
             averaged_metrics["window_eta_values"].append(np.mean(window_eta_values) if window_eta_values else 0.0)
-            averaged_metrics["main_losses"].append(np.mean(window_main_losses) if window_main_losses else 0.0)
-            averaged_metrics["main_losses_db"].append(np.mean(window_main_losses_db) if window_main_losses_db else 0.0)
-            averaged_metrics["training_reference_losses"].append(np.mean(window_training_ref_losses) if window_training_ref_losses else 0.0)
+            averaged_metrics["reference_metric_losses"].append(np.mean(window_ref_losses) if window_ref_losses else 0.0)
+            averaged_metrics["reference_metric_losses_db"].append(np.mean(window_ref_losses_db) if window_ref_losses_db else 0.0)
+            averaged_metrics["pre_ekf_losses"].append(np.mean(window_pre_ekf_losses) if window_pre_ekf_losses else 0.0)
+            averaged_metrics["adaptation_losses"].append(np.mean(window_adaptation_losses) if window_adaptation_losses else 0.0)
             averaged_metrics["avg_covariances"].append(np.mean(window_covariances) if window_covariances else 0.0)
-            averaged_metrics["ekf_gain_rmspe"].append(np.mean(window_ekf_gains_rmspe) if window_ekf_gains_rmspe else 0.0)
             averaged_metrics["ekf_gain_rmape"].append(np.mean(window_ekf_gains_rmape) if window_ekf_gains_rmape else 0.0)
-            
-            # Average step-level performance metrics
             averaged_metrics["avg_innovations"].append(np.mean(window_innovations) if window_innovations else 0.0)
             averaged_metrics["avg_kalman_gains"].append(np.mean(window_kalman_gains) if window_kalman_gains else 0.0)
-            averaged_metrics["avg_kalman_gain_times_innovation"].append(np.mean(window_kalman_gain_times_innovation) if window_kalman_gain_times_innovation else 0.0)
+            averaged_metrics["avg_kalman_gain_times_innovation"].append(
+                np.mean(window_kalman_gain_times_innovation) if window_kalman_gain_times_innovation else 0.0
+            )
             averaged_metrics["avg_y_s_inv_y"].append(np.mean(window_y_s_inv_y) if window_y_s_inv_y else 0.0)
-        else:
-            logger.warning(f"No valid trajectories found for {model_type} model at window {window_idx}")
-    
-    logger.info(f"Averaged {model_type} model results across {len(trajectory_list)} trajectories, {num_windows} windows")
-    
+
     return averaged_metrics
 
 
-def _calculate_trajectory_summary_statistics(metadata_list: list) -> dict:
-    """
-    Calculate summary statistics across all trajectories.
-    
-    Args:
-        metadata_list: List of metadata dictionaries from each trajectory
-        
-    Returns:
-        Dictionary with summary statistics
-    """
+def mean_reference_loss_after_training(
+    window_indices: list,
+    reference_metric_losses: list,
+    training_end_window=None,
+    training_start_window=None,
+    *,
+    fallback_last_n: int = 10,
+) -> Optional[float]:
+    """Average reference-metric loss on post-training evaluation windows."""
     import numpy as np
-    
+
+    if not reference_metric_losses:
+        return None
+
+    post_learning_losses = []
+    if window_indices and len(window_indices) == len(reference_metric_losses):
+        if training_end_window is not None:
+            post_learning_losses = [
+                loss for w, loss in zip(window_indices, reference_metric_losses) if w > training_end_window
+            ]
+        elif training_start_window is not None:
+            post_learning_losses = [
+                loss for w, loss in zip(window_indices, reference_metric_losses) if w > training_start_window
+            ]
+    elif training_end_window is not None:
+        # Legacy fallback: only safe when indices are 0..N-1 aligned with absolute windows
+        if training_end_window + 1 < len(reference_metric_losses):
+            post_learning_losses = reference_metric_losses[training_end_window + 1 :]
+    elif training_start_window is not None and training_start_window + 1 < len(reference_metric_losses):
+        post_learning_losses = reference_metric_losses[training_start_window + 1 :]
+
+    if not post_learning_losses and fallback_last_n:
+        n = min(fallback_last_n, len(reference_metric_losses))
+        post_learning_losses = reference_metric_losses[-n:]
+
+    if not post_learning_losses:
+        return None
+
+    return float(np.mean(post_learning_losses))
+
+
+def _calculate_trajectory_summary_statistics(metadata_list: list) -> dict:
+    """Calculate summary statistics across trajectory metadata."""
+    import numpy as np
+
     if not metadata_list:
         return {}
-    
-    # Extract statistics
-    window_counts = [meta["window_count"] for meta in metadata_list]
-    
-    summary = {
-        "total_trajectories": len(metadata_list),
+
+    training_starts = [m["training_start_window"] for m in metadata_list if m.get("training_start_window") is not None]
+    training_ends = [m["training_end_window"] for m in metadata_list if m.get("training_end_window") is not None]
+    window_counts = [len(m.get("eta_change_windows", [])) for m in metadata_list]
+
+    return {
+        "avg_training_start_window": float(np.mean(training_starts)) if training_starts else None,
+        "std_training_start_window": float(np.std(training_starts)) if training_starts else None,
+        "avg_training_end_window": float(np.mean(training_ends)) if training_ends else None,
+        "std_training_end_window": float(np.std(training_ends)) if training_ends else None,
         "avg_window_count": np.mean(window_counts),
     }
-    
-    return summary
 
 
 def _average_glrt_results(results_list: list) -> dict:
-    """
-    Average GLRT drift detection results across all trajectories.
-    
-    Args:
-        results_list: List of dictionaries containing results from each trajectory
-        
-    Returns:
-        Dictionary with averaged GLRT results containing:
-        - ref_loss: Reference loss GLRT statistics and averaged loss sequence
-        - main_loss: Main loss GLRT statistics and averaged loss sequence
-    """
+    """Average GLRT drift detection results across trajectories."""
     import numpy as np
-    
-    logger = logging.getLogger(__name__)
-    
+
     if not results_list:
         return {}
-    
-    min_segment_size = 5
-    ref_loss_sequences = []
-    main_loss_sequences = []
-    ref_changepoint_windows = []
-    main_changepoint_windows = []
-    ref_likelihoods = []
-    main_likelihoods = []
-    # Collect z-scores and learning rates at detection
-    ref_z_scores = []
-    main_z_scores = []
-    ref_learning_rates = []
-    main_learning_rates = []
-    # Collect actual per-window LRs used during training (for heatmap)
-    main_actual_lrs = []
-    
-    # Collect GLRT results from all trajectories
+
+    min_segment_size = GLRT_MIN_SEGMENT_SIZE
+    adaptation_sequences = []
+    reference_metric_sequences = []
+    adaptation_changepoint_windows = []
+    reference_metric_changepoint_windows = []
+    adaptation_likelihoods = []
+    reference_metric_likelihoods = []
+    z_scores = []
+    learning_rates = []
+    actual_lrs = []
+    window_index_offset = None
+
     for result in results_list:
         if result.get("status") != "success":
             continue
-            
         online_results = result.get("online_learning_results", {})
-        
-        # Collect reference loss GLRT data
-        if online_results.get("glrt_ref_losses") is not None:
-            ref_loss_sequences.append(online_results["glrt_ref_losses"])
-            if online_results.get("glrt_ref_loss_changepoint_window") is not None:
-                ref_changepoint_windows.append(online_results["glrt_ref_loss_changepoint_window"])
-            if online_results.get("glrt_ref_loss_likelihood") is not None:
-                ref_likelihoods.append(online_results["glrt_ref_loss_likelihood"])
-        
-        # Collect main loss GLRT data
-        if online_results.get("glrt_main_losses") is not None:
-            main_loss_sequences.append(online_results["glrt_main_losses"])
-            if online_results.get("glrt_main_loss_changepoint_window") is not None:
-                main_changepoint_windows.append(online_results["glrt_main_loss_changepoint_window"])
-            if online_results.get("glrt_main_loss_likelihood") is not None:
-                main_likelihoods.append(online_results["glrt_main_loss_likelihood"])
-        
-        # Collect z-scores and learning rates at detection time (from main loss GLRT)
+        if window_index_offset is None:
+            window_index_offset = online_results.get("glrt_loss_window_offset", 0)
+
+        if online_results.get("glrt_adaptation_losses") is not None:
+            adaptation_sequences.append(online_results["glrt_adaptation_losses"])
+            if online_results.get("glrt_adaptation_loss_changepoint_window") is not None:
+                adaptation_changepoint_windows.append(online_results["glrt_adaptation_loss_changepoint_window"])
+            if online_results.get("glrt_adaptation_loss_likelihood") is not None:
+                adaptation_likelihoods.append(online_results["glrt_adaptation_loss_likelihood"])
+
+        if online_results.get("glrt_reference_metric_losses") is not None:
+            reference_metric_sequences.append(online_results["glrt_reference_metric_losses"])
+            if online_results.get("glrt_reference_metric_changepoint_window") is not None:
+                reference_metric_changepoint_windows.append(online_results["glrt_reference_metric_changepoint_window"])
+            if online_results.get("glrt_reference_metric_likelihood") is not None:
+                reference_metric_likelihoods.append(online_results["glrt_reference_metric_likelihood"])
+
         if online_results.get("glrt_z_score_at_detection") is not None:
-            main_z_scores.append(online_results["glrt_z_score_at_detection"])
+            z_scores.append(online_results["glrt_z_score_at_detection"])
         if online_results.get("learning_rate_at_detection") is not None:
-            main_learning_rates.append(online_results["learning_rate_at_detection"])
-        # Collect actual LRs used during training (for heatmap - matches optimizer)
+            learning_rates.append(online_results["learning_rate_at_detection"])
         if online_results.get("actual_lr_per_training_window"):
-            main_actual_lrs.extend(online_results["actual_lr_per_training_window"])
-    
+            actual_lrs.extend(online_results["actual_lr_per_training_window"])
+
     glrt_results = {}
-    
-    # Process reference loss GLRT results
-    if len(ref_loss_sequences) > 0:
-        # Average losses window-by-window across all trajectories
-        min_length = min(len(losses) for losses in ref_loss_sequences)
-        avg_ref_losses = [np.mean([losses[i] for losses in ref_loss_sequences]) 
-                         for i in range(min_length)]
-        
-        # Calculate statistics
-        avg_ref_changepoint = float(np.mean(ref_changepoint_windows)) if ref_changepoint_windows else None
-        std_ref_changepoint = float(np.std(ref_changepoint_windows)) if ref_changepoint_windows else None
-        avg_ref_likelihood = float(np.mean(ref_likelihoods)) if ref_likelihoods else None
-        std_ref_likelihood = float(np.std(ref_likelihoods)) if ref_likelihoods else None
-        
-        glrt_results["ref_loss"] = {
-            "avg_losses": avg_ref_losses,
-            "avg_changepoint_window": avg_ref_changepoint,
-            "std_changepoint_window": std_ref_changepoint,
-            "avg_likelihood": avg_ref_likelihood,
-            "std_likelihood": std_ref_likelihood,
-            "trajectory_count": len(ref_loss_sequences),
+
+    if adaptation_sequences:
+        min_length = min(len(losses) for losses in adaptation_sequences)
+        avg_adaptation_losses = [
+            np.mean([losses[i] for losses in adaptation_sequences]) for i in range(min_length)
+        ]
+        glrt_results["adaptation_loss"] = {
+            "avg_losses": avg_adaptation_losses,
+            "window_index_offset": window_index_offset if window_index_offset is not None else 0,
+            "avg_changepoint_window": float(np.mean(adaptation_changepoint_windows)) if adaptation_changepoint_windows else None,
+            "std_changepoint_window": float(np.std(adaptation_changepoint_windows)) if adaptation_changepoint_windows else None,
+            "avg_likelihood": float(np.mean(adaptation_likelihoods)) if adaptation_likelihoods else None,
+            "std_likelihood": float(np.std(adaptation_likelihoods)) if adaptation_likelihoods else None,
+            "avg_z_score": float(np.mean(z_scores)) if z_scores else None,
+            "std_z_score": float(np.std(z_scores)) if z_scores else None,
+            "avg_learning_rate": float(np.mean(learning_rates)) if learning_rates else None,
+            "std_learning_rate": float(np.std(learning_rates)) if learning_rates else None,
+            "avg_actual_learning_rate": float(np.mean(actual_lrs)) if actual_lrs else None,
+            "std_actual_learning_rate": float(np.std(actual_lrs)) if actual_lrs else None,
+            "trajectory_count": len(adaptation_sequences),
             "min_segment_size": min_segment_size,
-            "individual_changepoint_windows": ref_changepoint_windows,
-            "individual_likelihoods": ref_likelihoods
+            "individual_changepoint_windows": adaptation_changepoint_windows,
+            "individual_likelihoods": adaptation_likelihoods,
+            "individual_z_scores": z_scores,
+            "individual_learning_rates": learning_rates,
         }
-    
-    # Process main loss GLRT results
-    if len(main_loss_sequences) > 0:
-        # Average losses window-by-window across all trajectories
-        min_length = min(len(losses) for losses in main_loss_sequences)
-        avg_main_losses = [np.mean([losses[i] for losses in main_loss_sequences]) 
-                          for i in range(min_length)]
-        
-        # Calculate statistics
-        avg_main_changepoint = float(np.mean(main_changepoint_windows)) if main_changepoint_windows else None
-        std_main_changepoint = float(np.std(main_changepoint_windows)) if main_changepoint_windows else None
-        avg_main_likelihood = float(np.mean(main_likelihoods)) if main_likelihoods else None
-        std_main_likelihood = float(np.std(main_likelihoods)) if main_likelihoods else None
-        
-        # Calculate z-score and learning rate statistics
-        avg_z_score = float(np.mean(main_z_scores)) if main_z_scores else None
-        std_z_score = float(np.std(main_z_scores)) if main_z_scores else None
-        avg_learning_rate = float(np.mean(main_learning_rates)) if main_learning_rates else None
-        std_learning_rate = float(np.std(main_learning_rates)) if main_learning_rates else None
-        avg_actual_learning_rate = float(np.mean(main_actual_lrs)) if main_actual_lrs else None
-        std_actual_learning_rate = float(np.std(main_actual_lrs)) if main_actual_lrs else None
-        
-        glrt_results["main_loss"] = {
-            "avg_losses": avg_main_losses,
-            "avg_changepoint_window": avg_main_changepoint,
-            "std_changepoint_window": std_main_changepoint,
-            "avg_likelihood": avg_main_likelihood,
-            "std_likelihood": std_main_likelihood,
-            "avg_z_score": avg_z_score,
-            "std_z_score": std_z_score,
-            "avg_learning_rate": avg_learning_rate,
-            "std_learning_rate": std_learning_rate,
-            "avg_actual_learning_rate": avg_actual_learning_rate,
-            "std_actual_learning_rate": std_actual_learning_rate,
-            "trajectory_count": len(main_loss_sequences),
+
+    if reference_metric_sequences:
+        min_length = min(len(losses) for losses in reference_metric_sequences)
+        avg_reference_metric_losses = [
+            np.mean([losses[i] for losses in reference_metric_sequences]) for i in range(min_length)
+        ]
+        glrt_results["reference_metric"] = {
+            "avg_losses": avg_reference_metric_losses,
+            "window_index_offset": window_index_offset if window_index_offset is not None else 0,
+            "avg_changepoint_window": float(np.mean(reference_metric_changepoint_windows)) if reference_metric_changepoint_windows else None,
+            "std_changepoint_window": float(np.std(reference_metric_changepoint_windows)) if reference_metric_changepoint_windows else None,
+            "avg_likelihood": float(np.mean(reference_metric_likelihoods)) if reference_metric_likelihoods else None,
+            "std_likelihood": float(np.std(reference_metric_likelihoods)) if reference_metric_likelihoods else None,
+            "trajectory_count": len(reference_metric_sequences),
             "min_segment_size": min_segment_size,
-            "individual_changepoint_windows": main_changepoint_windows,
-            "individual_likelihoods": main_likelihoods,
-            "individual_z_scores": main_z_scores,
-            "individual_learning_rates": main_learning_rates
+            "individual_changepoint_windows": reference_metric_changepoint_windows,
+            "individual_likelihoods": reference_metric_likelihoods,
         }
-    
+
     return glrt_results

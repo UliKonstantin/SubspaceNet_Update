@@ -109,9 +109,9 @@ online_learning:
   
   # Loss configuration - Using Y*S^-1*Y loss for training
   loss_config:
-    metric: "rmspe"  # Loss metric to use for evaluation: 'rmspe' or 'rmape'
-    supervision: "supervised"  # Supervision mode for evaluation: 'supervised' (compare with ground truth) or 'unsupervised' (compare with pre-EKF predictions)
-    training_loss_type: "y_s_inv_y"  # Training loss type: 'y_s_inv_y' (use y*S^-1*y loss for training)
+    adaptation_loss: "unsupervised_rmspe"
+    reference_metric: "supervised_rmspe"
+    supervised_offline_loss: "supervised_rmspe"
   
   # Online learning start configuration
   time_to_learn: 35  # Window index at which to start online learning

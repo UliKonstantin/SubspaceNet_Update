@@ -111,9 +111,9 @@ online_learning:
   
   # Loss configuration
   loss_config:
-    metric: "rmspe"  # Loss metric to use: 'rmspe' or 'rmape'
-    supervision: "supervised"  # Supervision mode: 'supervised' (compare with ground truth) or 'unsupervised' (compare with pre-EKF predictions)
-    training_loss_type: "unsupervised_rmspe"  # Training loss type: 'configured' (use metric+supervision), 'kalman_innovation' (use K*innovation loss), or 'y_s_inv_y' (use y*S^-1*y loss)
+    adaptation_loss: "unsupervised_rmspe"
+    reference_metric: "supervised_rmspe"
+    supervised_offline_loss: "supervised_rmspe"
   
   # Example for using Kalman innovation loss:
   # loss_config:

@@ -156,10 +156,9 @@ online_learning:
   
   # Loss configuration
   loss_config:
-    metric: "rmspe"  # Loss metric to use: 'rmspe' or 'rmape'
-    supervision: "supervised"  # Supervision mode: 'supervised' (compare with ground truth) or 'unsupervised' (compare with pre-EKF predictions)
-    training_loss_type: "unsupervised_rmspe"  # Training loss type: 'configured' (use metric+supervision),unsupervised_rmspe, unsupervised_rmape, supervised_rmspe, supervised_rmape,multimoment, 'kalman_innovation' (use K*innovation loss), or 'y_s_inv_y' (use y*S^-1*y loss), 
-    supervised_loss_type: "supervised_rmspe"  # Supervised training loss type: same options as training_loss_type
+    adaptation_loss: "unsupervised_rmspe"
+    reference_metric: "supervised_rmspe"
+    supervised_offline_loss: "supervised_rmspe"
     #multimoment_alpha: 1      # Custom alpha (default: 1.0)
     #multimoment_beta: 0       # Custom beta (default: 1.0)  
     #multimoment_regularization_term: 0  # Custom regularization (default: 1.0)    

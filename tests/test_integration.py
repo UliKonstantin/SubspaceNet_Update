@@ -253,7 +253,8 @@ class TestConfigSchema:
         assert config.adaptive_lr_max == 0.0356
         assert config.adaptive_lr_k_sigmoid == 0.7336
         assert config.adaptive_lr_dG0 == 69.2599
-        assert config.glrt_history_exclusion == 5
+        assert config.drift_guard_samples == 3
+        assert config.drift_warmup_windows == 10
         assert config.num_gd_steps == 3
 
     def test_override_values(self):
@@ -265,14 +266,16 @@ class TestConfigSchema:
             adaptive_lr_max=0.1,
             adaptive_lr_k_sigmoid=1.0,
             adaptive_lr_dG0=50.0,
-            glrt_history_exclusion=10,
+            drift_guard_samples=10,
+            drift_warmup_windows=12,
             num_gd_steps=5
         )
         assert config.adaptive_lr_min == 0.001
         assert config.adaptive_lr_max == 0.1
         assert config.adaptive_lr_k_sigmoid == 1.0
         assert config.adaptive_lr_dG0 == 50.0
-        assert config.glrt_history_exclusion == 10
+        assert config.drift_guard_samples == 10
+        assert config.drift_warmup_windows == 12
         assert config.num_gd_steps == 5
 
     def test_full_config_loads(self):
@@ -283,3 +286,40 @@ class TestConfigSchema:
         assert config.online_learning.enabled is True
         assert config.online_learning.adaptive_lr_min == 0.0005
         assert config.online_learning.num_gd_steps == 1
+
+
+class TestSweepModelPath:
+    """Sweep iterations must not silently drop the checkpoint path."""
+
+    def test_resolve_model_path_uses_simulation_model_path(self):
+        from config_handler import setup_configuration
+        from simulation.core import Simulation
+
+        config_path = CONFIGS_DIR / "test_training.yaml"
+        config_obj, components, output_dir = setup_configuration(
+            str(config_path),
+            None,
+            [f"simulation.model_path={PRETRAINED_MODEL_PATH}"],
+        )
+        sim = Simulation(config_obj, components, output_dir)
+        override = sim._resolve_model_path_override(None, False, 0)
+        assert override == f"simulation.model_path={PRETRAINED_MODEL_PATH}"
+
+    def test_resolve_model_path_raises_when_missing_for_eval_sweep(self):
+        from config_handler import setup_configuration
+        from simulation.core import Simulation
+
+        config_path = CONFIGS_DIR / "test_training.yaml"
+        config_obj, components, output_dir = setup_configuration(
+            str(config_path),
+            None,
+            [
+                "simulation.train_model=false",
+                "simulation.evaluate_model=true",
+                "simulation.load_model=true",
+                "simulation.model_path=null",
+            ],
+        )
+        sim = Simulation(config_obj, components, output_dir)
+        with pytest.raises(ValueError, match="Model checkpoint required"):
+            sim._resolve_model_path_override(None, False, 0)

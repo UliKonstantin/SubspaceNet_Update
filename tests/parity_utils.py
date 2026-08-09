@@ -47,7 +47,7 @@ def extract_ol_numeric_metrics(result: Dict[str, Any]) -> Dict[str, Any]:
         "averaged_supervised_trajectory",
     ):
         sub = ar.get(traj_key, {})
-        for loss_key in ("main_losses", "training_losses", "pre_ekf_losses"):
+        for loss_key in ("reference_metric_losses", "adaptation_losses"):
             losses = sub.get(loss_key, [])
             if losses:
                 metrics[f"{traj_key}_{loss_key}"] = [float(x) for x in losses]

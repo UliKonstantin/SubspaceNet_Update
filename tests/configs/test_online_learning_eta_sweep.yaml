@@ -95,23 +95,17 @@ online_learning:
   trajectory_length: 15
   dataset_size: 1
   use_adaptive_learning_rate: true
-  glrt_detection_z_threshold: 2.5
-  glrt_baseline_window_size: 5
-  glrt_min_samples_for_statistics: 3
-  adaptive_lr_min: 0.0005
-  adaptive_lr_max: 0.0356
-  adaptive_lr_k_sigmoid: 0.7336
-  adaptive_lr_dG0: 69.2599
-  glrt_history_exclusion: 2
+  drift_warmup_windows: 10
+  drift_guard_samples: 3
+  drift_z_threshold: 2.5
   num_gd_steps: 1
   enable_lr_sweep: false
   eta_update_interval_windows: 3
   use_nominal: true
   loss_config:
-    metric: "rmspe"
-    supervision: "supervised"
-    training_loss_type: "unsupervised_rmspe"
-    supervised_loss_type: "supervised_rmspe"
+    adaptation_loss: "unsupervised_rmspe"
+    reference_metric: "supervised_rmspe"
+    supervised_offline_loss: "supervised_rmspe"
   time_to_learn: 2
 
 logging:

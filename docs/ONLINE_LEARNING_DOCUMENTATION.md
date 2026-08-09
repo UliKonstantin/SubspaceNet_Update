@@ -122,19 +122,26 @@ Delay in windows between GLRT drift detection and actual training start. If `nul
 - Training starts at window `N + time_to_learn`
 - If `time_to_learn=10` and drift detected at window 15, training starts at window 25
 
-#### `glrt_detection_z_threshold: float` (default: `2.5`)
-Z-score threshold for GLRT-based drift detection. Drift is detected when:
+#### `drift_z_threshold: float` (default: `2.5`)
+Z-score threshold for drift detection. Drift is detected when:
 ```
-current_GLRT_z_score > glrt_detection_z_threshold
+current_GLRT_z_score > drift_z_threshold
 ```
 
 **Statistical Meaning**: z-score of 2.5 corresponds to ~99.4% confidence that the value is significantly above baseline.
 
-#### `glrt_baseline_window_size: int` (default: `20`)
-Number of recent GLRT values to use for baseline estimation (mean and standard deviation calculation). A sliding window of this size maintains the baseline statistics.
+#### `drift_warmup_windows: int` (default: `7`)
+Two roles:
+1. **Scope A:** Skip the first N trajectory windows entirely (no changepoint GLRT, no g-history).
+2. **Scope B:** Require at least N g-scalars in the baseline slice before z-score is computed.
 
-#### `glrt_min_samples_for_statistics: int` (default: `10`)
-Minimum number of GLRT samples required before using statistical baseline for drift detection. Before this threshold, raw GLRT values are logged but drift detection is disabled.
+First g at window `W + 2*GLRT_MIN_SEGMENT_SIZE`; first z at `2*W + 2*m + drift_guard_samples - 1` (internal `m=5`).
+
+#### `drift_guard_samples: int` (default: `3`)
+Exclude the last N log-GLR (g) values from the baseline when computing z-score (onset buffer).
+
+#### `drift_history_max_size: int | null` (default: `null`)
+Optional cap on rolling g-history length. `null` = unbounded.
 
 ### Adaptive Learning Rate Configuration
 
@@ -456,24 +463,29 @@ GLRT (Generalized Likelihood Ratio Test) drift detection uses statistical hypoth
 
 ### Algorithm
 
-1. **Baseline Estimation**:
-   - Maintain sliding window of last `glrt_baseline_window_size` GLRT values
-   - Compute mean (`μ`) and standard deviation (`σ`) from baseline window
-   - Exclude current value from baseline calculation
+1. **Scope A (changepoint GLRT, each window k ≥ W)**:
+   - Build post-warmup loss prefix `[L_W … L_k]`
+   - Compute max log-GLR over valid segment splits (`GLRT_MIN_SEGMENT_SIZE=5` internal)
+   - Append one g-scalar to `glrt_history`
 
-2. **Z-Score Calculation**:
+2. **Baseline Estimation (Scope B)**:
+   - `baseline = glrt_history[:-drift_guard_samples]` (all g except tail guard)
+   - Require `len(baseline) >= drift_warmup_windows` before z-score
+   - Compute mean (`μ`) and standard deviation (`σ`)
+
+3. **Z-Score Calculation**:
    ```
-   z_score = (current_GLRT - μ) / σ
+   z_score = (current_g - μ) / σ
    ```
 
-3. **Drift Detection**:
+4. **Drift Detection**:
    ```
-   if z_score > glrt_detection_z_threshold:
+   if z_score > drift_z_threshold:
        drift_detected = True
        record_detection_window(current_window)
    ```
 
-4. **Training Trigger** (with delay):
+5. **Training Trigger** (with delay):
    ```
    if drift_detected and current_window >= (detection_window + time_to_learn):
        start_training()
@@ -483,17 +495,17 @@ GLRT (Generalized Likelihood Ratio Test) drift detection uses statistical hypoth
 
 - **Relative Detection**: Adapts to different loss scales automatically
 - **Statistical Significance**: Z-score provides confidence level
-- **Robust to Noise**: Baseline smooths out natural variability
-- **No Manual Tuning**: Works across different scenarios without threshold adjustment
+- **Robust to Noise**: Warmup + guard samples reduce false positives
+- **Clear Parameters**: Three user-facing drift knobs plus internal segment size
 
 ### Configuration
 
 ```yaml
 online_learning:
-  glrt_detection_z_threshold: 2.5  # ~99.4% confidence
-  glrt_baseline_window_size: 20    # Rolling window size
-  glrt_min_samples_for_statistics: 10  # Min before detection enabled
-  time_to_learn: 10  # Delay after detection
+  drift_warmup_windows: 7   # Scope A skip + min baseline g-count
+  drift_guard_samples: 3    # Tail excluded from baseline
+  drift_z_threshold: 2.5      # ~99.4% confidence
+  time_to_learn: 10           # Delay after detection
 ```
 
 ---
@@ -583,8 +595,10 @@ online_learning:
   learning_rate: 0.001
   max_iterations: 10
   
-  # GLRT drift detection
-  glrt_detection_z_threshold: 2.5
+  # Drift detection
+  drift_warmup_windows: 7
+  drift_guard_samples: 3
+  drift_z_threshold: 2.5
   time_to_learn: 10
   
   # Fixed learning rate
@@ -604,9 +618,10 @@ online_learning:
   # Enable adaptive LR
   use_adaptive_learning_rate: true
   
-  # GLRT configuration
-  glrt_detection_z_threshold: 2.5
-  glrt_baseline_window_size: 20
+  # Drift detection
+  drift_warmup_windows: 7
+  drift_guard_samples: 3
+  drift_z_threshold: 2.5
   time_to_learn: 5
 ```
 

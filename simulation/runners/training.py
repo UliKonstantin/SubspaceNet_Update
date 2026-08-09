@@ -281,10 +281,15 @@ class TrajectoryTrainer:
                     angle_loss, range_loss = loss_components
                     batch_angle_losses.append(angle_loss)
                     batch_range_losses.append(range_loss)
+
+                if isinstance(accuracy, torch.Tensor):
+                    batch_accuracies.append(accuracy.item())
+                else:
+                    batch_accuracies.append(float(accuracy))
             
             # Calculate average loss and accuracy for this batch
             avg_batch_loss = np.mean(batch_losses)
-            avg_batch_accuracy = np.mean(batch_accuracies)
+            avg_batch_accuracy = np.mean(batch_accuracies) if batch_accuracies else 0.0
             
             # Update progress bar
             progress_bar.set_postfix({
@@ -742,28 +747,61 @@ class TrajectoryTrainer:
     def _plot_training_curves(self):
         """Plot and save training curves."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Plot loss curves
-        plt.figure(figsize=(10, 6))
-        plt.plot(self.train_losses, label='Training Loss')
-        plt.plot(self.valid_losses, label='Validation Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('Training and Validation Loss')
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(self.plots_dir / f"loss_curve_{timestamp}.png")
-        
-        # Plot accuracy curves
-        plt.figure(figsize=(10, 6))
-        plt.plot(np.array(self.train_accuracies) * 100, label='Training Accuracy')
-        plt.plot(np.array(self.valid_accuracies) * 100, label='Validation Accuracy')
-        plt.xlabel('Epoch')
-        plt.ylabel('Accuracy (%)')
-        plt.title('Training and Validation Accuracy')
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(self.plots_dir / f"accuracy_curve_{timestamp}.png")
+        n_epochs = max(len(self.train_losses), len(self.valid_losses), 1)
+        epochs = np.arange(1, n_epochs + 1)
+        plot_kwargs = {"marker": "o", "linewidth": 2, "markersize": 6}
+
+        def _finite_series(values):
+            arr = np.asarray(values, dtype=float)
+            if arr.size == 0:
+                return None
+            if not np.any(np.isfinite(arr)):
+                return None
+            return arr
+
+        def _save_epoch_plot(y_series, ylabel, title, filename):
+            plt.figure(figsize=(10, 6))
+            plotted = False
+            for values, label in y_series:
+                arr = _finite_series(values)
+                if arr is None:
+                    continue
+                x = epochs[: len(arr)]
+                plt.plot(x, arr, label=label, **plot_kwargs)
+                plotted = True
+            if not plotted:
+                plt.close()
+                logger.warning("Skipping %s: no finite training metrics to plot", filename)
+                return
+            plt.xlabel("Epoch")
+            plt.ylabel(ylabel)
+            plt.title(title)
+            if n_epochs == 1:
+                plt.xlim(0.5, 1.5)
+                plt.xticks([1])
+            else:
+                plt.xlim(0.5, n_epochs + 0.5)
+                plt.xticks(epochs)
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(self.plots_dir / filename)
+            plt.close()
+
+        _save_epoch_plot(
+            [(self.train_losses, "Training Loss"), (self.valid_losses, "Validation Loss")],
+            ylabel="Loss",
+            title="Training and Validation Loss",
+            filename=f"loss_curve_{timestamp}.png",
+        )
+
+        train_acc_pct = np.asarray(self.train_accuracies, dtype=float) * 100
+        valid_acc_pct = np.asarray(self.valid_accuracies, dtype=float) * 100
+        _save_epoch_plot(
+            [(train_acc_pct, "Training Accuracy"), (valid_acc_pct, "Validation Accuracy")],
+            ylabel="Accuracy (%)",
+            title="Training and Validation Accuracy",
+            filename=f"accuracy_curve_{timestamp}.png",
+        )
         
         # Plot angle and range losses if available
         if self.train_angles_losses and self.valid_angles_losses:

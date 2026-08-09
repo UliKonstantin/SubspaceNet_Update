@@ -5,7 +5,7 @@ This module defines the schema for validating configuration files using Pydantic
 """
 
 from typing import Optional, List, Literal, Union, Dict, Any, Tuple
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from enum import Enum
 
 
@@ -127,6 +127,16 @@ class TrajectoryConfig(BaseModel):
     sine_accel_omega0: Union[float, List[float]] = 0.2    # Frequency of oscillation (rad/s) - can be single value or array per source
     sine_accel_kappa: Union[float, List[float]] = 0.1     # Amplitude of oscillation (rad) - can be single value or array per source
     sine_accel_noise_std: float = 0.01 # Noise standard deviation (rad) - controls randomness
+    sine_accel_dc_offset_range: Optional[List[float]] = Field(
+        default=None,
+        description="If set (e.g. [-15, 15]), sample one uniform DC attractor offset per source "
+        "per trajectory (degrees). Oscillation converges around this offset, not 0.",
+    )
+    sine_accel_dc_offsets: Optional[List[float]] = Field(
+        default=None,
+        description="Optional fixed DC attractor offsets per source (degrees). "
+        "When set, overrides random sampling from sine_accel_dc_offset_range.",
+    )
     
     # Parameters for multiplicative noise non-linear model
     mult_noise_omega0: float = 0.0    # Base angular velocity (rad/s)
@@ -142,16 +152,30 @@ class KalmanFilterConfig(BaseModel):
     initial_covariance: float = 1.0  # Initial state covariance (uncertainty)
 
 
+OnlineLearningLossType = Literal[
+    "unsupervised_rmape", "unsupervised_rmspe",
+    "supervised_rmape", "supervised_rmspe",
+    "multimoment",
+]
+
+
 class OnlineLearningLossConfig(BaseModel):
-    """Configuration for online learning loss function."""
-    metric: Literal["rmspe", "rmape"] = Field(default="rmape", description="Loss metric to use: 'rmspe' or 'rmape'")
-    supervision: Literal["supervised", "unsupervised"] = Field(default="unsupervised", description="Supervision mode: 'supervised' (compare with ground truth) or 'unsupervised' (compare with pre-EKF predictions)")
-    training_loss_type: Literal["configured", "kalman_innovation", "y_s_inv_y", "unsupervised_rmape", "unsupervised_rmspe", "supervised_rmape", "supervised_rmspe", "multimoment"] = Field(default="configured", description="Training loss type: 'configured' (use metric+supervision), 'kalman_innovation' (use K*innovation loss), 'y_s_inv_y' (use y*S^-1*y loss), 'unsupervised_rmape' (use RMAPE between EKF and pre-EKF), 'unsupervised_rmspe' (use RMSPE between EKF and pre-EKF), 'supervised_rmape' (use RMAPE between EKF and true angles), 'supervised_rmspe' (use RMSPE between EKF and true angles), or 'multimoment' (use Multi-Moment Innovation Consistency Loss)")
-    supervised_loss_type: Literal["configured", "kalman_innovation", "y_s_inv_y", "unsupervised_rmape", "unsupervised_rmspe", "supervised_rmape", "supervised_rmspe", "multimoment"] = Field(default="supervised_rmspe", description="Supervised training loss type: 'configured' (use metric+supervision), 'kalman_innovation' (use K*innovation loss), 'y_s_inv_y' (use y*S^-1*y loss), 'unsupervised_rmape' (use RMAPE between EKF and pre-EKF), 'unsupervised_rmspe' (use RMSPE between EKF and pre-EKF), 'supervised_rmape' (use RMAPE between EKF and true angles), 'supervised_rmspe' (use RMSPE between EKF and true angles), or 'multimoment' (use Multi-Moment Innovation Consistency Loss)")
-    
-    # Multi-Moment Innovation Consistency Loss Configuration (only used when training_loss_type="multimoment")
-    multimoment_alpha: float = Field(default=1.0, description="Alpha parameter for Multi-Moment loss (weight for RMAPE component)")
-    multimoment_beta: float = Field(default=1.0, description="Beta parameter for Multi-Moment loss (weight for RMSPE component)")
+    """Configuration for online learning loss functions."""
+    adaptation_loss: OnlineLearningLossType = Field(
+        default="unsupervised_rmspe",
+        description="MSIE / adaptation objective: GLRT trigger, backprop, plot 2. Default RMSPE(EKF, pre-EKF).",
+    )
+    reference_metric: OnlineLearningLossType = Field(
+        default="supervised_rmspe",
+        description="Eval-only tracking metric (plot 1, tables): RMSPE(EKF, GT) when supervised_rmspe.",
+    )
+    supervised_offline_loss: OnlineLearningLossType = Field(
+        default="supervised_rmspe",
+        description="Shadow/oracle model backprop during OL (uses GT). Not base-model offline pretrain.",
+    )
+    # Legacy — removed in Phase 6 TBD
+    multimoment_alpha: float = Field(default=1.0, description="Legacy: Multi-Moment alpha (TBD removal)")
+    multimoment_beta: float = Field(default=1.0, description="Legacy: Multi-Moment beta (TBD removal)")
 
 
 class OnlineLearningConfig(BaseModel):
@@ -159,8 +183,11 @@ class OnlineLearningConfig(BaseModel):
     enabled: bool = False
     window_size: int = Field(default=10, description="Size of the sliding window (number of steps) over the trajectory data.")
     stride: int = Field(default=5, description="Stride between consecutive windows (number of steps). Defines window density and overlap.")
-    loss_threshold: float = Field(default=0.5, description="Threshold for detecting model drift and triggering online learning.")
     max_iterations: int = Field(default=10, description="Maximum number of training iterations per window when an update is triggered.")
+    adaptation_window_count: int = Field(
+        default=5,
+        description="Number of windows to run online adaptation after drift is triggered before learning_done.",
+    )
     learning_rate: float = Field(default=1e-4, description="Learning rate for online training (typically smaller than main training).")
     
     # trajectory_length now defines the total number of individual trajectory steps to be generated during the online learning session.
@@ -191,14 +218,52 @@ class OnlineLearningConfig(BaseModel):
     adaptive_lr_max: float = Field(default=0.0356, description="Maximum learning rate for adaptive sigmoid mapping.")
     adaptive_lr_k_sigmoid: float = Field(default=0.7336, description="Steepness of the sigmoid curve for adaptive LR mapping.")
     adaptive_lr_dG0: float = Field(default=69.2599, description="Inflection point (dG offset) for the adaptive LR sigmoid.")
-    glrt_history_exclusion: int = Field(default=5, description="Number of most recent GLRT values to exclude from baseline calculation.")
     num_gd_steps: int = Field(default=3, description="Number of gradient descent steps per online learning window.")
-    
-    # GLRT statistical detection parameters
-    glrt_detection_z_threshold: float = Field(default=2.5, description="Z-score threshold for GLRT-based drift detection. Drift is detected when GLRT z-score exceeds this value.")
-    glrt_baseline_window_size: int = Field(default=20, description="Number of recent GLRT values to use for baseline estimation (mean/std calculation).")
-    glrt_min_samples_for_statistics: int = Field(default=10, description="Minimum number of GLRT samples required before using statistical baseline for drift detection.")
-    
+
+    # Drift detection (changepoint GLRT + z-score on g-history)
+    drift_warmup_windows: int = Field(
+        default=10,
+        description="Scope A: skip changepoint GLRT for the first N trajectory windows. "
+        "First g at drift_warmup_windows + 2*GLRT_MIN_SEGMENT_SIZE. "
+        "Scope B baseline length is fixed in utils/drift_gates.py (SCOPE_B_BASELINE_MIN_SAMPLES).",
+    )
+    drift_guard_samples: int = Field(
+        default=3,
+        description="Exclude this many most recent log-GLR values from the baseline "
+        "(they may already reflect drift onset).",
+    )
+    drift_z_threshold: float = Field(
+        default=2.5,
+        description="Drift fires when z-score of current log-GLR vs baseline exceeds this.",
+    )
+    drift_history_max_size: Optional[int] = Field(
+        default=None,
+        description="Optional cap on rolling log-GLR history length. None = unbounded (default).",
+    )
+
+    plot_trajectory: bool = Field(
+        default=False,
+        description="If True, save DOA trajectory plots (xy + angle vs step) from GT window labels.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_drift_config(self):
+        if self.drift_warmup_windows < 2:
+            raise ValueError("drift_warmup_windows must be >= 2")
+        if self.drift_guard_samples < 0:
+            raise ValueError("drift_guard_samples must be >= 0")
+        if self.drift_z_threshold <= 0:
+            raise ValueError("drift_z_threshold must be > 0")
+        from utils.drift_gates import SCOPE_B_BASELINE_MIN_SAMPLES
+
+        min_history = SCOPE_B_BASELINE_MIN_SAMPLES + self.drift_guard_samples
+        if self.drift_history_max_size is not None and self.drift_history_max_size < min_history:
+            raise ValueError(
+                f"drift_history_max_size ({self.drift_history_max_size}) must be >= "
+                f"SCOPE_B_BASELINE_MIN_SAMPLES + drift_guard_samples ({min_history}) when set"
+            )
+        return self
+
     # LR sweep configuration
     enable_lr_sweep: bool = Field(default=False, description="If True, enable LR sweep within scenario sweeps. For each scenario value, sweep over static LR values and optionally run adaptive LR.")
     static_lr_list: Optional[List[float]] = Field(default=None, description="List of static LR values to sweep over. Required if enable_lr_sweep=True.")

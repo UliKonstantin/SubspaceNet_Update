@@ -2,7 +2,7 @@
 Sine acceleration non-linear state evolution model.
 
 This module implements the sine acceleration model:
- θ_{k+1} = θ_k + κ sin(ω0 * t) + η_k
+ θ_{k+1} = damping * θ_k + (1-damping) * b + κ sin(ω0 * t) + η_k
 """
 
 import numpy as np
@@ -12,26 +12,32 @@ from .base import StateEvolutionModel
 
 logger = logging.getLogger("SubspaceNet.kalman_filter.models.sine_accel")
 
+_DEG2RAD = np.pi / 180.0
+
 class SineAccelStateModel(StateEvolutionModel):
     """
     Implements the oscillatory model:
-    θ_{k+1} = θ_k + κ sin(ω0 * t) + η_k
+    θ_{k+1} = damping * θ_k + (1-damping) * b + κ sin(ω0 * t) + η_k
     
-    This model creates oscillatory behavior around the current angle instead of drifting
-    in one direction. The oscillation is time-based rather than state-based.
+    When dc_offset (b) is zero, oscillation converges around 0.
     """
     
-    def __init__(self, omega0, kappa, noise_std, time_step=1.0, device=None, initial_time=0.0):
+    def __init__(self, omega0, kappa, noise_std, time_step=1.0, device=None, initial_time=1.0, damping=0.99,
+                 angle_params_in_degrees=True, dc_offset=0.0):
         """
         Initialize the model.
         
         Args:
-            omega0: Frequency of oscillation (rad/s) - can be single value or array per source
-            kappa: Amplitude of oscillation (rad) - can be single value or array per source
-            noise_std: Standard deviation of process noise (rad)
+            omega0: Frequency of oscillation — same units as trajectory config (step index scale)
+            kappa: Oscillation amplitude in degrees (matches trajectory_physics)
+            noise_std: Process noise standard deviation in degrees
             time_step: Time step between measurements (s)
             device: Device for tensor operations (cuda/cpu)
-            initial_time: Initial time value (default 0.0) - used to set the starting time
+            initial_time: Initial time index for sin(ω0·t); default 1.0 matches GT step indexing
+            damping: Per-step damping on angle (default 0.99, matches trajectory_physics)
+            angle_params_in_degrees: If True, κ and σ are in degrees (trajectory config).
+                If False, σ is in the same units as filter state (radians); used for RW fallback.
+            dc_offset: Per-source DC attractor (degrees if angle_params_in_degrees). Scalar or array.
         """
         # Set device for tensor operations
         if device is None:
@@ -54,10 +60,16 @@ class SineAccelStateModel(StateEvolutionModel):
         else:
             self.kappa = torch.tensor(kappa, dtype=torch.float32, device=device)
             
+        self.angle_params_in_degrees = angle_params_in_degrees
+        noise_scale = _DEG2RAD if angle_params_in_degrees else 1.0
         if isinstance(noise_std, torch.Tensor):
-            self.base_noise_variance = (noise_std.to(device=device, dtype=torch.float32)) ** 2
+            noise_std_state = noise_std.to(device=device, dtype=torch.float32) * noise_scale
+            self.base_noise_variance = noise_std_state ** 2
         else:
-            self.base_noise_variance = torch.tensor(noise_std**2, dtype=torch.float32, device=device)
+            noise_std_state = float(noise_std) * noise_scale
+            self.base_noise_variance = torch.tensor(noise_std_state ** 2, dtype=torch.float32, device=device)
+
+        self.deg2rad = torch.tensor(_DEG2RAD, dtype=torch.float32, device=device)
             
         if isinstance(time_step, torch.Tensor):
             self.time_step = time_step.to(device=device, dtype=torch.float32)
@@ -65,10 +77,24 @@ class SineAccelStateModel(StateEvolutionModel):
             self.time_step = torch.tensor(time_step, dtype=torch.float32, device=device)
         
         # Initialize time counter for oscillatory model with the provided initial time
+        if isinstance(damping, torch.Tensor):
+            self.damping = damping.to(device=device, dtype=torch.float32)
+        else:
+            self.damping = torch.tensor(damping, dtype=torch.float32, device=device)
+
         if isinstance(initial_time, torch.Tensor):
             self.current_time = initial_time.to(device=device, dtype=torch.float32)
         else:
             self.current_time = torch.tensor(initial_time, dtype=torch.float32, device=device)
+
+        if isinstance(dc_offset, (list, tuple, np.ndarray)):
+            self.dc_offset = torch.tensor(dc_offset, dtype=torch.float32, device=device)
+            if len(dc_offset) != self.num_sources:
+                raise ValueError(
+                    f"dc_offset length ({len(dc_offset)}) must match num_sources ({self.num_sources})"
+                )
+        else:
+            self.dc_offset = torch.tensor(float(dc_offset), dtype=torch.float32, device=device)
         
         logger.debug(f"Created OscillatoryStateModel with {self.num_sources} sources:")
         if self.num_sources == 1:
@@ -96,22 +122,21 @@ class SineAccelStateModel(StateEvolutionModel):
         
         # Get source-specific parameters
         if self.num_sources == 1:
-            # Single source case - use the single parameter values
             omega0_source = self.omega0
             kappa_source = self.kappa
+            dc_source = self.dc_offset
         else:
-            # Multiple sources case - use parameters for the specific source
             if source_idx >= self.num_sources:
                 raise ValueError(f"Source index {source_idx} out of bounds for {self.num_sources} sources")
             omega0_source = self.omega0[source_idx]
             kappa_source = self.kappa[source_idx]
+            dc_source = self.dc_offset[source_idx] if self.dc_offset.ndim > 0 else self.dc_offset
         
-        # Calculate oscillatory term for this specific source: κ_source sin(ω0_source * t)
-        oscillation = kappa_source * torch.sin(omega0_source * self.current_time)
+        oscillation = kappa_source * torch.sin(omega0_source * self.current_time) * self.deg2rad
+        dc_rad = dc_source * self.deg2rad if self.angle_params_in_degrees else dc_source
+        leak = (1.0 - self.damping) * dc_rad
         
-        # Apply state transition: θ_{k+1} = θ_k + oscillation
-        result_deg=0.99*(x_tensor*180/np.pi)+oscillation
-        result = result_deg*np.pi/180
+        result = self.damping * x_tensor + leak + oscillation
         
         logger.debug(f"Oscillatory state transition for source {source_idx}: {x_tensor} -> {result}")
         return result
@@ -135,8 +160,8 @@ class SineAccelStateModel(StateEvolutionModel):
         else:
             x_tensor = torch.tensor(x, dtype=torch.float32, device=self.device)
         
-        # Return identity matrix (scalar 1 for 1D case)
-        return torch.ones_like(x_tensor)
+        # ∂f/∂x = damping (leak and oscillation terms do not depend on x)
+        return torch.full_like(x_tensor, self.damping)
     
     def noise_variance(self, x, source_idx=0):
         """
@@ -171,31 +196,44 @@ class SineAccelStateModel(StateEvolutionModel):
             x_tensor = x_batch.to(device=self.device, dtype=torch.float32)
         else:
             x_tensor = torch.tensor(x_batch, dtype=torch.float32, device=self.device)
+
+        # Flat [num_sources] from batch KF mask indexing → single trajectory row
+        squeeze_output = False
+        if self.num_sources > 1 and x_tensor.ndim == 1 and x_tensor.shape[0] == self.num_sources:
+            x_tensor = x_tensor.unsqueeze(0)
+            squeeze_output = True
         
+        leak_rad = (1.0 - self.damping) * (
+            self.dc_offset * self.deg2rad if self.angle_params_in_degrees else self.dc_offset
+        )
+
         # Handle single source vs multiple sources
         if self.num_sources == 1:
-            # Single source case - apply same parameters to all batch elements
-            oscillation = self.kappa * torch.sin(self.omega0 * self.current_time)
-            result = x_tensor + oscillation
+            oscillation = self.kappa * torch.sin(self.omega0 * self.current_time) * self.deg2rad
+            leak = leak_rad if isinstance(leak_rad, torch.Tensor) and leak_rad.ndim == 0 else leak_rad
+            result = self.damping * x_tensor + leak + oscillation
         else:
-            # Multiple sources case - apply source-specific parameters
             if x_tensor.shape[-1] != self.num_sources:
-                # If we have multiple source parameters but batch doesn't match,
-                # use the first source's parameters for all elements (for backward compatibility)
                 if x_tensor.shape[-1] == 1:
-                    oscillation = self.kappa[0] * torch.sin(self.omega0[0] * self.current_time)
-                    result = x_tensor + oscillation
+                    oscillation = self.kappa[0] * torch.sin(self.omega0[0] * self.current_time) * self.deg2rad
+                    leak = (1.0 - self.damping) * (
+                        self.dc_offset[0] * self.deg2rad if self.angle_params_in_degrees else self.dc_offset[0]
+                    )
+                    result = self.damping * x_tensor + leak + oscillation
                 else:
                     raise ValueError(f"Last dimension of batch ({x_tensor.shape[-1]}) must match number of sources ({self.num_sources})")
             else:
-                # Calculate oscillatory term for each source: κ_i sin(ω0_i * t)
-                # Expand to match batch dimensions
-                oscillation = self.kappa * torch.sin(self.omega0 * self.current_time)
-                oscillation = oscillation.expand(x_tensor.shape[0], -1)  # Expand to batch size
-                
-                # Apply state transition: θ_{k+1} = θ_k + oscillation
-                result = x_tensor + oscillation
+                oscillation = self.kappa * torch.sin(self.omega0 * self.current_time) * self.deg2rad
+                oscillation = oscillation.expand(x_tensor.shape[0], -1)
+                if leak_rad.ndim == 0:
+                    leak = leak_rad.expand_as(x_tensor)
+                else:
+                    leak = leak_rad.unsqueeze(0).expand(x_tensor.shape[0], -1)
+                result = self.damping * x_tensor + leak + oscillation
         
+        if squeeze_output:
+            result = result.squeeze(0)
+
         logger.debug(f"Oscillatory batch state transition for {x_tensor.numel()} states")
         return result
     
@@ -214,10 +252,14 @@ class SineAccelStateModel(StateEvolutionModel):
             x_tensor = x_batch.to(device=self.device, dtype=torch.float32)
         else:
             x_tensor = torch.tensor(x_batch, dtype=torch.float32, device=self.device)
+
+        if self.num_sources > 1 and x_tensor.ndim == 1 and x_tensor.shape[0] == self.num_sources:
+            x_tensor = x_tensor.unsqueeze(0)
         
-        # Calculate Jacobians element-wise using tensor operations
-        # Ensure all operations maintain gradients
-        jacobian = torch.ones_like(x_tensor)
+        jacobian = torch.full_like(x_tensor, self.damping)
+
+        if jacobian.ndim == 2 and jacobian.shape[0] == 1:
+            jacobian = jacobian.squeeze(0)
         
         logger.debug(f"Oscillatory batch Jacobian for {x_tensor.numel()} states")
         return jacobian
@@ -237,13 +279,25 @@ class SineAccelStateModel(StateEvolutionModel):
             x_tensor = x_batch.to(device=self.device, dtype=torch.float32)
         else:
             x_tensor = torch.tensor(x_batch, dtype=torch.float32, device=self.device)
-        
-        # Return constant noise variance for all states using tensor operations
-        return torch.full_like(x_tensor, self.base_noise_variance, dtype=torch.float32, device=self.device) 
+
+        if self.num_sources > 1 and x_tensor.ndim == 1 and x_tensor.shape[0] == self.num_sources:
+            x_tensor = x_tensor.unsqueeze(0)
+
+        out = torch.full_like(x_tensor, self.base_noise_variance, dtype=torch.float32, device=self.device)
+        if out.ndim == 2 and out.shape[0] == 1:
+            out = out.squeeze(0)
+        return out
     
     def advance_time(self):
         """
         Advance the time counter by one time step.
         This should be called after each prediction step.
         """
-        self.current_time += self.time_step 
+        self.current_time += self.time_step
+
+    def reset_time(self, initial_time=1.0):
+        """Reset the time index (call when a new trajectory batch starts)."""
+        if isinstance(initial_time, torch.Tensor):
+            self.current_time = initial_time.to(device=self.device, dtype=torch.float32)
+        else:
+            self.current_time = torch.tensor(initial_time, dtype=torch.float32, device=self.device)

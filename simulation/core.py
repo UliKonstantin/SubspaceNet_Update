@@ -217,7 +217,10 @@ class Simulation:
             
             # Run the evaluation
             self._run_evaluation_pipeline()
-            
+
+            if self.config.evaluation.save_results and self.output_dir:
+                self._save_evaluation_results_to_file()
+
             return {"status": "success", "evaluation_results": self.results}
             
         except Exception as e:
@@ -669,7 +672,7 @@ class Simulation:
                         # Evaluate DNN model and update Kalman filters for this time step
                         model_preds, kf_preds, step_loss, kf_loss, step_covariances = self._evaluate_dnn_model_kf_step_batch(
                             step_data, step_sources, labels[:, step, :max_sources], step_mask, batch_kf, 
-                            rmspe_criterion, is_near_field
+                            rmspe_criterion, is_near_field, step_index=step
                         )
                         
                         # Accumulate loss and store predictions
@@ -735,7 +738,8 @@ class Simulation:
         step_mask: torch.Tensor,
         batch_kf: BatchKalmanFilter1D,
         rmspe_criterion: RMSPELoss,
-        is_near_field: bool
+        is_near_field: bool,
+        step_index: int = 0,
     ) -> Tuple[List[np.ndarray], List[np.ndarray], float]:
         """
         Evaluate the DNN model for a batch of steps and apply Kalman filtering.
@@ -813,8 +817,11 @@ class Simulation:
                 padded_angles_pred[i, :num_sources] = pred
 
         # Apply the Kalman filter to the predicted angles (using the padded batch tensor)
-        # Get predictions before update (current state)
-        kf_predictions_before_update = batch_kf.predict().cpu().numpy()
+        # Step 0: state already initialized at θ_0 — update only; predict from step ≥ 1
+        if step_index > 0:
+            kf_predictions_before_update = batch_kf.predict().cpu().numpy()
+        else:
+            kf_predictions_before_update = batch_kf.x.detach().cpu().numpy()
 
         # Then update with new measurements (model predictions) and get updated states
         kf_predictions_after_update, kf_covariances = batch_kf.update(padded_angles_pred, step_mask)
@@ -944,12 +951,14 @@ class Simulation:
         dnn_avg_loss_degrees = dnn_avg_loss * 180 / np.pi
         ekf_avg_loss_degrees = ekf_avg_loss * 180 / np.pi
         additional_info = f"Samples: {dnn_total_samples}, Traj: {len(dnn_trajectory_results)}"
-        print(f"{'DNN+Kalman':<20} {dnn_avg_loss:<20.6f} {dnn_avg_loss_degrees:<25.6f} {additional_info:<30}")
-        print(f"{'EKF':<20} {ekf_avg_loss:<20.6f} {ekf_avg_loss_degrees:<25.6f} {additional_info:<30}")
+        print(f"{'DNN snapshot':<20} {dnn_avg_loss:<20.6f} {dnn_avg_loss_degrees:<25.6f} {additional_info:<30}")
+        print(f"{'EKF posterior':<20} {ekf_avg_loss:<20.6f} {ekf_avg_loss_degrees:<25.6f} {additional_info:<30}")
         
         # Add comparison row
         dnn_ekf_diff_degrees = dnn_ekf_diff * 180 / np.pi
-        if dnn_ekf_diff < 0:
+        if abs(dnn_ekf_diff) < 1e-9:
+            comparison_text = "Equal (EKF posterior ≈ DNN measurement)"
+        elif dnn_ekf_diff < 0:
             comparison_text = f"DNN better by {abs(dnn_ekf_diff_degrees):.6f}° ({abs(dnn_ekf_relative_diff):.2f}%)"
         else:
             comparison_text = f"EKF better by {dnn_ekf_diff_degrees:.6f}° ({dnn_ekf_relative_diff:.2f}%)"
@@ -979,6 +988,49 @@ class Simulation:
                 print(f"{method:<20} {avg_loss:<20.6f} {avg_loss_degrees:<25.6f} {comparison:<30}")
         
         print("\n" + "="*80)
+
+    def _save_evaluation_results_to_file(self) -> None:
+        """Persist evaluation metrics and optional per-trajectory predictions."""
+        import json
+
+        if self.output_dir is None:
+            return
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        results_file = self.output_dir / f"evaluation_results_{timestamp}.json"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        def convert_to_serializable(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if isinstance(obj, (np.int32, np.int64)):
+                return int(obj)
+            if isinstance(obj, (np.float32, np.float64)):
+                return float(obj)
+            return str(obj)
+
+        serializable_results = {}
+        include_trajectories = getattr(self.config.evaluation, "detailed_metrics", True)
+
+        for key, value in self.results.items():
+            if key == "dnn_trajectory_results" and not include_trajectories:
+                continue
+            if isinstance(value, dict):
+                serializable_results[key] = {k: convert_to_serializable(v) for k, v in value.items()}
+            elif isinstance(value, list):
+                if value and isinstance(value[0], dict):
+                    serializable_results[key] = [
+                        {k: convert_to_serializable(v) for k, v in item.items()} for item in value
+                    ]
+                else:
+                    serializable_results[key] = [convert_to_serializable(v) for v in value]
+            else:
+                serializable_results[key] = convert_to_serializable(value)
+
+        with open(results_file, "w", encoding="utf-8") as f:
+            json.dump(serializable_results, f, indent=2)
+
+        logger.info("Evaluation results saved to %s", results_file)
         
     def run_scenario(
         self,
@@ -1231,6 +1283,18 @@ class Simulation:
                 return f"simulation.model_path={model_paths[iteration_idx]}"
             elif not retrain_model and len(model_paths) > 0:
                 return f"simulation.model_path={model_paths[0]}"
+
+        base_path = getattr(self.config.simulation, "model_path", None)
+        if base_path is not None and str(base_path).lower() not in ("null", "none", ""):
+            return f"simulation.model_path={base_path}"
+
+        if self.config.simulation.load_model and not self.config.simulation.train_model:
+            raise ValueError(
+                "Model checkpoint required for this sweep iteration. "
+                "Provide --model / -m on the CLI, set simulation.model_path in the YAML, "
+                "or set scenario_config.model_paths for multi-checkpoint sweeps."
+            )
+
         return "simulation.model_path=null"
 
     def _run_sweep_iteration(
@@ -1280,90 +1344,65 @@ class Simulation:
 
     def extract_post_learning_avg_loss_from_result(self, result: Dict) -> Optional[float]:
         """Extract average RMSPE loss from post-learning windows using existing result structure."""
-        import numpy as np
-        
+        from utils.utils import mean_reference_loss_after_training
+
         try:
             if result is None:
                 logger.warning("[EXTRACT DEBUG] result is None")
                 return None
-            
+
             if result.get("status") != "success":
                 logger.warning(f"[EXTRACT DEBUG] result status is not success: {result.get('status')}")
                 return None
-            
-            averaged_results = result.get("averaged_results", {})
-            if not averaged_results:
-                logger.warning("[EXTRACT DEBUG] averaged_results is empty or missing, trying fallback to individual trajectory results")
-                # Fallback: try to extract from individual trajectory results
-                online_learning_results = result.get("online_learning_results", {})
-                online_trajectory_results = online_learning_results.get("online_trajectory_results", [])
-                if online_trajectory_results and len(online_trajectory_results) > 0:
-                    # Extract main_losses from first trajectory
-                    first_traj = online_trajectory_results[0]
-                    if hasattr(first_traj, 'window_results') and first_traj.window_results:
-                        main_losses = [wr.loss_metrics.main_loss for wr in first_traj.window_results if hasattr(wr, 'loss_metrics')]
-                        training_end_window = online_learning_results.get("training_end_window")
-                        training_start_window = online_learning_results.get("training_start_window")
-                        logger.info(f"[EXTRACT DEBUG] Fallback: extracted {len(main_losses)} losses from individual trajectory")
-                        if main_losses:
-                            # Use same logic as below
-                            if training_end_window is None:
-                                if training_start_window is not None and training_start_window + 1 < len(main_losses):
-                                    post_learning_losses = main_losses[training_start_window + 1:]
-                                    avg_loss = float(np.mean(post_learning_losses))
-                                    logger.info(f"[EXTRACT DEBUG] Fallback calculated avg_loss: {avg_loss}")
-                                    return avg_loss
-                            elif training_end_window + 1 < len(main_losses):
-                                post_learning_losses = main_losses[training_end_window + 1:]
-                                avg_loss = float(np.mean(post_learning_losses))
-                                logger.info(f"[EXTRACT DEBUG] Fallback calculated avg_loss: {avg_loss}")
-                                return avg_loss
-                logger.warning("[EXTRACT DEBUG] Fallback also failed, returning None")
-                return None
-            
-            averaged_online = averaged_results.get("averaged_online_trajectory", {})
-            if not averaged_online:
-                logger.warning("[EXTRACT DEBUG] averaged_online_trajectory is empty or missing")
-                return None
-            
-            main_losses = averaged_online.get("main_losses", [])
-            logger.info(f"[EXTRACT DEBUG] main_losses length: {len(main_losses)}")
-            
+
             online_learning_results = result.get("online_learning_results", {})
             training_end_window = online_learning_results.get("training_end_window")
             training_start_window = online_learning_results.get("training_start_window")
-            logger.info(f"[EXTRACT DEBUG] training_end_window: {training_end_window}, training_start_window: {training_start_window}")
-            
-            if not main_losses:
-                logger.warning("[EXTRACT DEBUG] main_losses is empty, returning None")
-                return None
-            
-            # If training_end_window is None, learning never completed.
-            # Use fallback: calculate average from all windows after training_start_window
-            # If training_start_window is also None, return None
-            if training_end_window is None:
-                logger.info("[EXTRACT DEBUG] training_end_window is None, using fallback with training_start_window")
-                if training_start_window is not None and training_start_window + 1 < len(main_losses):
-                    # Use all windows after training started
-                    post_learning_losses = main_losses[training_start_window + 1:]
-                    avg_loss = float(np.mean(post_learning_losses))
-                    logger.info(f"[EXTRACT DEBUG] Calculated avg_loss using fallback: {avg_loss} (from {len(post_learning_losses)} windows)")
+
+            averaged_results = result.get("averaged_results", {})
+            averaged_online = averaged_results.get("averaged_online_trajectory", {}) if averaged_results else {}
+
+            if averaged_online.get("reference_metric_losses"):
+                window_indices = averaged_online.get("window_indices", [])
+                reference_metric_losses = averaged_online.get("reference_metric_losses", [])
+                avg_loss = mean_reference_loss_after_training(
+                    window_indices,
+                    reference_metric_losses,
+                    training_end_window,
+                    training_start_window,
+                )
+                if avg_loss is not None:
+                    logger.info(
+                        f"[EXTRACT DEBUG] avg_loss={avg_loss} from averaged_online "
+                        f"(n_losses={len(reference_metric_losses)}, training_end={training_end_window})"
+                    )
                     return avg_loss
-                else:
-                    # No training info available, return None
-                    logger.warning(f"[EXTRACT DEBUG] Cannot use fallback: training_start_window={training_start_window}, main_losses_len={len(main_losses)}")
-                    return None
-            
-            # Normal case: training completed, use windows after training_end_window
-            if training_end_window + 1 >= len(main_losses):
-                # No post-learning windows available
-                logger.warning(f"[EXTRACT DEBUG] No post-learning windows: training_end_window={training_end_window}, main_losses_len={len(main_losses)}")
-                return None
-            
-            post_learning_losses = main_losses[training_end_window + 1:]
-            avg_loss = float(np.mean(post_learning_losses))
-            logger.info(f"[EXTRACT DEBUG] Calculated avg_loss (normal case): {avg_loss} (from {len(post_learning_losses)} windows)")
-            return avg_loss
+
+            # Fallback: first individual online trajectory
+            online_trajectory_results = online_learning_results.get("online_trajectory_results") or []
+            if not online_trajectory_results:
+                online_trajectory_results = online_learning_results.get("online_model_trajectory_results") or []
+            if isinstance(online_trajectory_results, list) and online_trajectory_results:
+                first_traj = online_trajectory_results[0]
+                if hasattr(first_traj, "window_results") and first_traj.window_results:
+                    window_indices = getattr(first_traj, "window_indices", [])
+                    reference_metric_losses = [
+                        wr.loss_metrics.reference_metric_loss
+                        for wr in first_traj.window_results
+                        if hasattr(wr, "loss_metrics")
+                    ]
+                    avg_loss = mean_reference_loss_after_training(
+                        window_indices,
+                        reference_metric_losses,
+                        training_end_window,
+                        training_start_window,
+                    )
+                    if avg_loss is not None:
+                        logger.info(f"[EXTRACT DEBUG] avg_loss={avg_loss} from individual trajectory fallback")
+                        return avg_loss
+
+            logger.warning("[EXTRACT DEBUG] Could not extract post-learning avg loss")
+            return None
         except Exception as e:
             logger.warning(f"[EXTRACT DEBUG] Exception in extract_post_learning_avg_loss_from_result: {e}")
             import traceback

@@ -99,14 +99,19 @@ simulation/drift/
 
 ---
 
-## 6. Single-run plot dispatch
+## 6. Unified plot dispatch (end-of-recipe refactor)
 
-**Current state:** `cli/postprocess.py` only plots sweeps; single eval/OL runs produce no plots.
+**Current state:** Plotting is **spread across** `cli/postprocess.py` (sweeps + partial single eval), `Online_learning.py` (GLRT, averaged OL, trajectory, KF comparison), and `training.py` (loss curves). Adding a plot requires hunting call sites.
 
-**TBD:**
-- Map `goal=evaluate` single run → existing eval plots (if any in `utils/plotting.py`)
-- Map `goal=online_learning` single run → `plot_online_learning_results` / averaged plots
-- Decide: always plot vs `simulation.save_plots` YAML flag
+**Target:**
+- Runners / `Simulation` **return structured results only** (no matplotlib).
+- **One dispatch** after run completes: `cli/postprocess.py` or `utils/plotting/dispatch.py` registry keyed by `(goal, sweep_type)`.
+- **`simulation.save_plots`** gates all PNG generation in that single place.
+- New plot = implement in `utils/plotting/` + register — no runner edits.
+
+**Interim (2026-08):** `eval_kf_gain_comparison.png` (single eval, postprocess); `averaged_kf_gain_comparison.png` (OL, still inline in runner). Move both to registry during this task.
+
+**When:** After recipe Steps 0–9 pass; re-run Steps 3–9 for plot regression. See [RECIPE_VERIFICATION_PLAN.md](./RECIPE_VERIFICATION_PLAN.md) plotting gap section.
 
 ---
 
@@ -162,9 +167,9 @@ Do **after** tasks 1–2 so new plots land in the right place.
 1–2  LR/GLRT analysis embed (user priority)
 3    sandbox → drift/ refactor (unblocks clean imports)
 4    dead code cleanup (quick win)
-6    single-run plots
+6    unified plot dispatch (after recipe 0–9)
 5    CLI cutover
-7–8  plotting split + import cleanup (last)
+7–8  plotting split + import cleanup (during/after #6)
 9    repo hygiene (anytime)
 10   extended tests (parallel with above)
 ```

@@ -196,7 +196,9 @@ class TrajectoryDataHandler:
             
             # Generate angle trajectories based on selected type
             if trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
-                from simulation.runners.trajectory_physics import sine_accel_step
+                from simulation.runners.trajectory_physics import sine_accel_step, resolve_sine_accel_dc_offsets
+
+                dc_offsets_i = resolve_sine_accel_dc_offsets(cfg.trajectory, num_sources) if cfg else None
 
                 angle_trajectories[i, 0, :num_sources] = torch.FloatTensor(
                     np.random.uniform(-30, 30, size=num_sources)
@@ -207,7 +209,9 @@ class TrajectoryDataHandler:
 
                 for t in range(1, trajectory_length):
                     theta_prev = angle_trajectories[i, t-1, :num_sources].numpy()
-                    theta_next = sine_accel_step(theta_prev, t, omega0_arr, kappa_arr, sa_noise_sd)
+                    theta_next = sine_accel_step(
+                        theta_prev, t, omega0_arr, kappa_arr, sa_noise_sd, dc_offset=dc_offsets_i
+                    )
                     angle_trajectories[i, t, :num_sources] = torch.clamp(
                         torch.from_numpy(theta_next).float(), min=angle_min, max=angle_max
                     )
@@ -837,9 +841,20 @@ class OnlineLearningTrajectoryGenerator:
                         angles[middle_idx + i] = angles[middle_idx + i - 1] + 7.0
         
         self.last_true_angles = np.array(angles)
+        from simulation.runners.trajectory_physics import resolve_sine_accel_dc_offsets
+
+        self.sine_accel_dc_offsets = resolve_sine_accel_dc_offsets(
+            self.trajectory_config, self.current_M
+        )
+        if self.sine_accel_dc_offsets is not None:
+            logger.info(
+                f"Sine-accel DC offsets (deg): {self.sine_accel_dc_offsets.tolist()}"
+            )
         # TODO: Add self.last_true_ranges for near-field if needed and make it dynamic based on field_type
 
         self.current_step_in_session = 0
+        # Cached trajectory steps for stride-based sliding windows: (obs, M, labels)
+        self._step_cache: List[Tuple[torch.Tensor, int, np.ndarray]] = []
         logger.info(f"OnlineLearningTrajectoryGenerator initialized. eta={self.system_model_params.eta:.4f}, M={self.current_M}, type={self.trajectory_config.trajectory_type.value}")
 
     def update_eta(self, new_eta: float):
@@ -887,7 +902,14 @@ class OnlineLearningTrajectoryGenerator:
             omega0_arr = np.atleast_1d(np.broadcast_to(np.array(sa_omega0, dtype=float), self.current_M))
             kappa_arr = np.atleast_1d(np.broadcast_to(np.array(sa_kappa, dtype=float), self.current_M))
 
-            next_angles = sine_accel_step(self.last_true_angles, self.current_step_in_session, omega0_arr, kappa_arr, sa_noise_sd)
+            next_angles = sine_accel_step(
+                self.last_true_angles,
+                self.current_step_in_session,
+                omega0_arr,
+                kappa_arr,
+                sa_noise_sd,
+                dc_offset=self.sine_accel_dc_offsets,
+            )
             self.last_true_angles = np.clip(next_angles, self.angle_min, self.angle_max)
         elif self.trajectory_config.trajectory_type == TrajectoryType.MULT_NOISE_NONLINEAR:
             mn_omega0 = self.trajectory_config.mult_noise_omega0 if hasattr(self.trajectory_config, 'mult_noise_omega0') else 0.0
@@ -904,54 +926,54 @@ class OnlineLearningTrajectoryGenerator:
         
         return self.last_true_angles.copy(), self.current_M
 
-    def get_next_window(self, window_size: int) -> Tuple[torch.Tensor, List[int], List[np.ndarray]]:
+    def _append_one_step(self) -> None:
+        """Generate and cache the next trajectory step."""
+        current_true_angles, num_sources_for_step = self._generate_next_true_step()
+
+        if self.system_model_params.field_type.lower() == "far":
+            self.samples_model.set_labels(num_sources_for_step, angles=current_true_angles.tolist(), distances=None)
+        else:
+            placeholder_distances = np.array([20.0] * num_sources_for_step)
+            self.samples_model.set_labels(
+                num_sources_for_step,
+                angles=current_true_angles.tolist(),
+                distances=placeholder_distances.tolist(),
+            )
+
+        observation_matrix, _, _, _ = self.samples_model.samples_creation(source_number=num_sources_for_step)
+        true_label_for_step = self.samples_model.get_labels().cpu().numpy()
+        self._step_cache.append(
+            (torch.as_tensor(observation_matrix, dtype=torch.complex64), num_sources_for_step, true_label_for_step)
+        )
+        self.current_step_in_session += 1
+
+    def _ensure_steps_cached(self, end_exclusive: int) -> None:
+        while len(self._step_cache) < end_exclusive:
+            self._append_one_step()
+
+    def get_window(self, start_step: int, window_size: int) -> Tuple[torch.Tensor, List[int], List[np.ndarray]]:
         """
-        Generates the next window of trajectory data.
+        Return a sliding window starting at ``start_step`` (trajectory step index).
 
         Args:
-            window_size: The number of time steps in the window.
-
-        Returns:
-            A tuple containing:
-            - observations_tensor: Tensor of shape [window_size, N_antennas, T_snapshots_per_step]
-            - sources_nums_list: List of source counts for each step in the window.
-            - true_labels_list: List of true angle (and range) np.arrays for each step.
+            start_step: Index of the first trajectory step in the window.
+            window_size: Number of consecutive steps in the window.
         """
-        window_observations_list = []
-        window_sources_nums_list = []
-        window_true_labels_list = []
+        if start_step < 0:
+            raise ValueError(f"start_step must be non-negative, got {start_step}")
+        end_exclusive = start_step + window_size
+        self._ensure_steps_cached(end_exclusive)
 
-        for step_in_window in range(window_size):
-            current_true_angles, num_sources_for_step = self._generate_next_true_step()
-            
-            # Set labels for the Samples model (which uses the current eta from shared system_model_params)
-            if self.system_model_params.field_type.lower() == "far":
-                self.samples_model.set_labels(num_sources_for_step, angles=current_true_angles.tolist(), distances=None)
-            else: # near or full field
-                # TODO: Add actual distance generation for near-field
-                # For now, using placeholder distances if near-field
-                placeholder_distances = np.array([20.0] * num_sources_for_step) 
-                self.samples_model.set_labels(num_sources_for_step, angles=current_true_angles.tolist(), distances=placeholder_distances.tolist())
-            
-            # Generate noisy observation matrix using the current system_model_params.eta
-            # samples_creation returns (array_output, true_clean_signal, true_noise, sources_positions)
-            observation_matrix, _, _, _ = self.samples_model.samples_creation(source_number=num_sources_for_step)
-            
-            window_observations_list.append(torch.as_tensor(observation_matrix, dtype=torch.complex64))
-            window_sources_nums_list.append(num_sources_for_step)
-            
-            # Store ground truth for this step using the actual labels from samples_model (in radians)
-            # This ensures consistency with the units used by the model
-            true_label_for_step = self.samples_model.get_labels().cpu().numpy()
-            window_true_labels_list.append(true_label_for_step)
-
-            self.current_step_in_session +=1
-
-        # Stack observations for the window: [window_size, N_antennas, T_snapshots_per_step]
-        observations_tensor = torch.stack(window_observations_list)
-        
-        # logger.debug(f"Generated window: {self.current_step_in_session - window_size +1} to {self.current_step_in_session}")
+        window_slice = self._step_cache[start_step:end_exclusive]
+        observations_tensor = torch.stack([step[0] for step in window_slice])
+        window_sources_nums_list = [step[1] for step in window_slice]
+        window_true_labels_list = [step[2] for step in window_slice]
         return observations_tensor, window_sources_nums_list, window_true_labels_list
+
+    def get_next_window(self, window_size: int) -> Tuple[torch.Tensor, List[int], List[np.ndarray]]:
+        """Sequential non-overlapping window (legacy); prefer ``get_window`` with stride."""
+        start_step = len(self._step_cache)
+        return self.get_window(start_step, window_size)
 
 # REFACTORED OnlineLearningDataset class
 class OnlineLearningDataset(Dataset):
@@ -960,22 +982,34 @@ class OnlineLearningDataset(Dataset):
     trajectory generator. It does not pre-compute or store the entire trajectory.
     """
     
-    def __init__(self, generator: OnlineLearningTrajectoryGenerator, 
-                 total_num_windows: int, window_size: int):
+    def __init__(
+        self,
+        generator: OnlineLearningTrajectoryGenerator,
+        total_num_windows: int,
+        window_size: int,
+        stride: int,
+    ):
         """
         Args:
             generator: An instance of OnlineLearningTrajectoryGenerator.
             total_num_windows: The total number of windows this dataset will yield.
             window_size: The size of each window (number of steps).
+            stride: Step offset between consecutive window starts.
         """
         self.generator = generator
         self.total_num_windows = total_num_windows
         self.window_size = window_size
+        self.stride = stride
         self._generated_windows_count = 0 # Internal counter
 
         if self.total_num_windows <= 0:
             raise ValueError(f"total_num_windows must be positive, got {total_num_windows}")
-        logger.info(f"OnlineLearningDataset initialized. Expecting to generate {total_num_windows} windows of size {window_size}.")
+        if stride <= 0:
+            raise ValueError(f"stride must be positive, got {stride}")
+        logger.info(
+            f"OnlineLearningDataset initialized. Expecting {total_num_windows} windows "
+            f"(size={window_size}, stride={stride})."
+        )
     
     def __len__(self):
         """Return the total number of windows to be generated."""
@@ -996,8 +1030,8 @@ class OnlineLearningDataset(Dataset):
             # This case should ideally not be reached if DataLoader respects __len__
             raise IndexError(f"Attempted to generate window beyond total_num_windows ({self.total_num_windows}).")
 
-        # time_series_window_tensor, sources_num_list, labels_list_of_arrays
-        window_data = self.generator.get_next_window(self.window_size)
+        start_step = idx * self.stride
+        window_data = self.generator.get_window(start_step, self.window_size)
         self._generated_windows_count += 1
         return window_data
 
@@ -1131,7 +1165,8 @@ def create_online_learning_dataset(
     )
     
     return OnlineLearningDataset(
-        generator=generator, 
-        total_num_windows=num_possible_windows, 
-        window_size=window_size
+        generator=generator,
+        total_num_windows=num_possible_windows,
+        window_size=window_size,
+        stride=stride,
     ) 

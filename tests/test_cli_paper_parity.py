@@ -56,7 +56,7 @@ class TestPaperEtaSweepNumericParity:
     def trim_values(self):
         return [0.4, 0.6]
 
-    def test_per_eta_main_losses_match_legacy(self, trim_values):
+    def test_per_eta_reference_metric_losses_match_legacy(self, trim_values):
         base = Path(tempfile.mkdtemp(prefix="paper_parity_"))
         try:
             seed = 42
@@ -72,8 +72,8 @@ class TestPaperEtaSweepNumericParity:
                 assert ok, f"eta={eta} numeric diffs:\n" + "\n".join(diffs)
 
                 # Must have per-window losses to compare (pretrained path always populated)
-                assert "averaged_pretrained_trajectory_main_losses" in leg_m
-                assert len(leg_m["averaged_pretrained_trajectory_main_losses"]) >= 1
+                assert "averaged_pretrained_trajectory_reference_metric_losses" in leg_m
+                assert len(leg_m["averaged_pretrained_trajectory_reference_metric_losses"]) >= 1
         finally:
             shutil.rmtree(base, ignore_errors=True)
 

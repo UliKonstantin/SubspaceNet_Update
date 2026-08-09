@@ -21,6 +21,14 @@ def postprocess(result: Dict, request: RunRequest, output_dir: Path, sim) -> Non
             plot_loss_vs_scenario(result, request.sweep_axis.value, output_dir)
             return
 
+        if request.goal == Goal.EVALUATE and request.sweep == SweepType.NONE:
+            if getattr(sim.config.simulation, "save_plots", False):
+                traj_results = sim.results.get("dnn_trajectory_results")
+                if traj_results:
+                    from utils.plotting import plot_eval_dnn_ekf_loss_vs_time
+                    plot_eval_dnn_ekf_loss_vs_time(traj_results, output_dir)
+            return
+
         if request.goal == Goal.ONLINE_LEARNING and request.sweep == SweepType.GRID_4D:
             from utils.plotting import plot_eta_comparison_4d_grid
             plot_eta_comparison_4d_grid(result, output_dir)

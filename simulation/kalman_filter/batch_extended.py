@@ -109,14 +109,21 @@ class BatchExtendedKalmanFilter1D:
         
         # Create appropriate state evolution model based on trajectory type
         if trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
-            # Get sine acceleration model parameters
             omega0 = config.trajectory.sine_accel_omega0
             kappa = config.trajectory.sine_accel_kappa
-            # Use KF process noise instead of trajectory noise
             noise_std = kf_process_noise_std
-            
-            state_model = SineAccelStateModel(omega0, kappa, noise_std)
-            logger.info(f"Using batch sine acceleration model with ω₀={omega0}, κ={kappa}, σ={noise_std}")
+            if isinstance(omega0, (int, float)):
+                omega0 = [omega0] * max_sources
+            if isinstance(kappa, (int, float)):
+                kappa = [kappa] * max_sources
+            from simulation.kalman_filter.extended import resolve_ekf_dc_offsets
+
+            dc_arr = resolve_ekf_dc_offsets(config)
+            state_model = SineAccelStateModel(omega0, kappa, noise_std, dc_offset=dc_arr)
+            logger.info(
+                f"Using batch sine acceleration model with ω₀={omega0}, κ={kappa}, "
+                f"σ={noise_std}, dc_offset={dc_arr.tolist()}"
+            )
             
         elif trajectory_type == TrajectoryType.MULT_NOISE_NONLINEAR:
             # Get multiplicative noise model parameters
@@ -132,7 +139,7 @@ class BatchExtendedKalmanFilter1D:
             # Default to random walk model for other types
             # Use KF process noise instead of trajectory noise
             noise_std = kf_process_noise_std
-            state_model = SineAccelStateModel(0.0, 0.0, noise_std)
+            state_model = SineAccelStateModel(0.0, 0.0, noise_std, damping=1.0, angle_params_in_degrees=False)
             logger.info(f"Using batch random walk model with σ={noise_std}")
         
         # Get measurement noise and initial covariance
@@ -164,6 +171,9 @@ class BatchExtendedKalmanFilter1D:
         self.x = initial_states.clone().to(self.device)
         self.P = self.P0.clone()
         self.state_initialized = self.source_mask.clone()
+
+        if hasattr(self.state_model, "reset_time"):
+            self.state_model.reset_time(1.0)
         
         logger.debug(f"Initialized batch states with shape {initial_states.shape}")
     
@@ -181,26 +191,20 @@ class BatchExtendedKalmanFilter1D:
         
         if mask.sum() == 0:
             return self.x
-        
-        # Get current states for active sources
-        x_current = self.x[mask]
-        P_current = self.P[mask]
-        
-        # State prediction using non-linear function (batch operation)
-        x_pred = self._batch_state_function(x_current)
-        
-        # Get Jacobians at current states (batch operation)
-        F = self._batch_jacobian(x_current)
-        
-        # Get state-dependent process noise (batch operation)
-        Q = self._batch_noise_variance(x_current)
-        
-        # Covariance prediction using linearization: P_pred = F * P * F + Q
-        P_pred = F * P_current * F + Q
-        
-        # Update state and covariance for active sources
-        self.x[mask] = x_pred
-        self.P[mask] = P_pred
+
+        # Apply state model on the full [batch_size, max_sources] grid.
+        # Boolean mask indexing would flatten to 1D and break vectorized f_batch.
+        x_pred = self._batch_state_function(self.x)
+        F = self._batch_jacobian(self.x)
+        Q = self._batch_noise_variance(self.x)
+
+        P_pred = F * self.P * F + Q
+
+        self.x[mask] = x_pred[mask]
+        self.P[mask] = P_pred[mask]
+
+        if hasattr(self.state_model, "advance_time"):
+            self.state_model.advance_time()
         
         logger.debug(f"Batch prediction complete for {mask.sum().item()} states")
         return self.x
@@ -267,71 +271,80 @@ class BatchExtendedKalmanFilter1D:
         self.predict()
         return self.update(measurements, measurement_mask)
     
+    def _as_state_batch(self, x_batch: torch.Tensor) -> torch.Tensor:
+        """Ensure state tensor is 2D [batch_rows, max_sources] for vectorized models."""
+        if x_batch.ndim == 2:
+            return x_batch
+        if x_batch.ndim == 1 and self.max_sources > 0 and x_batch.numel() % self.max_sources == 0:
+            return x_batch.view(-1, self.max_sources)
+        return x_batch.unsqueeze(0)
+
+    def _call_state_model_batch(self, method_name: str, x_batch: torch.Tensor):
+        """Invoke a batch method on the state model, preserving tensor device/dtype."""
+        x_2d = self._as_state_batch(x_batch)
+        method = getattr(self.state_model, method_name, None)
+        if method is not None:
+            result = method(x_2d)
+        else:
+            scalar_method = getattr(
+                self.state_model,
+                method_name.replace("_batch", ""),
+            )
+            flat = x_2d.reshape(-1)
+            values = [scalar_method(x_i.item()) for x_i in flat]
+            result = np.array(values).reshape(x_2d.shape)
+
+        if isinstance(result, torch.Tensor):
+            return result.to(device=self.device, dtype=x_batch.dtype)
+        return torch.tensor(result, device=self.device, dtype=x_batch.dtype)
+
     def _batch_state_function(self, x_batch):
         """
         Apply the non-linear state evolution function to a batch of states.
         
         Args:
-            x_batch: Tensor of states [N] where N is number of active states
+            x_batch: Tensor [batch_size, max_sources] or flattened active states [N]
             
         Returns:
-            Tensor of predicted states [N]
+            Tensor of predicted states with the same shape as x_batch
         """
-        # Convert to numpy for state model computation, then back to tensor
-        x_np = x_batch.detach().cpu().numpy()
-        
-        if hasattr(self.state_model, 'f_batch'):
-            # Use batch function if available
-            f_x = self.state_model.f_batch(x_np)
-        else:
-            # Apply function element-wise
-            f_x = np.array([self.state_model.f(x_i) for x_i in x_np])
-        
-        return torch.tensor(f_x, device=self.device, dtype=x_batch.dtype)
+        x_2d = self._as_state_batch(x_batch)
+        f_x = self._call_state_model_batch("f_batch", x_2d)
+        if x_batch.ndim == 1:
+            return f_x.reshape(-1)
+        return f_x
     
     def _batch_jacobian(self, x_batch):
         """
         Compute Jacobians for a batch of states.
         
         Args:
-            x_batch: Tensor of states [N] where N is number of active states
+            x_batch: Tensor [batch_size, max_sources] or flattened active states [N]
             
         Returns:
-            Tensor of Jacobians [N]
+            Tensor of Jacobians matching x_batch shape
         """
-        # Convert to numpy for state model computation, then back to tensor
-        x_np = x_batch.detach().cpu().numpy()
-        
-        if hasattr(self.state_model, 'F_jacobian_batch'):
-            # Use batch function if available
-            F_x = self.state_model.F_jacobian_batch(x_np)
-        else:
-            # Apply function element-wise
-            F_x = np.array([self.state_model.F_jacobian(x_i) for x_i in x_np])
-        
-        return torch.tensor(F_x, device=self.device, dtype=x_batch.dtype)
+        x_2d = self._as_state_batch(x_batch)
+        F_x = self._call_state_model_batch("F_jacobian_batch", x_2d)
+        if x_batch.ndim == 1:
+            return F_x.reshape(-1)
+        return F_x
     
     def _batch_noise_variance(self, x_batch):
         """
         Compute noise variances for a batch of states.
         
         Args:
-            x_batch: Tensor of states [N] where N is number of active states
+            x_batch: Tensor [batch_size, max_sources] or flattened active states [N]
             
         Returns:
-            Tensor of noise variances [N]
+            Tensor of noise variances matching x_batch shape
         """
-        # Convert to numpy for state model computation, then back to tensor
-        x_np = x_batch.detach().cpu().numpy()
-        
-        if hasattr(self.state_model, 'noise_variance_batch'):
-            # Use batch function if available
-            Q_x = self.state_model.noise_variance_batch(x_np)
-        else:
-            # Apply function element-wise
-            Q_x = np.array([self.state_model.noise_variance(x_i) for x_i in x_np])
-        
-        return torch.tensor(Q_x, device=self.device, dtype=x_batch.dtype)
+        x_2d = self._as_state_batch(x_batch)
+        Q_x = self._call_state_model_batch("noise_variance_batch", x_2d)
+        if x_batch.ndim == 1:
+            return Q_x.reshape(-1)
+        return Q_x
     
     def simulate_measurements(self, true_states=None, measurement_mask=None):
         """

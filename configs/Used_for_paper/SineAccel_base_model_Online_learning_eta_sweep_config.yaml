@@ -144,17 +144,16 @@ online_learning:
   trajectory_length: 20  # Length of trajectory specifically for online learning
   dataset_size: 2
   use_adaptive_learning_rate: true
-  glrt_detection_z_threshold: 2.5  # optional, defaults to 2.5
-  glrt_baseline_window_size: 5    # optional, defaults to 20
-  glrt_min_samples_for_statistics: 10  # optional, defaults to 10
-  
+  drift_warmup_windows: 10
+  drift_guard_samples: 3
+  drift_z_threshold: 2.5
+
   # Adaptive LR sigmoid parameters
-  adaptive_lr_min: 0.0005        # minimum LR for sigmoid mapping
-  adaptive_lr_max: 0.0356        # maximum LR for sigmoid mapping
-  adaptive_lr_k_sigmoid: 0.7336  # steepness of the sigmoid curve
-  adaptive_lr_dG0: 69.2599       # inflection point (dG offset)
-  glrt_history_exclusion: 5      # exclude N most recent GLRT values from baseline
-  num_gd_steps: 3                # gradient descent steps per online learning window
+  adaptive_lr_min: 0.0005
+  adaptive_lr_max: 0.0356
+  adaptive_lr_k_sigmoid: 0.7336
+  adaptive_lr_dG0: 69.2599
+  num_gd_steps: 3
   
   # LR sweep configuration
   enable_lr_sweep: True  # If true, enable LR sweep within eta sweep
@@ -173,10 +172,9 @@ online_learning:
   
   # Loss configuration
   loss_config:
-    metric: "rmspe"  # Loss metric to use: 'rmspe' or 'rmape'
-    supervision: "supervised"  # Supervision mode: 'supervised' (compare with ground truth) or 'unsupervised' (compare with pre-EKF predictions)
-    training_loss_type: "unsupervised_rmspe"  # Training loss type: 'configured' (use metric+supervision),unsupervised_rmspe, unsupervised_rmape, supervised_rmspe, supervised_rmape,multimoment, 'kalman_innovation' (use K*innovation loss), or 'y_s_inv_y' (use y*S^-1*y loss), 
-    supervised_loss_type: "supervised_rmspe"  # Supervised training loss type: same options as training_loss_type
+    adaptation_loss: "unsupervised_rmspe"
+    reference_metric: "supervised_rmspe"
+    supervised_offline_loss: "supervised_rmspe"
     #multimoment_alpha: 1      # Custom alpha (default: 1.0)
     #multimoment_beta: 0       # Custom beta (default: 1.0)  
     #multimoment_regularization_term: 0  # Custom regularization (default: 1.0)    

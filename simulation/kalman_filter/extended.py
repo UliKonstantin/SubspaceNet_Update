@@ -15,6 +15,23 @@ import datetime
 
 logger = logging.getLogger("SubspaceNet.kalman_filter.extended")
 
+
+def resolve_ekf_dc_offsets(config, runtime_dc_offsets=None) -> np.ndarray:
+    """Per-source DC attractor (degrees) for the EKF sine-accel model."""
+    m = config.system_model.M
+    if runtime_dc_offsets is not None:
+        arr = np.atleast_1d(np.asarray(runtime_dc_offsets, dtype=float))
+        if arr.size == 1:
+            arr = np.broadcast_to(arr, m)
+        return np.asarray(arr, dtype=float)
+    fixed = getattr(config.trajectory, "sine_accel_dc_offsets", None)
+    if fixed is not None:
+        arr = np.atleast_1d(np.asarray(fixed, dtype=float))
+        if arr.size == 1:
+            arr = np.broadcast_to(arr, m)
+        return np.asarray(arr, dtype=float)
+    return np.zeros(m, dtype=float)
+
 # Add file handler for debug logs
 def setup_debug_file_logging():
     """Setup file logging for EKF debug messages."""
@@ -102,7 +119,7 @@ class ExtendedKalmanFilter1D:
         logger.debug(f"Initialized Extended Kalman Filter for source {source_idx} with R={R}, P0={P0}, device={device}")
     
     @classmethod
-    def from_config(cls, config, trajectory_type=None, device=None, initial_time=0.0):
+    def from_config(cls, config, trajectory_type=None, device=None, initial_time=0.0, dc_offsets=None):
         """
         Get ExtendedKalmanFilter1D parameters from configuration.
         
@@ -119,8 +136,13 @@ class ExtendedKalmanFilter1D:
         if trajectory_type is None:
             trajectory_type = config.trajectory.trajectory_type
         
-        # Get process noise from Kalman filter config (prioritize KF config over trajectory config)
-        if hasattr(config.kalman_filter, 'process_noise_std_dev') and config.kalman_filter.process_noise_std_dev is not None:
+        # Get process noise — for sine-accel match GT trajectory physics (sine_accel_noise_std).
+        if trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
+            kf_process_noise_std = config.trajectory.sine_accel_noise_std
+            logger.info(
+                f"Using trajectory sine_accel_noise_std for EKF process model: {kf_process_noise_std}"
+            )
+        elif hasattr(config.kalman_filter, 'process_noise_std_dev') and config.kalman_filter.process_noise_std_dev is not None:
             kf_process_noise_std = config.kalman_filter.process_noise_std_dev
             logger.info(f"Using Kalman filter process noise: {kf_process_noise_std}")
         else:
@@ -154,11 +176,14 @@ class ExtendedKalmanFilter1D:
                 raise ValueError(f"sine_accel_kappa array length ({len(kappa)}) must match number of sources ({config.system_model.M})")
             
             # Create state model with source-specific parameters and initial time
-            state_model = SineAccelStateModel(omega0, kappa, noise_std, device=device, initial_time=initial_time)
+            dc_arr = resolve_ekf_dc_offsets(config, dc_offsets)
+            state_model = SineAccelStateModel(
+                omega0, kappa, noise_std, device=device, initial_time=initial_time, dc_offset=dc_arr
+            )
             
             logger.info(f"Using source-specific sine acceleration model with initial_time={initial_time}:")
             for i, (om, kap) in enumerate(zip(omega0, kappa)):
-                logger.info(f"  Source {i}: ω₀={om}, κ={kap}, σ={noise_std}")
+                logger.info(f"  Source {i}: ω₀={om}, κ={kap}, σ={noise_std}, dc_offset={float(dc_arr[i])}")
             
         elif trajectory_type == TrajectoryType.MULT_NOISE_NONLINEAR:
             # Get multiplicative noise model parameters
@@ -171,11 +196,16 @@ class ExtendedKalmanFilter1D:
             logger.info(f"Using multiplicative noise model with ω₀={omega0}, amp={amp}, σ={base_std}")
             
         else:
-            # Default to random walk model for other types
-            # Use KF process noise instead of trajectory noise
-            noise_std = kf_process_noise_std
-            state_model = SineAccelStateModel(0.0, 0.0, noise_std, device=device, initial_time=initial_time)
-            logger.info(f"Using random walk model with σ={noise_std}")
+            # Random walk — match GT random_walk_step (noise in degrees → radians in filter)
+            if trajectory_type == TrajectoryType.RANDOM_WALK:
+                noise_std = config.trajectory.random_walk_std_dev
+            else:
+                noise_std = kf_process_noise_std
+            state_model = SineAccelStateModel(
+                0.0, 0.0, noise_std, device=device, initial_time=initial_time,
+                damping=1.0, angle_params_in_degrees=(trajectory_type == TrajectoryType.RANDOM_WALK),
+            )
+            logger.info(f"Using random-walk model with σ={noise_std}")
         
         # Get measurement noise and initial covariance
         kf_R = config.kalman_filter.measurement_noise_std_dev ** 2
@@ -184,7 +214,7 @@ class ExtendedKalmanFilter1D:
         return state_model, kf_R, kf_P0
 
     @classmethod
-    def create_from_config(cls, config, trajectory_type=None, device=None, source_idx=0, initial_time=0.0):
+    def create_from_config(cls, config, trajectory_type=None, device=None, source_idx=0, initial_time=0.0, dc_offsets=None):
         """
         Create ExtendedKalmanFilter1D instance directly from config.
         
@@ -198,11 +228,13 @@ class ExtendedKalmanFilter1D:
         Returns:
             ExtendedKalmanFilter1D instance
         """
-        params = cls.from_config(config, trajectory_type, device=device, initial_time=initial_time)
+        params = cls.from_config(
+            config, trajectory_type, device=device, initial_time=initial_time, dc_offsets=dc_offsets
+        )
         return cls(state_model=params[0], R=params[1], P0=params[2], device=device, source_idx=source_idx)
     
     @classmethod
-    def create_filters_from_config(cls, config, num_instances=1, trajectory_type=None, device=None, initial_time=0.0):
+    def create_filters_from_config(cls, config, num_instances=1, trajectory_type=None, device=None, initial_time=0.0, dc_offsets=None):
         """
         Create multiple ExtendedKalmanFilter1D instances directly from config.
         
@@ -216,13 +248,15 @@ class ExtendedKalmanFilter1D:
         Returns:
             list: List of ExtendedKalmanFilter1D instances, each with source_idx=i
         """
-        params = cls.from_config(config, trajectory_type, device=device, initial_time=initial_time)
+        params = cls.from_config(
+            config, trajectory_type, device=device, initial_time=initial_time, dc_offsets=dc_offsets
+        )
         filters = [cls(state_model=params[0], R=params[1], P0=params[2], device=device, source_idx=i) for i in range(num_instances)]
         return filters
     
     def initialize_state(self, x0):
         """
-        Initialize the state estimate.
+        Initialize the state estimate (cold start — resets covariance to P0).
         
         Args:
             x0: Initial state estimate (scalar or tensor)
@@ -236,6 +270,32 @@ class ExtendedKalmanFilter1D:
         # Ensure P is properly initialized as tensor
         self.P = self.P0.clone()
         logger.debug(f"Initialized state to x0={x0} with covariance P0={self.P0}")
+
+    def restore_handoff_state(self, x0, P0, next_predict_time_index):
+        """
+        Restore filter posterior from the previous window (handoff).
+
+        Sets x and P without resetting to P0, and aligns the motion-model time
+        index so the next predict uses sin(ω₀·t) at t = next_predict_time_index
+        (posterior is at t-1 relative to that predict).
+        """
+        if isinstance(x0, torch.Tensor):
+            self.x = x0.to(device=self.device, dtype=torch.float32)
+        else:
+            self.x = torch.tensor(x0, dtype=torch.float32, device=self.device)
+
+        if isinstance(P0, torch.Tensor):
+            self.P = P0.to(device=self.device, dtype=torch.float32)
+        else:
+            self.P = torch.tensor(P0, dtype=torch.float32, device=self.device)
+
+        if hasattr(self.state_model, "reset_time"):
+            self.state_model.reset_time(next_predict_time_index)
+
+        logger.debug(
+            f"Handoff restore source {self.source_idx}: x={self.x.item():.6f}, "
+            f"P={self.P.item():.6f}, next_predict_t={next_predict_time_index}"
+        )
     
     def predict(self):
         """

@@ -31,6 +31,7 @@ from DCD_MUSIC.src.signal_creation import Samples
 from DCD_MUSIC.src.evaluation import get_model_based_method, evaluate_model_based
 from simulation.kalman_filter.extended import ExtendedKalmanFilter1D
 from simulation.runners.sandbox import glrt_changepoint_detection, plot_results
+from utils import drift_gates
 
 
 
@@ -38,6 +39,43 @@ logger = logging.getLogger(__name__)
 
 # Device setup for evaluation
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _compute_loss_from_type(
+    loss_type: str,
+    ekf_preds: torch.Tensor,
+    pre_ekf_preds: torch.Tensor,
+    true_angles: torch.Tensor,
+    window_size: int,
+    rmspe_criterion,
+    rmape_criterion,
+    loss_config=None,
+):
+    """Compute scalar window loss from a typed loss config string."""
+    if loss_type == "multimoment":
+        if loss_config is None:
+            raise RuntimeError("loss_config required for multimoment loss")
+        multimoment_criterion = MultiMomentInnovationConsistencyLoss(
+            alpha=getattr(loss_config, "multimoment_alpha", 1.0),
+            beta=getattr(loss_config, "multimoment_beta", 1.0),
+        ).to(device)
+        return multimoment_criterion(
+            angles_pred=pre_ekf_preds,
+            angles=ekf_preds,
+            return_components=False,
+        )
+    if loss_type == "unsupervised_rmspe":
+        return rmspe_criterion(ekf_preds, pre_ekf_preds) / window_size
+    if loss_type == "unsupervised_rmape":
+        return rmape_criterion(ekf_preds, pre_ekf_preds) / window_size
+    if loss_type == "supervised_rmspe":
+        return rmspe_criterion(ekf_preds, true_angles) / window_size
+    if loss_type == "supervised_rmape":
+        return rmape_criterion(ekf_preds, true_angles) / window_size
+    raise RuntimeError(
+        f"Unknown loss type: {loss_type}. Must be one of: "
+        "multimoment, unsupervised_rmspe, unsupervised_rmape, supervised_rmspe, supervised_rmape"
+    )
 
 
 @dataclass
@@ -63,15 +101,13 @@ class DOAMetrics:
 @dataclass
 class LossMetrics:
     """Encapsulates all loss-related metrics for a window evaluation."""
-    main_loss: float              # Primary loss (uses supervision + metric)
-    main_loss_db: float           # Primary loss in dB units (20 * log10(main_loss))
-    main_loss_config: str         # Configuration string for main loss (e.g., "supervised_rmspe")
-    online_training_reference_loss: float  # Training reference loss (uses training_loss_type)
-    online_training_reference_loss_config: str  # Configuration string for training reference loss (e.g., "multimoment")
-    pre_ekf_loss: float          # Raw model performance
-    ekf_gain_rmspe: float        # EKF improvement (RMSPE)
-    ekf_gain_rmape: float        # EKF improvement (RMAPE)
-    
+    reference_metric_loss: float       # Eval-only tracking metric (reference_metric config)
+    reference_metric_loss_db: float    # dB scale (20 * log10)
+    reference_metric_config: str       # e.g. "supervised_rmspe"
+    adaptation_loss: float             # MSIE / adaptation objective (adaptation_loss config)
+    adaptation_loss_config: str        # e.g. "unsupervised_rmspe"
+    pre_ekf_loss: float                # Raw DNN vs GT
+    ekf_gain_rmape: float              # Diagnostic RMAPE(EKF, pre-EKF)
 
 
 @dataclass
@@ -140,13 +176,12 @@ class WindowEvaluationResult:
         """Create an error result with default values."""
         return cls(
             loss_metrics=LossMetrics(
-                main_loss=float('inf'),
-                main_loss_db=float('inf'),
-                main_loss_config="error",
-                online_training_reference_loss=float('inf'),
-                online_training_reference_loss_config="error",
+                reference_metric_loss=float('inf'),
+                reference_metric_loss_db=float('inf'),
+                reference_metric_config="error",
+                adaptation_loss=float('inf'),
+                adaptation_loss_config="error",
                 pre_ekf_loss=float('inf'),
-                ekf_gain_rmspe=0.0,
                 ekf_gain_rmape=0.0
             ),
             window_metrics=WindowMetrics(
@@ -227,20 +262,34 @@ class OnlineLearning:
         else:
             logger.info(f"Drift detection will be delayed by {self.time_to_learn} windows after GLRT threshold is exceeded")
         
-        self.glrt_drift_detection_window = None  # Window index where GLRT detected drift (before time_to_learn delay)
-        self.glrt_history = []  # History of GLRT likelihood values for statistical baseline
-        self.glrt_baseline_window_size = getattr(online_config, 'glrt_baseline_window_size', 20)  # Number of windows to use for baseline
-        self.glrt_detection_z_threshold = getattr(online_config, 'glrt_detection_z_threshold', 2.5)  # Z-score threshold for drift detection
-        self.glrt_min_samples_for_statistics = getattr(online_config, 'glrt_min_samples_for_statistics', 10)  # Min samples before using statistics
+        self.glrt_drift_detection_window = None  # Action gate: window where z-score first exceeded threshold
+        self.glrt_history = []  # Rolling log-GLR samples (g-stream for Scope B)
+        self.drift_history_max_size = getattr(online_config, 'drift_history_max_size', None)
+        self.drift_z_threshold = getattr(online_config, 'drift_z_threshold', 2.5)
+        self.drift_warmup_windows = getattr(online_config, 'drift_warmup_windows', 7)
+        self.drift_guard_samples = getattr(online_config, 'drift_guard_samples', 3)
         self.use_adaptive_learning_rate = getattr(online_config, 'use_adaptive_learning_rate', False)
         self.adaptive_lr_min = getattr(online_config, 'adaptive_lr_min', 0.0005)
         self.adaptive_lr_max = getattr(online_config, 'adaptive_lr_max', 0.0356)
         self.adaptive_lr_k_sigmoid = getattr(online_config, 'adaptive_lr_k_sigmoid', 0.7336)
         self.adaptive_lr_dG0 = getattr(online_config, 'adaptive_lr_dG0', 69.2599)
-        self.glrt_history_exclusion = getattr(online_config, 'glrt_history_exclusion', 5)
         self.num_gd_steps = getattr(online_config, 'num_gd_steps', 3)
-        
-        logger.info(f"OnlineLearning handler initialized - using statistical GLRT-based drift detection (z-threshold: {self.glrt_detection_z_threshold}, baseline window: {self.glrt_baseline_window_size}, adaptive LR: {self.use_adaptive_learning_rate})")
+
+        first_g = drift_gates.first_g_window(self.drift_warmup_windows)
+        first_z = drift_gates.first_z_window(
+            self.drift_warmup_windows, self.drift_guard_samples
+        )
+        logger.info(
+            "Drift detection: scope_a_warmup=%s, scope_b_baseline_min=%s, guard_samples=%s, "
+            "z_threshold=%s (first g at window %s, first z at window %s), time_to_learn=%s",
+            self.drift_warmup_windows,
+            drift_gates.SCOPE_B_BASELINE_MIN_SAMPLES,
+            self.drift_guard_samples,
+            self.drift_z_threshold,
+            first_g,
+            first_z,
+            self.time_to_learn,
+        )
     
     def run_online_learning(self) -> Dict[str, Any]:
         """
@@ -323,33 +372,23 @@ class OnlineLearning:
             # Get loss configurations from the first result
             if all_results and all_results[0]["online_learning_results"]["pretrained_model_trajectory_results"].window_results:
                 first_window_result = all_results[0]["online_learning_results"]["pretrained_model_trajectory_results"].window_results[0]
-                main_loss_config = first_window_result.loss_metrics.main_loss_config
-                training_reference_loss_config = first_window_result.loss_metrics.online_training_reference_loss_config
+                reference_metric_config = first_window_result.loss_metrics.reference_metric_config
+                adaptation_loss_config = first_window_result.loss_metrics.adaptation_loss_config
             else:
-                main_loss_config = "unknown"
-                training_reference_loss_config = "unknown"
+                reference_metric_config = "unknown"
+                adaptation_loss_config = "unknown"
             
             # Get training and eta change info from results
             training_start_window = None
             training_end_window = None
+            drift_detection_window = None
             eta_change_windows = []
             if all_results and len(all_results) > 0:
-                # Get training info from first trajectory result
                 first_result = all_results[0]["online_learning_results"]
                 training_start_window = first_result.get("training_start_window")
                 training_end_window = first_result.get("training_end_window")
                 eta_change_windows = first_result.get("eta_change_windows", [])
-            
-            #plot_online_learning_results_structured(
-            #    self.output_dir,
-            #    pretrained_trajectory_results,
-            #    online_trajectory_results,
-            #    main_loss_config,
-            #    training_reference_loss_config,
-            #    training_start_window,
-            #    training_end_window,
-            #    eta_change_windows
-            #)
+                drift_detection_window = first_result.get("drift_detection_window")
             
             # ALSO call the new direct averaged plotting function
             if averaged_results_across_trajectories.get("status") == "success":
@@ -360,78 +399,108 @@ class OnlineLearning:
                     self.output_dir,
                     averaged_data["averaged_pretrained_trajectory"],
                     averaged_data["averaged_online_trajectory"],
-                    main_loss_config,
-                    training_reference_loss_config,
-                    training_start_window,
-                    training_end_window,
-                    eta_change_windows,
-                    averaged_data.get("averaged_supervised_trajectory")
+                    reference_metric_config,
+                    adaptation_loss_config,
+                    training_start_window=training_start_window,
+                    training_end_window=training_end_window,
+                    drift_detection_window=drift_detection_window,
+                    eta_change_windows=eta_change_windows,
+                    averaged_supervised_metrics=averaged_data.get("averaged_supervised_trajectory"),
                 )
             
             # GLRT drift detection averaged plotting (using results from averaging function)
             glrt_results = averaged_results_across_trajectories.get("averaged_results", {}).get("glrt_results", {})
             
+            glrt_window_offset = self.drift_warmup_windows
+            eta_markers = eta_change_windows if eta_change_windows else None
+            gate_milestones = drift_gates.drift_detection_milestones(
+                self.drift_warmup_windows, self.drift_guard_samples
+            )
+
             # Plot reference loss GLRT results
-            if "ref_loss" in glrt_results:
-                ref_data = glrt_results["ref_loss"]
+            if "adaptation_loss" in glrt_results:
+                ref_data = glrt_results["adaptation_loss"]
                 avg_ref_losses = ref_data["avg_losses"]
                 min_segment_size = ref_data["min_segment_size"]
+                plot_offset = ref_data.get("window_index_offset", glrt_window_offset)
                 
                 if len(avg_ref_losses) >= 2 * min_segment_size + 1:
                     try:
                         ref_changepoint, ref_log_glr, ref_all_log_glr, ref_candidate_points = glrt_changepoint_detection(
                             avg_ref_losses, min_segment_size=min_segment_size
                         )
-                        ref_fig_loss, ref_fig_glrt = plot_results(avg_ref_losses, ref_changepoint, ref_all_log_glr, ref_candidate_points)
-                        title = f'GLRT Drift Detection - Reference Loss (Averaged across {ref_data["trajectory_count"]} trajectories)'
+                        ref_fig_loss, ref_fig_glrt = plot_results(
+                            avg_ref_losses, ref_changepoint, ref_all_log_glr, ref_candidate_points,
+                            window_index_offset=plot_offset, event_windows=eta_markers,
+                            gate_milestones=gate_milestones,
+                        )
+                        title = f'GLRT Drift Detection - Adaptation Loss (Averaged across {ref_data["trajectory_count"]} trajectories)'
                         if ref_data["avg_changepoint_window"] is not None:
                             title += f'\nAvg Changepoint Window: {ref_data["avg_changepoint_window"]:.2f} ± {ref_data["std_changepoint_window"]:.2f}, Avg Log-GLR: {ref_data["avg_likelihood"]:.4f} ± {ref_data["std_likelihood"]:.4f}'
                         ref_fig_loss.suptitle(title + ' - Loss', fontsize=14)
                         ref_fig_glrt.suptitle(title + ' - GLRT Statistics', fontsize=14)
                         ref_fig_loss.subplots_adjust(top=0.88)  # Adjust spacing after suptitle
                         ref_fig_glrt.subplots_adjust(top=0.88)  # Adjust spacing after suptitle
-                        ref_loss_plot_path = self.output_dir / "glrt_ref_loss_averaged_loss.png"
-                        ref_glrt_plot_path = self.output_dir / "glrt_ref_loss_averaged_glrt.png"
+                        ref_loss_plot_path = self.output_dir / "glrt_adaptation_loss_averaged_loss.png"
+                        ref_glrt_plot_path = self.output_dir / "glrt_adaptation_loss_averaged_glrt.png"
                         ref_fig_loss.savefig(ref_loss_plot_path, dpi=150, bbox_inches='tight')
                         ref_fig_glrt.savefig(ref_glrt_plot_path, dpi=150, bbox_inches='tight')
                         plt.close(ref_fig_loss)
                         plt.close(ref_fig_glrt)
                         logger.info(f"Saved averaged GLRT reference loss plots to {ref_loss_plot_path} and {ref_glrt_plot_path}")
-                        logger.info(f"Reference Loss GLRT: Avg Changepoint = {ref_data['avg_changepoint_window']:.2f} ± {ref_data['std_changepoint_window']:.2f}, "
+                        logger.info(f"Adaptation Loss GLRT: Avg Changepoint = {ref_data['avg_changepoint_window']:.2f} ± {ref_data['std_changepoint_window']:.2f}, "
                                    f"Avg Log-GLR = {ref_data['avg_likelihood']:.4f} ± {ref_data['std_likelihood']:.4f}")
                     except Exception as e:
                         logger.warning(f"Failed to plot averaged GLRT reference loss results: {e}")
             
             # Plot main loss GLRT results
-            if "main_loss" in glrt_results:
-                main_data = glrt_results["main_loss"]
+            if "reference_metric" in glrt_results:
+                main_data = glrt_results["reference_metric"]
                 avg_main_losses = main_data["avg_losses"]
                 min_segment_size = main_data["min_segment_size"]
+                plot_offset = main_data.get("window_index_offset", glrt_window_offset)
                 
                 if len(avg_main_losses) >= 2 * min_segment_size + 1:
                     try:
                         main_changepoint, main_log_glr, main_all_log_glr, main_candidate_points = glrt_changepoint_detection(
                             avg_main_losses, min_segment_size=min_segment_size
                         )
-                        main_fig_loss, main_fig_glrt = plot_results(avg_main_losses, main_changepoint, main_all_log_glr, main_candidate_points)
-                        title = f'GLRT Drift Detection - Main Loss (Averaged across {main_data["trajectory_count"]} trajectories)'
+                        main_fig_loss, main_fig_glrt = plot_results(
+                            avg_main_losses, main_changepoint, main_all_log_glr, main_candidate_points,
+                            window_index_offset=plot_offset, event_windows=eta_markers,
+                            gate_milestones=gate_milestones,
+                        )
+                        title = f'GLRT Drift Detection - Reference Metric (Averaged across {main_data["trajectory_count"]} trajectories)'
                         if main_data["avg_changepoint_window"] is not None:
                             title += f'\nAvg Changepoint Window: {main_data["avg_changepoint_window"]:.2f} ± {main_data["std_changepoint_window"]:.2f}, Avg Log-GLR: {main_data["avg_likelihood"]:.4f} ± {main_data["std_likelihood"]:.4f}'
                         main_fig_loss.suptitle(title + ' - Loss', fontsize=14)
                         main_fig_glrt.suptitle(title + ' - GLRT Statistics', fontsize=14)
                         main_fig_loss.subplots_adjust(top=0.88)  # Adjust spacing after suptitle
                         main_fig_glrt.subplots_adjust(top=0.88)  # Adjust spacing after suptitle
-                        main_loss_plot_path = self.output_dir / "glrt_main_loss_averaged_loss.png"
-                        main_glrt_plot_path = self.output_dir / "glrt_main_loss_averaged_glrt.png"
+                        main_loss_plot_path = self.output_dir / "glrt_reference_metric_averaged_loss.png"
+                        main_glrt_plot_path = self.output_dir / "glrt_reference_metric_averaged_glrt.png"
                         main_fig_loss.savefig(main_loss_plot_path, dpi=150, bbox_inches='tight')
                         main_fig_glrt.savefig(main_glrt_plot_path, dpi=150, bbox_inches='tight')
                         plt.close(main_fig_loss)
                         plt.close(main_fig_glrt)
                         logger.info(f"Saved averaged GLRT main loss plots to {main_loss_plot_path} and {main_glrt_plot_path}")
-                        logger.info(f"Main Loss GLRT: Avg Changepoint = {main_data['avg_changepoint_window']:.2f} ± {main_data['std_changepoint_window']:.2f}, "
+                        logger.info(f"Reference Metric GLRT: Avg Changepoint = {main_data['avg_changepoint_window']:.2f} ± {main_data['std_changepoint_window']:.2f}, "
                                    f"Avg Log-GLR = {main_data['avg_likelihood']:.4f} ± {main_data['std_likelihood']:.4f}")
                     except Exception as e:
                         logger.warning(f"Failed to plot averaged GLRT main loss results: {e}")
+
+            if getattr(self.config.online_learning, "plot_trajectory", False):
+                plot_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                stride = self.config.online_learning.stride
+                for traj_idx, traj_result in enumerate(pretrained_trajectory_results):
+                    suffix = f"_traj{traj_idx}" if len(pretrained_trajectory_results) > 1 else ""
+                    plot_online_learning_trajectory(
+                        traj_result.window_labels,
+                        self.output_dir,
+                        f"{plot_ts}{suffix}",
+                        window_indices=traj_result.window_indices,
+                        stride=stride,
+                    )
             
             logger.info(f"Online learning completed over {dataset_size} trajectories")
             
@@ -444,7 +513,8 @@ class OnlineLearning:
                     "dataset_size": dataset_size,
                     "training_start_window": training_start_window,
                     "training_end_window": training_end_window,
-                    "eta_change_windows": eta_change_windows
+                    "eta_change_windows": eta_change_windows,
+                    "drift_detection_window": drift_detection_window,
                 },
                 "drift_detection_dicts": all_drift_detection_dicts
             }
@@ -456,8 +526,8 @@ class OnlineLearning:
                 if "glrt_results" in averaged_results_across_trajectories["averaged_results"]:
                     return_results["glrt_results"] = averaged_results_across_trajectories["averaged_results"]["glrt_results"]
                     # Extract z-score and learning rate from GLRT results for easier access
-                    if "main_loss" in return_results["glrt_results"]:
-                        main_glrt = return_results["glrt_results"]["main_loss"]
+                    if "adaptation_loss" in return_results["glrt_results"]:
+                        main_glrt = return_results["glrt_results"]["adaptation_loss"]
                         return_results["avg_glrt_z_score"] = main_glrt.get("avg_z_score")
                         return_results["std_glrt_z_score"] = main_glrt.get("std_z_score")
                         return_results["avg_learning_rate_at_detection"] = main_glrt.get("avg_learning_rate")
@@ -536,6 +606,9 @@ class OnlineLearning:
             current_eta = system_model_params.eta
             online_learning_dataset.update_eta(current_eta)
             logger.info(f"Initialized trajectory with eta = {current_eta:.4f}")
+            self._trajectory_dc_offsets = getattr(
+                online_learning_dataset.generator, "sine_accel_dc_offsets", None
+            )
             
             # Create dataloader from on-demand dataset
             from torch.utils.data import DataLoader
@@ -576,16 +649,16 @@ class OnlineLearning:
             drift_detection_dicts = []
             
             # GLRT drift detection tracking variables
-            glrt_ref_loss_changepoint_window = None  # Most likely window where change occurred (reference loss)
-            glrt_ref_loss_likelihood = None  # Log-GLR value for reference loss
-            glrt_ref_loss_all_log_glr = None  # All log-GLR values for reference loss
-            glrt_ref_loss_candidate_points = None  # Candidate changepoint indices for reference loss
-            glrt_ref_losses = None  # Loss values used for reference loss GLRT
-            glrt_main_loss_changepoint_window = None  # Most likely window where change occurred (main loss)
-            glrt_main_loss_likelihood = None  # Log-GLR value for main loss
-            glrt_main_loss_all_log_glr = None  # All log-GLR values for main loss
-            glrt_main_loss_candidate_points = None  # Candidate changepoint indices for main loss
-            glrt_main_losses = None  # Loss values used for main loss GLRT
+            glrt_adaptation_loss_changepoint_window = None
+            glrt_adaptation_loss_likelihood = None
+            glrt_adaptation_loss_all_log_glr = None
+            glrt_adaptation_loss_candidate_points = None
+            glrt_adaptation_losses = None
+            glrt_reference_metric_changepoint_window = None
+            glrt_reference_metric_likelihood = None
+            glrt_reference_metric_all_log_glr = None
+            glrt_reference_metric_candidate_points = None
+            glrt_reference_metric_losses = None
             current_glrt_likelihood = None  # Current GLRT likelihood for adaptive learning rate (persists across windows)
             current_glrt_z_score = None  # Z-score normalized GLRT for adaptive learning rate
             current_glrt_baseline_mean = None  # Baseline mean of GLRT history for adaptive learning rate (persists across windows)
@@ -664,88 +737,132 @@ class OnlineLearning:
                 # Add window result to trajectory results
                 trajectory_results.add_window_result(window_idx, window_result, self.system_model.params.eta, labels_single_window_list_of_arrays)
                 
-                # GLRT drift detection on trajectory results
-                # Extract losses for GLRT analysis
-                min_segment_size = 3  # Minimum windows needed for GLRT
-                # Need at least 2*min_segment_size+1 windows to have at least one candidate changepoint
-                if len(trajectory_results.window_results) >= 2 * min_segment_size + 1:
-                    # Extract online_training_reference_loss values
-                    ref_losses = [wr.loss_metrics.online_training_reference_loss for wr in trajectory_results.window_results]
-                    
-                    # Extract main_loss values
-                    main_losses = [wr.loss_metrics.main_loss for wr in trajectory_results.window_results]
-                    
-                    # Run GLRT on reference loss
-                    ref_changepoint, ref_log_glr, ref_all_log_glr, ref_candidate_points = glrt_changepoint_detection(ref_losses, min_segment_size=min_segment_size)
-                    glrt_ref_loss_changepoint_window = ref_changepoint
-                    glrt_ref_loss_likelihood = ref_log_glr
-                    glrt_ref_loss_all_log_glr = ref_all_log_glr
-                    glrt_ref_loss_candidate_points = ref_candidate_points
-                    glrt_ref_losses = ref_losses
-                    logger.info(f"GLRT (ref_loss) - Window {window_idx}: Changepoint at window {ref_changepoint}, Log-GLR: {ref_log_glr:.4f}")
-                    
-                    # Run GLRT on main loss
-                    main_changepoint, main_log_glr, main_all_log_glr, main_candidate_points = glrt_changepoint_detection(main_losses, min_segment_size=min_segment_size)
-                    glrt_main_loss_changepoint_window = main_changepoint
-                    glrt_main_loss_likelihood = main_log_glr
-                    glrt_main_loss_all_log_glr = main_all_log_glr
-                    glrt_main_loss_candidate_points = main_candidate_points
-                    glrt_main_losses = main_losses
-                    current_glrt_likelihood = main_log_glr
-                    
-                    # Update GLRT history for statistical baseline
-                    self.glrt_history.append(main_log_glr)
-                    if len(self.glrt_history) > self.glrt_baseline_window_size:
-                        self.glrt_history = self.glrt_history[-self.glrt_baseline_window_size:]
-                    
-                    # Compute statistical baseline and z-score
-                    current_glrt_z_score = None
-                    if len(self.glrt_history) >= self.glrt_min_samples_for_statistics:
-                        baseline_values = np.array(self.glrt_history[:-self.glrt_history_exclusion])
-                        baseline_mean = np.mean(baseline_values)
-                        baseline_std = np.std(baseline_values)
-                        current_glrt_baseline_mean = baseline_mean
-                        
-                        if baseline_std > 1e-10:
-                            current_glrt_z_score = (main_log_glr - baseline_mean) / baseline_std
+                # --- GLRT drift detection (adaptation_loss = MSIE trigger stream) ---
+                if window_idx >= self.drift_warmup_windows:
+                    min_segment_size = drift_gates.glrt_min_segment_size()
+                    post_warmup_results = trajectory_results.window_results[
+                        self.drift_warmup_windows :
+                    ]
+                    adaptation_losses = [
+                        wr.loss_metrics.adaptation_loss for wr in post_warmup_results
+                    ]
+                    reference_metric_losses = [
+                        wr.loss_metrics.reference_metric_loss for wr in post_warmup_results
+                    ]
+
+                    if drift_gates.has_enough_losses_for_changepoint_glr(
+                        len(adaptation_losses), min_segment_size
+                    ):
+                        adapt_changepoint, adapt_log_glr, adapt_all_log_glr, adapt_candidate_points = glrt_changepoint_detection(
+                            adaptation_losses, min_segment_size=min_segment_size
+                        )
+                        glrt_adaptation_loss_changepoint_window = adapt_changepoint + self.drift_warmup_windows
+                        glrt_adaptation_loss_likelihood = adapt_log_glr
+                        glrt_adaptation_loss_all_log_glr = adapt_all_log_glr
+                        glrt_adaptation_loss_candidate_points = adapt_candidate_points
+                        glrt_adaptation_losses = adaptation_losses
+                        logger.info(
+                            f"GLRT (adaptation_loss) - Window {window_idx}: "
+                            f"Changepoint at absolute window {glrt_adaptation_loss_changepoint_window} "
+                            f"(post-warmup idx {adapt_changepoint}), Log-GLR: {adapt_log_glr:.4f}"
+                        )
+
+                        ref_changepoint, ref_log_glr, ref_all_log_glr, ref_candidate_points = glrt_changepoint_detection(
+                            reference_metric_losses, min_segment_size=min_segment_size
+                        )
+                        glrt_reference_metric_changepoint_window = ref_changepoint + self.drift_warmup_windows
+                        glrt_reference_metric_likelihood = ref_log_glr
+                        glrt_reference_metric_all_log_glr = ref_all_log_glr
+                        glrt_reference_metric_candidate_points = ref_candidate_points
+                        glrt_reference_metric_losses = reference_metric_losses
+                        current_glrt_likelihood = adapt_log_glr
+
+                        self.glrt_history.append(adapt_log_glr)
+                        if (
+                            self.drift_history_max_size is not None
+                            and len(self.glrt_history) > self.drift_history_max_size
+                        ):
+                            self.glrt_history = self.glrt_history[-self.drift_history_max_size:]
+
+                        current_glrt_z_score = None
+                        history_len = len(self.glrt_history)
+                        if drift_gates.can_compute_drift_z_score(
+                            history_len,
+                            self.drift_guard_samples,
+                        ):
+                            current_glrt_z_score, baseline_mean, baseline_std = drift_gates.compute_drift_z_score(
+                                adapt_log_glr,
+                                self.glrt_history,
+                                self.drift_guard_samples,
+                            )
+                            current_glrt_baseline_mean = baseline_mean
+
+                            logger.info(
+                                f"GLRT (adaptation_loss) - Window {window_idx}: "
+                                f"Changepoint at absolute window {glrt_adaptation_loss_changepoint_window} "
+                                f"(post-warmup idx {adapt_changepoint}), Log-GLR: {adapt_log_glr:.4f}, "
+                                f"Z-score: {current_glrt_z_score:.4f} "
+                                f"(baseline: {baseline_mean:.4f} ± {baseline_std:.4f}, "
+                                f"guard_samples={self.drift_guard_samples})"
+                            )
+
+                            if (
+                                current_glrt_z_score is not None
+                                and current_glrt_z_score > self.drift_z_threshold
+                                and self.glrt_drift_detection_window is None
+                                and not self.drift_detected
+                            ):
+                                self.glrt_drift_detection_window = window_idx
+                                self.glrt_z_score_at_detection = current_glrt_z_score
+
+                                import math
+                                base_lr = getattr(self.config.online_learning, "learning_rate", 1e-3)
+                                if self.use_adaptive_learning_rate:
+                                    G = adapt_log_glr if adapt_log_glr is not None else self.adaptive_lr_dG0
+                                    dG = G - baseline_mean if baseline_mean is not None else 0.0
+                                    log_lr_min = math.log10(self.adaptive_lr_min)
+                                    log_lr_max = math.log10(self.adaptive_lr_max)
+                                    log_lr = log_lr_min + (log_lr_max - log_lr_min) / (
+                                        1.0 + math.exp(-self.adaptive_lr_k_sigmoid * (dG - self.adaptive_lr_dG0))
+                                    )
+                                    self.learning_rate_at_detection = 10 ** log_lr
+                                else:
+                                    self.learning_rate_at_detection = base_lr
+
+                                time_to_learn = self.time_to_learn if self.time_to_learn is not None else 0
+                                trigger_window = window_idx + time_to_learn
+                                logger.info(
+                                    f"Drift detected at window {window_idx} "
+                                    f"(z={current_glrt_z_score:.4f} > {self.drift_z_threshold}). "
+                                    f"Training starts at window {trigger_window} "
+                                    f"(time_to_learn={time_to_learn}). "
+                                    f"LR at detection: {self.learning_rate_at_detection:.6f}"
+                                )
+
+                                drift_detection_dicts.append({
+                                    "eta": self.system_model.params.eta,
+                                    "window_idx": window_idx,
+                                    "baseline_mean": baseline_mean,
+                                    "adaptation_log_glr": adapt_log_glr,
+                                    "baseline_std": baseline_std,
+                                    "current_glrt_z_score": current_glrt_z_score,
+                                    "learning_rate_at_detection": self.learning_rate_at_detection,
+                                })
                         else:
-                            current_glrt_z_score = 0.0
-                        
-                        logger.info(f"GLRT (main_loss) - Window {window_idx}: Changepoint at window {main_changepoint}, Log-GLR: {main_log_glr:.4f}, Z-score: {current_glrt_z_score:.4f} (baseline: {baseline_mean:.4f} ± {baseline_std:.4f})")
-                        
-                        # Statistical drift detection: detect when z-score exceeds threshold
-                        if current_glrt_z_score > self.glrt_detection_z_threshold and self.glrt_drift_detection_window is None and not self.drift_detected:
-                            self.glrt_drift_detection_window = window_idx
-                            self.glrt_z_score_at_detection = current_glrt_z_score
-                            
-                            # Calculate learning rate at detection time
-                            import math
-                            base_lr = getattr(self.config.online_learning, 'learning_rate', 1e-3)
-                            if self.use_adaptive_learning_rate:
-                                G = main_log_glr if main_log_glr is not None else self.adaptive_lr_dG0
-                                dG = G - baseline_mean if baseline_mean is not None else 0.0
-                                log_lr_min = math.log10(self.adaptive_lr_min)
-                                log_lr_max = math.log10(self.adaptive_lr_max)
-                                log_lr = log_lr_min + (log_lr_max - log_lr_min) / (1.0 + math.exp(-self.adaptive_lr_k_sigmoid * (dG - self.adaptive_lr_dG0)))
-                                self.learning_rate_at_detection = 10 ** log_lr
-                            else:
-                                self.learning_rate_at_detection = base_lr
-                            
-                            time_to_learn = self.time_to_learn if self.time_to_learn is not None else 0
-                            trigger_window = window_idx + time_to_learn
-                            logger.info(f"GLRT drift detected at window {window_idx} (GLRT z-score: {current_glrt_z_score:.4f} > {self.glrt_detection_z_threshold}, raw GLRT: {main_log_glr:.4f}). Learning will trigger at window {trigger_window} (after {time_to_learn} windows delay). LR at detection: {self.learning_rate_at_detection:.6f}")
-                            
-                            drift_detection_dicts.append({
-                                "eta": self.system_model.params.eta,
-                                "window_idx": window_idx,
-                                "baseline_mean": baseline_mean,
-                                "main_log_glr": main_log_glr,
-                                "baseline_std": baseline_std,
-                                "current_glrt_z_score": current_glrt_z_score,
-                                "learning_rate_at_detection": self.learning_rate_at_detection
-                            })
+                            logger.info(
+                                f"Drift baseline warmup - Window {window_idx}: "
+                                f"collecting g-history ({history_len - self.drift_guard_samples if history_len > self.drift_guard_samples else 0}/"
+                                f"{drift_gates.SCOPE_B_BASELINE_MIN_SAMPLES} baseline samples), "
+                                f"z-score from window "
+                                f"{drift_gates.first_z_window(self.drift_warmup_windows, self.drift_guard_samples)}"
+                            )
                     else:
-                        logger.info(f"GLRT (main_loss) - Window {window_idx}: Changepoint at window {main_changepoint}, Log-GLR: {main_log_glr:.4f} (building baseline: {len(self.glrt_history)}/{self.glrt_min_samples_for_statistics} samples)")
+                        first_g = drift_gates.first_g_window(self.drift_warmup_windows)
+                        logger.info(
+                            f"Drift Scope A warmup - Window {window_idx}: "
+                            f"need {2 * min_segment_size + 1} post-warmup losses "
+                            f"(first g at window {first_g})"
+                        )
                 
                 # Check if we've reached the window to trigger drift detection (detection_window + time_to_learn)
                 # This check runs every window, not just when GLRT is calculated
@@ -764,14 +881,14 @@ class OnlineLearning:
                 last_ekf_predictions = window_result.doa_metrics.ekf_predictions
                 last_ekf_covariances = window_result.step_metrics.covariances
                 
-                logger.info(f"Window {window_idx}: Main Loss = {window_result.loss_metrics.main_loss:.6f} ({window_result.loss_metrics.main_loss_config}), Cov = {window_result.window_metrics.avg_covariance:.6f} (current eta={self.system_model.params.eta:.4f})")
+                logger.info(f"Window {window_idx}: Reference Metric = {window_result.loss_metrics.reference_metric_loss:.6f} ({window_result.loss_metrics.reference_metric_config}), Cov = {window_result.window_metrics.avg_covariance:.6f} (current eta={self.system_model.params.eta:.4f})")
                 
                 # Log all loss metrics for comparison
-                logger.info(f"Window {window_idx}: Pre-EKF Loss = {window_result.loss_metrics.pre_ekf_loss:.6f}, Main Loss = {window_result.loss_metrics.main_loss:.6f} ({window_result.loss_metrics.main_loss_config}), Training Ref Loss = {window_result.loss_metrics.online_training_reference_loss:.6f} ({window_result.loss_metrics.online_training_reference_loss_config}), Cov = {window_result.window_metrics.avg_covariance:.6f} (eta={self.system_model.params.eta:.4f})")
+                logger.info(f"Window {window_idx}: Pre-EKF Loss = {window_result.loss_metrics.pre_ekf_loss:.6f}, Reference Metric = {window_result.loss_metrics.reference_metric_loss:.6f} ({window_result.loss_metrics.reference_metric_config}), Training Ref Loss = {window_result.loss_metrics.adaptation_loss:.6f} ({window_result.loss_metrics.adaptation_loss_config}), Cov = {window_result.window_metrics.avg_covariance:.6f} (eta={self.system_model.params.eta:.4f})")
                 
                 # Store trained model results for comparison
                 trained_subspacenet_loss = window_result.loss_metrics.pre_ekf_loss
-                trained_ekf_loss = window_result.loss_metrics.main_loss
+                trained_ekf_loss = window_result.loss_metrics.reference_metric_loss
                 
                 # Dual model processing logic
                 if self.drift_detected:
@@ -787,7 +904,7 @@ class OnlineLearning:
                         log_online_learning_window_summary(
                             subspacenet_loss=trained_subspacenet_loss,
                             ekf_loss=trained_ekf_loss,
-                            online_ekf_loss=online_window_result.loss_metrics.main_loss,
+                            online_ekf_loss=online_window_result.loss_metrics.reference_metric_loss,
                             current_eta=self.system_model.params.eta,
                             is_near_field=hasattr(self.trained_model, 'field_type') and self.trained_model.field_type.lower() == "near",
                             trajectory_idx=trajectory_idx,
@@ -827,13 +944,13 @@ class OnlineLearning:
                         # Add training result to online trajectory results
                         online_trajectory_results.add_window_result(window_idx, training_result, self.system_model.params.eta, labels_single_window_list_of_arrays)
                         
-                        logger.info(f"Online training - Window {window_idx}: Main Loss = {training_result.loss_metrics.main_loss:.6f} ({training_result.loss_metrics.main_loss_config}), Cov = {training_result.window_metrics.avg_covariance:.6f}, Pre-EKF Loss = {training_result.loss_metrics.pre_ekf_loss:.6f}")
+                        logger.info(f"Online training - Window {window_idx}: Reference Metric = {training_result.loss_metrics.reference_metric_loss:.6f} ({training_result.loss_metrics.reference_metric_config}), Cov = {training_result.window_metrics.avg_covariance:.6f}, Pre-EKF Loss = {training_result.loss_metrics.pre_ekf_loss:.6f}")
                         
                         # Log online learning window summary (learning phase)
                         log_online_learning_window_summary(
                             subspacenet_loss=trained_subspacenet_loss,
                             ekf_loss=trained_ekf_loss,
-                            online_ekf_loss=training_result.loss_metrics.main_loss,
+                            online_ekf_loss=training_result.loss_metrics.reference_metric_loss,
                             current_eta=self.system_model.params.eta,
                             is_near_field=hasattr(self.trained_model, 'field_type') and self.trained_model.field_type.lower() == "near",
                             trajectory_idx=trajectory_idx,
@@ -857,8 +974,7 @@ class OnlineLearning:
                         # Create supervised loss config object
                         from copy import deepcopy
                         supervised_loss_config = deepcopy(self.config.online_learning.loss_config)
-                        # Override the training_loss_type with supervised_loss_type
-                        supervised_loss_config.training_loss_type = self.config.online_learning.loss_config.supervised_loss_type
+                        supervised_loss_config.adaptation_loss = self.config.online_learning.loss_config.supervised_offline_loss
                         
                         supervised_training_result = self._online_training_window(
                             time_series_single_window, 
@@ -870,13 +986,14 @@ class OnlineLearning:
                             last_ekf_predictions=supervised_last_ekf_predictions,
                             last_ekf_covariances=supervised_last_ekf_covariances,
                             model=self.supervised_trained_model,
-                            loss_config_override=supervised_loss_config
+                            loss_config_override=supervised_loss_config,
+                            increment_adaptation_count=False,
                         )
                         
                         # Add supervised training result to supervised trajectory results
                         supervised_trajectory_results.add_window_result(window_idx, supervised_training_result, self.system_model.params.eta, labels_single_window_list_of_arrays)
                         
-                        logger.info(f"Supervised training - Window {window_idx}: Main Loss = {supervised_training_result.loss_metrics.main_loss:.6f} ({supervised_training_result.loss_metrics.main_loss_config}), Cov = {supervised_training_result.window_metrics.avg_covariance:.6f}, Pre-EKF Loss = {supervised_training_result.loss_metrics.pre_ekf_loss:.6f}")
+                        logger.info(f"Supervised training - Window {window_idx}: Reference Metric = {supervised_training_result.loss_metrics.reference_metric_loss:.6f} ({supervised_training_result.loss_metrics.reference_metric_config}), Cov = {supervised_training_result.window_metrics.avg_covariance:.6f}, Pre-EKF Loss = {supervised_training_result.loss_metrics.pre_ekf_loss:.6f}")
                         
                         # Update supervised EKF state for next window
                         supervised_last_ekf_predictions = supervised_training_result.doa_metrics.ekf_predictions
@@ -914,16 +1031,18 @@ class OnlineLearning:
                     
                     # Training and eta change tracking
                     "eta_change_windows": eta_change_windows,
+                    "drift_detection_window": self.glrt_drift_detection_window,
                     "training_start_window": training_start_window,
                     "training_end_window": training_end_window,
                     
                     # GLRT drift detection results
-                    "glrt_ref_loss_changepoint_window": glrt_ref_loss_changepoint_window,
-                    "glrt_ref_loss_likelihood": glrt_ref_loss_likelihood,
-                    "glrt_ref_losses": glrt_ref_losses,
-                    "glrt_main_loss_changepoint_window": glrt_main_loss_changepoint_window,
-                    "glrt_main_loss_likelihood": glrt_main_loss_likelihood,
-                    "glrt_main_losses": glrt_main_losses,
+                    "glrt_adaptation_loss_changepoint_window": glrt_adaptation_loss_changepoint_window,
+                    "glrt_adaptation_loss_likelihood": glrt_adaptation_loss_likelihood,
+                    "glrt_adaptation_losses": glrt_adaptation_losses,
+                    "glrt_reference_metric_changepoint_window": glrt_reference_metric_changepoint_window,
+                    "glrt_reference_metric_likelihood": glrt_reference_metric_likelihood,
+                    "glrt_reference_metric_losses": glrt_reference_metric_losses,
+                    "glrt_loss_window_offset": self.drift_warmup_windows,
                     # GLRT z-score and learning rate at detection time
                     "glrt_z_score_at_detection": self.glrt_z_score_at_detection if hasattr(self, 'glrt_z_score_at_detection') else None,
                     "learning_rate_at_detection": self.learning_rate_at_detection if hasattr(self, 'learning_rate_at_detection') else None,
@@ -939,7 +1058,8 @@ class OnlineLearning:
 
     def _online_training_window(self, window_time_series, window_sources_num, window_labels, trajectory_idx: int = 0, window_idx: int = 0, 
                                is_first_window: bool = True, last_ekf_predictions: Optional[torch.Tensor] = None, 
-                               last_ekf_covariances: Optional[torch.Tensor] = None, model=None, loss_config_override=None) -> WindowEvaluationResult:
+                               last_ekf_covariances: Optional[torch.Tensor] = None, model=None, loss_config_override=None,
+                               increment_adaptation_count: bool = True) -> WindowEvaluationResult:
         """
         Train the provided model on a single window, then evaluate it like _evaluate_window.
         
@@ -963,14 +1083,14 @@ class OnlineLearning:
         Returns:
             WindowEvaluationResult containing all metrics and data
         """
-        # Increment training counter
-        self.online_training_count += 1
-        logger.info(f"Online training step {self.online_training_count} called for trajectory {trajectory_idx}, window {window_idx}")
-        
-        # Set learning done after 5 training calls
-        if self.online_training_count >= 5:
-            self.learning_done = True
-            logger.info(f"Online model training completed after {self.online_training_count} training windows")
+        # Increment online adaptation counter (supervised shadow model must not count)
+        online_config = self.config.online_learning
+        adaptation_window_count = getattr(online_config, "adaptation_window_count", 5)
+        if increment_adaptation_count:
+            self.online_training_count += 1
+            logger.info(f"Online training step {self.online_training_count} called for trajectory {trajectory_idx}, window {window_idx}")
+        else:
+            logger.info(f"Supervised shadow training for trajectory {trajectory_idx}, window {window_idx}")
         
         # Debug: Log input shapes
         logger.debug(f"_online_training_window input shapes: "
@@ -1107,13 +1227,14 @@ class OnlineLearning:
                         # Use the _initialize_ekf_state method to properly initialize state and covariance
                         # This ensures we use the last predictions and covariances from the previous window
                         self._initialize_ekf_state(
-                            step=0, 
-                            num_sources_this_step=num_sources_this_step, 
+                            step=0,
+                            num_sources_this_step=num_sources_this_step,
                             true_angles_this_step=true_angles_this_step,
-                            ekf_filters=self.training_ekf_filters, 
-                            is_first_window=False,  # Not first window since we're in online training
-                            last_ekf_predictions=last_ekf_predictions, 
-                            last_ekf_covariances=last_ekf_covariances
+                            ekf_filters=self.training_ekf_filters,
+                            is_first_window=False,
+                            last_ekf_predictions=last_ekf_predictions,
+                            last_ekf_covariances=last_ekf_covariances,
+                            window_idx=window_idx,
                         )
                         
                         # Apply EKF to each source prediction using tensor inputs to preserve gradients
@@ -1255,8 +1376,16 @@ class OnlineLearning:
             num_sources_this_step = sources_num_per_step[step]
             true_angles_this_step = labels_per_step_list[step][:num_sources_this_step]
             
-            self._initialize_ekf_state(step, num_sources_this_step, true_angles_this_step, 
-                                     ekf_filters, is_first_window, last_ekf_predictions, last_ekf_covariances)
+            self._initialize_ekf_state(
+                step,
+                num_sources_this_step,
+                true_angles_this_step,
+                ekf_filters,
+                is_first_window,
+                last_ekf_predictions,
+                last_ekf_covariances,
+                window_idx=window_idx,
+            )
             
             # Process single step
             success, step_result = self._process_single_step(
@@ -1276,9 +1405,16 @@ class OnlineLearning:
         if result.is_valid:
             logger.info(f"Online training window {window_idx}: "
                        f"Pre-EKF Loss = {result.loss_metrics.pre_ekf_loss:.6f}, "
-                       f"Main Loss = {result.loss_metrics.main_loss:.6f} ({result.loss_metrics.main_loss_config}), "
+                       f"Reference Metric = {result.loss_metrics.reference_metric_loss:.6f} ({result.loss_metrics.reference_metric_config}), "
                        f"Avg Cov = {result.window_metrics.avg_covariance:.6f}, "
                        f"Training Loss = {avg_training_loss:.6f}")
+        
+        if increment_adaptation_count and self.online_training_count >= adaptation_window_count:
+            self.learning_done = True
+            logger.info(
+                f"Online model training completed after {self.online_training_count} training windows "
+                f"(adaptation_window_count={adaptation_window_count})"
+            )
         
         return result
 
@@ -1337,7 +1473,7 @@ class OnlineLearning:
             model=model
         )
         trajectory_results.add_window_result(window_idx, window_result, self.system_model.params.eta, labels)
-        logger.info(f"{model_label} - Window {window_idx}: Main Loss = {window_result.loss_metrics.main_loss:.6f} ({window_result.loss_metrics.main_loss_config}), Cov = {window_result.window_metrics.avg_covariance:.6f}")
+        logger.info(f"{model_label} - Window {window_idx}: Reference Metric = {window_result.loss_metrics.reference_metric_loss:.6f} ({window_result.loss_metrics.reference_metric_config}), Cov = {window_result.window_metrics.avg_covariance:.6f}")
         return window_result, window_result.doa_metrics.ekf_predictions, window_result.step_metrics.covariances
 
     def _validate_inputs(self, window_time_series: torch.Tensor, window_sources_num: List[int], 
@@ -1421,10 +1557,9 @@ class OnlineLearning:
         Returns:
             List of initialized EKF filter instances, each with source-specific parameters
         """
-        # Calculate the initial time based on window and step indices
-        # This ensures the EKF filters start with the correct time for oscillatory models
-        window_size = self.config.online_learning.window_size
-        initial_time = window_idx * window_size + step_idx
+        # Trajectory step index for this window/step (matches sliding-window start in the dataset).
+        stride = getattr(self.config.online_learning, "stride", self.config.online_learning.window_size)
+        initial_time = window_idx * stride + step_idx
         
         ekf_filters = []
         
@@ -1435,8 +1570,9 @@ class OnlineLearning:
                 self.config, 
                 trajectory_type=self.config.trajectory.trajectory_type,
                 device=device,
-                source_idx=i,  # Pass source index to the filter
-                initial_time=initial_time  # Pass initial time for correct oscillatory behavior
+                source_idx=i,
+                initial_time=initial_time,
+                dc_offsets=getattr(self, "_trajectory_dc_offsets", None),
             )
             ekf_filters.append(ekf_filter)
         
@@ -1445,53 +1581,67 @@ class OnlineLearning:
         
         return ekf_filters
 
-    def _initialize_ekf_state(self, step: int, num_sources_this_step: int, true_angles_this_step: np.ndarray,
-                            ekf_filters: List[ExtendedKalmanFilter1D], is_first_window: bool,
-                            last_ekf_predictions: Optional[List], last_ekf_covariances: Optional[List]) -> None:
+    def _initialize_ekf_state(
+        self,
+        step: int,
+        num_sources_this_step: int,
+        true_angles_this_step: np.ndarray,
+        ekf_filters: List[ExtendedKalmanFilter1D],
+        is_first_window: bool,
+        last_ekf_predictions: Optional[List],
+        last_ekf_covariances: Optional[List],
+        window_idx: int = 0,
+    ) -> None:
         """
         Initialize EKF state for the current step.
-        
-        Args:
-            step: Current step index
-            num_sources_this_step: Number of sources in current step
-            true_angles_this_step: Ground truth angles for current step
-            ekf_filters: List of EKF filter instances
-            is_first_window: Whether this is the first window
-            last_ekf_predictions: Last EKF predictions from previous window
-            last_ekf_covariances: Last EKF covariances from previous window
-        """
-        if step == 0:
-            if is_first_window:
-                # Initialize with true angles for first window
-                for i in range(num_sources_this_step):
-                    ekf_filters[i].initialize_state(true_angles_this_step[i])
-            else:
-                # Initialize with last predictions from previous window
-                if (last_ekf_predictions is not None and last_ekf_covariances is not None and 
 
- 
-                     last_ekf_predictions.shape[0] > 0 and last_ekf_covariances.shape[0] > 0 and
-                    last_ekf_predictions.shape[1] >= num_sources_this_step and 
-                    last_ekf_covariances.shape[1] >= num_sources_this_step):
-                    
-                    # Get the last predictions (last row of the tensor) and calculate their optimal permutation
-                    last_predictions_pre_perm = last_ekf_predictions[-1, :num_sources_this_step]
-                    true_angles_tensor = torch.tensor(true_angles_this_step, device=last_predictions_pre_perm.device)
-                    last_perm = self._get_optimal_permutation_tensor(last_predictions_pre_perm, true_angles_tensor)
-                    last_predictions = last_predictions_pre_perm[last_perm]
-                    
-                    # Get the last covariances (last row of the tensor) and apply the same permutation
-                    last_covariances_pre_perm = last_ekf_covariances[-1, :num_sources_this_step]
-                    last_covariances = last_covariances_pre_perm[last_perm]
-                    
-                    for i in range(num_sources_this_step):
-                        ekf_filters[i].initialize_state(last_predictions.flatten()[i].item())
-                        ekf_filters[i].P = last_covariances.flatten()[i].item()
-                else:
-                    # Fallback to true angles if no valid last predictions
-                    logger.warning("No valid last predictions or covariances available, falling back to true angles")
-                    for i in range(num_sources_this_step):
-                        ekf_filters[i].initialize_state(true_angles_this_step.flatten()[i].flatten())
+        Handoff (window_idx > 0, step == 0): restore x, P, and motion-model time from the
+        previous window's posterior. Skip re-filtering that overlapping step (see
+        _process_single_step) since stride < window_size revisits the same trajectory index.
+        """
+        stride = self.config.online_learning.stride
+        global_step = window_idx * stride + step
+        self._handoff_reuse_step0 = False
+
+        if step != 0:
+            return
+
+        if is_first_window:
+            for i in range(num_sources_this_step):
+                ekf_filters[i].initialize_state(true_angles_this_step[i])
+                if hasattr(ekf_filters[i].state_model, "reset_time"):
+                    ekf_filters[i].state_model.reset_time(global_step)
+            return
+
+        if (
+            last_ekf_predictions is not None
+            and last_ekf_covariances is not None
+            and last_ekf_predictions.shape[0] > 0
+            and last_ekf_covariances.shape[0] > 0
+            and last_ekf_predictions.shape[1] >= num_sources_this_step
+            and last_ekf_covariances.shape[1] >= num_sources_this_step
+        ):
+            last_predictions_pre_perm = last_ekf_predictions[-1, :num_sources_this_step]
+            true_angles_tensor = torch.tensor(true_angles_this_step, device=last_predictions_pre_perm.device)
+            last_perm = self._get_optimal_permutation_tensor(last_predictions_pre_perm, true_angles_tensor)
+            last_predictions = last_predictions_pre_perm[last_perm]
+            last_covariances_pre_perm = last_ekf_covariances[-1, :num_sources_this_step]
+            last_covariances = last_covariances_pre_perm[last_perm]
+
+            next_predict_t = global_step + 1
+            for i in range(num_sources_this_step):
+                ekf_filters[i].restore_handoff_state(
+                    last_predictions.flatten()[i].item(),
+                    last_covariances.flatten()[i].item(),
+                    next_predict_t,
+                )
+            self._handoff_reuse_step0 = True
+        else:
+            logger.warning("No valid last predictions or covariances available, falling back to true angles")
+            for i in range(num_sources_this_step):
+                ekf_filters[i].initialize_state(true_angles_this_step.flatten()[i].flatten())
+                if hasattr(ekf_filters[i].state_model, "reset_time"):
+                    ekf_filters[i].state_model.reset_time(global_step)
 
     def _process_single_step(self, step: int, time_series_steps: torch.Tensor, sources_num_per_step: List[int],
                            labels_per_step_list: List[np.ndarray], ekf_filters: List[ExtendedKalmanFilter1D],
@@ -1550,12 +1700,23 @@ class OnlineLearning:
                     step_Innovation_Covariance = []
                     
                     for i in range(num_sources_this_step):
-                        # Predict and update in one step - pass tensor directly
+                        measurement = pre_ekf_angles_pred.flatten()[i]
 
-                        predicted_angle, updated_angle, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y,Innovation_Covariance = ekf_filters[i].predict_and_update(
-                            measurement= pre_ekf_angles_pred.flatten()[i],  # Flatten to get proper indexing
-                            true_state= true_angles_this_step[i]
-                        )      
+                        if getattr(self, "_handoff_reuse_step0", False) and step == 0:
+                            # Posterior already at this trajectory step — do not re-predict/update.
+                            ekf_filter = ekf_filters[i]
+                            updated_angle = ekf_filter.x
+                            innovation = measurement - updated_angle
+                            kalman_gain = ekf_filter.P / (ekf_filter.P + ekf_filter.R)
+                            kalman_gain_times_innovation = kalman_gain * innovation
+                            y_s_inv_y = innovation * (innovation / (ekf_filter.P + ekf_filter.R))
+                            Innovation_Covariance = ekf_filter.P + ekf_filter.R
+                            predicted_angle = updated_angle
+                        else:
+                            predicted_angle, updated_angle, innovation, kalman_gain, kalman_gain_times_innovation, y_s_inv_y, Innovation_Covariance = ekf_filters[i].predict_and_update(
+                                measurement=measurement,
+                                true_state=true_angles_this_step[i],
+                            )
                         # Store prediction, covariance and innovation
                         step_predictions.append(updated_angle)
                         step_covariances.append(ekf_filters[i].P)
@@ -1680,13 +1841,12 @@ class OnlineLearning:
         else:
             # Create default loss metrics if no valid steps
             loss_metrics = LossMetrics(
-                main_loss=float('inf'),
-                main_loss_db=float('inf'),
-                main_loss_config="no_valid_steps",
-                online_training_reference_loss=float('inf'),
-                online_training_reference_loss_config="no_valid_steps",
+                reference_metric_loss=float('inf'),
+                reference_metric_loss_db=float('inf'),
+                reference_metric_config="no_valid_steps",
+                adaptation_loss=float('inf'),
+                adaptation_loss_config="no_valid_steps",
                 pre_ekf_loss=float('inf'),
-                ekf_gain_rmspe=0.0,
                 ekf_gain_rmape=0.0
             )
             avg_covariance = float('nan')
@@ -1890,12 +2050,21 @@ class OnlineLearning:
         
         # Process each step in window
         step_results_list = []
+        self._handoff_reuse_step0 = False
         for step in range(current_window_len):
             # Initialize EKF state if this is the first step
             num_sources_this_step = sources_num_per_step[step]
             true_angles_this_step = labels_per_step_list[step][:num_sources_this_step]
-            self._initialize_ekf_state(step, num_sources_this_step, true_angles_this_step, 
-                                     ekf_filters, is_first_window, last_ekf_predictions, last_ekf_covariances)
+            self._initialize_ekf_state(
+                step,
+                num_sources_this_step,
+                true_angles_this_step,
+                ekf_filters,
+                is_first_window,
+                last_ekf_predictions,
+                last_ekf_covariances,
+                window_idx=window_idx,
+            )
             # Process single step
             success, step_result = self._process_single_step(
                 step, time_series_steps, sources_num_per_step, labels_per_step_list,
@@ -1954,86 +2123,38 @@ class OnlineLearning:
         # Get window size for proper averaging
         window_size = pre_ekf_preds.shape[0]
         
-        # Main loss (what the system is optimized for - uses supervision + metric)
         if loss_config is None:
             raise RuntimeError("loss_config is required for _calculate_all_losses but was None")
-        
-        # Determine targets based on supervision mode
-        if loss_config.supervision == "supervised":
-            targets = true_angles
-        elif loss_config.supervision == "unsupervised":  # unsupervised
-            targets = pre_ekf_preds
-        else:
-            raise RuntimeError(f"Unknown supervision mode: {loss_config.supervision}. Must be one of: supervised, unsupervised")
-        
-        # Calculate main loss using supervision + metric (NOT training_loss_type)
-        main_loss_config = f"{loss_config.supervision}_{loss_config.metric}"
-        if loss_config.metric == "rmspe":
-            main_loss = rmspe_criterion(ekf_preds, targets) / window_size  # RMSPE sums across batch, divide by window size
-        elif loss_config.metric == "rmape": # rmape
-            main_loss = rmape_criterion(ekf_preds, targets) / window_size  # RMAPE sums across batch, divide by window size
-        else:
-            raise RuntimeError(f"Unknown metric: {loss_config.metric}. Must be one of: rmspe, rmape")
-        
-        # Calculate main loss in dB units (20 * log10(main_loss))
+
+        reference_metric_config = loss_config.reference_metric
+        reference_metric_loss = _compute_loss_from_type(
+            reference_metric_config, ekf_preds, pre_ekf_preds, true_angles,
+            window_size, rmspe_criterion, rmape_criterion, loss_config,
+        )
+
         import math
-        main_loss_value = main_loss.item() if hasattr(main_loss, 'item') else main_loss
-        main_loss_db = 20 * math.log10(main_loss_value)  # Avoid log(0) with small epsilon
-        
-        # Online training reference loss (uses training_loss_type configuration)
-        if not hasattr(loss_config, 'training_loss_type'):
-            raise RuntimeError("loss_config.training_loss_type is required for online_training_reference_loss but was not found")
-        
-        training_loss_type = loss_config.training_loss_type
-        online_training_reference_loss_config = training_loss_type
-        
-        if training_loss_type == "multimoment":
-            # Multi-Moment loss: use pre-EKF as predictions, EKF as targets
-            try:
-                multimoment_criterion = MultiMomentInnovationConsistencyLoss(
-                    alpha=getattr(loss_config, 'multimoment_alpha', 1.0),
-                    beta=getattr(loss_config, 'multimoment_beta', 1.0)
-                ).to(device)
-                online_training_reference_loss = multimoment_criterion(
-                    angles_pred=pre_ekf_preds,
-                    angles=ekf_preds,
-                    return_components=False
-                )
-                # Multi-Moment already divides by batch_size, no need for .mean()
-            except Exception as e:
-                raise RuntimeError(f"Failed to calculate Multi-Moment reference loss: {e}")
-        elif training_loss_type == "unsupervised_rmspe":
-            # Unsupervised RMSPE: EKF vs pre-EKF
-            online_training_reference_loss = rmspe_criterion(ekf_preds, pre_ekf_preds) / window_size  # RMSPE sums across batch, divide by window size
-        elif training_loss_type == "unsupervised_rmape":
-            # Unsupervised RMAPE: EKF vs pre-EKF
-            online_training_reference_loss = rmape_criterion(ekf_preds, pre_ekf_preds) / window_size  # RMAPE sums across batch, divide by window size
-        elif training_loss_type == "supervised_rmspe":
-            # Supervised RMSPE: EKF vs true angles
-            online_training_reference_loss = rmspe_criterion(ekf_preds, true_angles) / window_size  # RMSPE sums across batch, divide by window size
-        elif training_loss_type == "supervised_rmape":
-            # Supervised RMAPE: EKF vs true angles
-            online_training_reference_loss = rmape_criterion(ekf_preds, true_angles) / window_size  # RMAPE sums across batch, divide by window size
-        else:
-            # Unknown training_loss_type, terminate with error
-            raise RuntimeError(f"Unknown training_loss_type: {training_loss_type}. Must be one of: multimoment, unsupervised_rmspe, unsupervised_rmape, supervised_rmspe, supervised_rmape")
-        
-        # Pre-EKF loss (raw model performance)
-        pre_ekf_loss = rmspe_criterion(pre_ekf_preds, true_angles) / window_size  # RMSPE sums across batch, divide by window size
-        
-        # EKF gain losses (EKF improvement over raw predictions)
-        ekf_gain_rmspe = rmspe_criterion(ekf_preds, pre_ekf_preds) / window_size  # RMSPE sums across batch, divide by window size
-        ekf_gain_rmape = rmape_criterion(ekf_preds, pre_ekf_preds) / window_size  # RMAPE sums across batch, divide by window size
-        
+        reference_metric_loss_value = (
+            reference_metric_loss.item() if hasattr(reference_metric_loss, "item") else reference_metric_loss
+        )
+        reference_metric_loss_db = 20 * math.log10(max(reference_metric_loss_value, 1e-12))
+
+        adaptation_loss_config = loss_config.adaptation_loss
+        adaptation_loss = _compute_loss_from_type(
+            adaptation_loss_config, ekf_preds, pre_ekf_preds, true_angles,
+            window_size, rmspe_criterion, rmape_criterion, loss_config,
+        )
+
+        pre_ekf_loss = rmspe_criterion(pre_ekf_preds, true_angles) / window_size
+        ekf_gain_rmape = rmape_criterion(ekf_preds, pre_ekf_preds) / window_size
+
         return LossMetrics(
-            main_loss=main_loss.item() if hasattr(main_loss, 'item') else main_loss,
-            main_loss_db=main_loss_db,
-            main_loss_config=main_loss_config,
-            online_training_reference_loss=online_training_reference_loss.item() if hasattr(online_training_reference_loss, 'item') else online_training_reference_loss,
-            online_training_reference_loss_config=online_training_reference_loss_config,
-            pre_ekf_loss=pre_ekf_loss.item() if hasattr(pre_ekf_loss, 'item') else pre_ekf_loss,
-            ekf_gain_rmspe=ekf_gain_rmspe.item() if hasattr(ekf_gain_rmspe, 'item') else ekf_gain_rmspe,
-            ekf_gain_rmape=ekf_gain_rmape.item() if hasattr(ekf_gain_rmape, 'item') else ekf_gain_rmape
+            reference_metric_loss=reference_metric_loss_value,
+            reference_metric_loss_db=reference_metric_loss_db,
+            reference_metric_config=reference_metric_config,
+            adaptation_loss=adaptation_loss.item() if hasattr(adaptation_loss, "item") else adaptation_loss,
+            adaptation_loss_config=adaptation_loss_config,
+            pre_ekf_loss=pre_ekf_loss.item() if hasattr(pre_ekf_loss, "item") else pre_ekf_loss,
+            ekf_gain_rmape=ekf_gain_rmape.item() if hasattr(ekf_gain_rmape, "item") else ekf_gain_rmape,
         )
 
 
@@ -2078,45 +2199,15 @@ class OnlineLearning:
         window_ekf_preds = self._fix_tensor_shape_for_loss(window_ekf_preds)
         window_true_angles = self._fix_tensor_shape_for_loss(window_true_angles)
         
-        # Get window size for proper averaging
         window_size = window_pre_ekf_preds.shape[0]
-        
-        # Calculate window-level loss based on training_loss_type configuration
-        if loss_config is not None and hasattr(loss_config, 'training_loss_type'):
-            training_loss_type = loss_config.training_loss_type
-            
-            if training_loss_type == "multimoment":
-                # Multi-Moment loss: use pre-EKF as predictions, EKF as targets
-                try:
-                    multimoment_criterion = MultiMomentInnovationConsistencyLoss(
-                        alpha=getattr(loss_config, 'multimoment_alpha', 1.0),
-                        beta=getattr(loss_config, 'multimoment_beta', 1.0)
-                    ).to(device)
-                    return multimoment_criterion(
-                        angles_pred=window_pre_ekf_preds,
-                        angles=window_ekf_preds,
-                        return_components=False
-                    )
-                except Exception as e:
-                    raise RuntimeError(f"Failed to calculate Multi-Moment training loss: {e}")
-            elif training_loss_type == "unsupervised_rmspe":
-                # Unsupervised RMSPE: EKF vs pre-EKF
-                return rmspe_criterion(window_ekf_preds, window_pre_ekf_preds) / window_size  # RMSPE sums across batch, divide by window size
-            elif training_loss_type == "unsupervised_rmape":
-                # Unsupervised RMAPE: EKF vs pre-EKF
-                return rmape_criterion(window_ekf_preds, window_pre_ekf_preds) / window_size  # RMAPE sums across batch, divide by window size
-            elif training_loss_type == "supervised_rmspe":
-                # Supervised RMSPE: EKF vs true angles
-                return rmspe_criterion(window_ekf_preds, window_true_angles) / window_size  # RMSPE sums across batch, divide by window size
-            elif training_loss_type == "supervised_rmape":
-                # Supervised RMAPE: EKF vs true angles
-                return rmape_criterion(window_ekf_preds, window_true_angles) / window_size  # RMAPE sums across batch, divide by window size
-            else:
-                # Unknown training_loss_type, terminate with error
-                raise RuntimeError(f"Unknown training_loss_type: {training_loss_type}. Must be one of: multimoment, unsupervised_rmspe, unsupervised_rmape, supervised_rmspe, supervised_rmape")
-        else:
-            # Default to RMSPE loss
-            return rmspe_criterion(window_ekf_preds, window_true_angles) / window_size  # RMSPE sums across batch, divide by window size
+
+        if loss_config is not None and hasattr(loss_config, "adaptation_loss"):
+            loss_type = loss_config.adaptation_loss
+            return _compute_loss_from_type(
+                loss_type, window_ekf_preds, window_pre_ekf_preds, window_true_angles,
+                window_size, rmspe_criterion, rmape_criterion, loss_config,
+            )
+        return rmspe_criterion(window_ekf_preds, window_pre_ekf_preds) / window_size
 
 
 

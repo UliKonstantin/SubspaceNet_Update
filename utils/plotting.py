@@ -5,9 +5,26 @@ import logging
 import datetime
 from typing import Dict
 
+SCENARIO_AXIS_LABELS = {
+    "snr": "SNR (dB)",
+    "m": "Number of sources (M)",
+    "t": "Snapshots (T)",
+    "eta": "Steering error η",
+    "trajectory_length": "Trajectory length (steps)",
+}
+
+SCENARIO_PLOT_TITLES = {
+    "snr": "DOA tracking error vs SNR",
+    "m": "DOA tracking error vs number of sources",
+    "t": "DOA tracking error vs snapshots",
+    "eta": "DOA tracking error vs steering error η",
+    "trajectory_length": "DOA tracking error vs trajectory length",
+}
+
+
 def plot_loss_vs_scenario(scenario_results, scenario, output_dir):
     """
-    Plot ESPRIT and DNN loss vs. scenario values and save the plot.
+    Plot SubspaceNet snapshot and EKF posterior RMSPE vs sweep values and save the plot.
     """
     logger = logging.getLogger("SubspaceNet.plotting")
     x_vals = list(scenario_results.keys())
@@ -25,8 +42,9 @@ def plot_loss_vs_scenario(scenario_results, scenario, output_dir):
             esprit_loss = None
             if 'evaluation_results' in res and 'classic_methods_test_losses' in res['evaluation_results'] and 'ESPRIT' in res['evaluation_results']['classic_methods_test_losses']:
                 esprit_loss = res['evaluation_results']['classic_methods_test_losses']['ESPRIT']
-            dnn_loss = res['evaluation_results'].get('dnn_test_loss')
-            ekf_loss = res['evaluation_results'].get('ekf_test_loss')
+            eval_results = res.get('evaluation_results', res)
+            dnn_loss = eval_results.get('dnn_test_loss')
+            ekf_loss = eval_results.get('ekf_test_loss')
         else:
             esprit_loss = None
             dnn_loss = None
@@ -39,14 +57,16 @@ def plot_loss_vs_scenario(scenario_results, scenario, output_dir):
         logger.warning(f"All losses are None for scenario {scenario}. Plot will be empty.")
     plt.figure(figsize=(10, 6))
     if any(l is not None for l in esprit_losses):
-        plt.plot(x_vals, esprit_losses, '-o', label='ESPRIT loss', color='green')
+        plt.plot(x_vals, esprit_losses, '-o', label='ESPRIT (RMSPE, rad)', color='green')
     if any(l is not None for l in dnn_losses):
-        plt.plot(x_vals, dnn_losses, '-s', label='DNN loss', color='blue')
+        plt.plot(x_vals, dnn_losses, '-s', label='SubspaceNet snapshot (RMSPE, rad)', color='blue')
     if any(l is not None for l in ekf_losses):
-        plt.plot(x_vals, ekf_losses, '-^', label='EKF loss', color='red')
-    plt.xlabel(scenario)
-    plt.ylabel('Loss')
-    plt.title(f'Loss vs. {scenario}')
+        plt.plot(x_vals, ekf_losses, '-^', label='EKF posterior (RMSPE, rad)', color='red')
+    x_label = SCENARIO_AXIS_LABELS.get(scenario, scenario)
+    title = SCENARIO_PLOT_TITLES.get(scenario, f"DOA tracking error vs {scenario}")
+    plt.xlabel(x_label)
+    plt.ylabel("Mean RMSPE (rad) — lower is better")
+    plt.title(title)
     plt.legend()
     plt.grid(True)
     plot_path = Path(output_dir) / f"loss_vs_{scenario}.png"
@@ -296,6 +316,148 @@ def _plot_kalman_noise_optimum_analysis(scenario_results, output_dir, dnn_loss_m
     logger.info(f"Saved Kalman noise analysis plot to {analysis_plot_path}") 
 
 
+def _first_trajectory_from_ol_results(ol_results: dict):
+    """Return the first TrajectoryResults object from OL result payloads."""
+    for key in (
+        "pretrained_trajectory_results",
+        "pretrained_model_trajectory_results",
+        "online_trajectory_results",
+        "online_model_trajectory_results",
+    ):
+        val = ol_results.get(key)
+        if isinstance(val, list) and val:
+            return val[0]
+        if val is not None and hasattr(val, "window_results"):
+            return val
+    return None
+
+
+def _nested_ekf_series_from_trajectory(traj) -> tuple:
+    """Build legacy nested EKF series expected by the 4D grid plotter."""
+    innovations, k_times_y, y_s_inv_y = [], [], []
+    if traj is None or not getattr(traj, "window_results", None):
+        return innovations, k_times_y, y_s_inv_y
+
+    for wr in traj.window_results:
+        if not getattr(wr, "is_valid", True):
+            continue
+        wm = wr.window_metrics
+        innovations.append([wm.avg_ekf_innovations or []])
+        k_times_y.append([wm.avg_ekf_kalman_gain_times_innovation or []])
+        y_s_inv_y.append([wm.avg_ekf_y_s_inv_y or []])
+    return innovations, k_times_y, y_s_inv_y
+
+
+def _loss_series_from_trajectory(traj) -> tuple:
+    """Extract parallel loss / eta / index series from a trajectory object."""
+    if traj is None or not getattr(traj, "window_results", None):
+        return [], [], [], []
+
+    window_losses, pre_ekf_losses, window_eta_values, window_indices = [], [], [], []
+    for w_idx, wr in zip(getattr(traj, "window_indices", []), traj.window_results):
+        if not getattr(wr, "is_valid", True):
+            continue
+        window_indices.append(w_idx)
+        window_losses.append(wr.loss_metrics.reference_metric_loss)
+        pre_ekf_losses.append(wr.loss_metrics.pre_ekf_loss)
+        window_eta_values.append(wr.window_metrics.eta_value)
+    return window_losses, pre_ekf_losses, window_eta_values, window_indices
+
+
+def _scalar_ekf_window_metrics(wr) -> tuple:
+    """Scalar EKF diagnostic averages for one window (aligned with 4D grid plots)."""
+    wm = wr.window_metrics
+    inns = wm.avg_ekf_innovations or []
+    kty = wm.avg_ekf_kalman_gain_times_innovation or []
+    ysy = wm.avg_ekf_y_s_inv_y or []
+    avg_inn = float(np.mean([abs(x) for x in inns])) if inns else 0.0
+    avg_kty = float(np.mean(kty)) if kty else 0.0
+    avg_ysy = float(np.mean(ysy)) if ysy else 0.0
+    return avg_inn, avg_kty, avg_ysy
+
+
+def _normalize_online_learning_results_for_4d_grid(ol_results: dict) -> dict:
+    """Adapt structured trajectory OL results to the flat lists used by 4D grid plots."""
+    if ol_results.get("window_losses"):
+        return ol_results
+
+    pretrained = ol_results.get("pretrained_trajectory_results")
+    if isinstance(pretrained, list) and pretrained:
+        pretrained = pretrained[0]
+    elif pretrained is None:
+        pretrained = ol_results.get("pretrained_model_trajectory_results")
+
+    online = ol_results.get("online_trajectory_results")
+    if isinstance(online, list) and online:
+        online = online[0]
+    elif online is None:
+        online = ol_results.get("online_model_trajectory_results")
+
+    window_losses, pre_ekf_losses, window_eta_values, static_window_indices = _loss_series_from_trajectory(
+        pretrained
+    )
+    ekf_innovations, ekf_kalman_gain_times_innovation, ekf_y_s_inv_y = _nested_ekf_series_from_trajectory(
+        pretrained
+    )
+
+    training_start = ol_results.get("training_start_window")
+    training_end = ol_results.get("training_end_window")
+    learning_start_window = ol_results.get("learning_start_window", training_start)
+
+    online_window_losses, online_pre_ekf_losses, online_window_indices = [], [], []
+    training_window_losses, training_pre_ekf_losses, training_window_indices = [], [], []
+    online_avg_innovations, online_avg_k_times_y, online_avg_y_s_inv_y = [], [], []
+    training_avg_innovations, training_avg_k_times_y, training_avg_y_s_inv_y = [], [], []
+    if online is not None and getattr(online, "window_results", None):
+        for w_idx, wr in zip(getattr(online, "window_indices", []), online.window_results):
+            if not getattr(wr, "is_valid", True):
+                continue
+            loss = wr.loss_metrics.reference_metric_loss
+            pre = wr.loss_metrics.pre_ekf_loss
+            avg_inn, avg_kty, avg_ysy = _scalar_ekf_window_metrics(wr)
+            if training_end is not None and w_idx > training_end:
+                online_window_losses.append(loss)
+                online_pre_ekf_losses.append(pre)
+                online_window_indices.append(w_idx)
+                online_avg_innovations.append(avg_inn)
+                online_avg_k_times_y.append(avg_kty)
+                online_avg_y_s_inv_y.append(avg_ysy)
+            elif training_start is not None and w_idx >= training_start:
+                training_window_losses.append(loss)
+                training_pre_ekf_losses.append(pre)
+                training_window_indices.append(w_idx)
+                training_avg_innovations.append(avg_inn)
+                training_avg_k_times_y.append(avg_kty)
+                training_avg_y_s_inv_y.append(avg_ysy)
+
+    normalized = dict(ol_results)
+    normalized.update(
+        {
+            "window_losses": window_losses,
+            "pre_ekf_losses": pre_ekf_losses,
+            "window_eta_values": window_eta_values,
+            "static_window_indices": static_window_indices,
+            "ekf_innovations": ekf_innovations,
+            "ekf_kalman_gain_times_innovation": ekf_kalman_gain_times_innovation,
+            "ekf_y_s_inv_y": ekf_y_s_inv_y,
+            "online_window_losses": online_window_losses,
+            "online_pre_ekf_losses": online_pre_ekf_losses,
+            "online_window_indices": online_window_indices,
+            "training_window_losses": training_window_losses,
+            "training_pre_ekf_losses": training_pre_ekf_losses,
+            "training_window_indices": training_window_indices,
+            "online_avg_innovations": online_avg_innovations,
+            "online_avg_k_times_y": online_avg_k_times_y,
+            "online_avg_y_s_inv_y": online_avg_y_s_inv_y,
+            "training_avg_innovations": training_avg_innovations,
+            "training_avg_k_times_y": training_avg_k_times_y,
+            "training_avg_y_s_inv_y": training_avg_y_s_inv_y,
+            "learning_start_window": learning_start_window,
+        }
+    )
+    return normalized
+
+
 def plot_eta_comparison_4d_grid(scenario_results, output_dir):
     """
     Plot comparison between different eta scenarios with identical other settings.
@@ -359,7 +521,9 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                     if (result.get("status") == "success" and 
                         "online_learning_results" in result):
                         
-                        ol_results = result["online_learning_results"]
+                        ol_results = _normalize_online_learning_results_for_4d_grid(
+                            result["online_learning_results"]
+                        )
                         
                         # Extract required metrics
                         window_losses = ol_results.get("window_losses", [])
@@ -377,6 +541,7 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                         training_pre_ekf_losses = ol_results.get("training_pre_ekf_losses", [])
                         training_window_indices = ol_results.get("training_window_indices", [])
                         learning_start_window = ol_results.get("learning_start_window", None)
+                        static_window_indices = ol_results.get("static_window_indices", [])
                         
                         # Extract online learning EKF data
                         online_ekf_innovations = ol_results.get("online_ekf_innovations", [])
@@ -431,15 +596,14 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                             has_online_data = (len(online_window_losses) > 0 and len(online_window_indices) > 0)
                             has_training_data = (len(training_window_losses) > 0 and len(training_window_indices) > 0)
                             
-                            # Calculate online learning derived metrics
-                            online_avg_innovations = []
-                            online_avg_k_times_y = []
-                            online_avg_y_s_inv_y = []
-                            training_avg_innovations = []
-                            training_avg_k_times_y = []
-                            training_avg_y_s_inv_y = []
-                            
-                            if has_online_data and online_ekf_innovations:
+                            online_avg_innovations = list(ol_results.get("online_avg_innovations", []))
+                            online_avg_k_times_y = list(ol_results.get("online_avg_k_times_y", []))
+                            online_avg_y_s_inv_y = list(ol_results.get("online_avg_y_s_inv_y", []))
+                            training_avg_innovations = list(ol_results.get("training_avg_innovations", []))
+                            training_avg_k_times_y = list(ol_results.get("training_avg_k_times_y", []))
+                            training_avg_y_s_inv_y = list(ol_results.get("training_avg_y_s_inv_y", []))
+
+                            if has_online_data and not online_avg_innovations and online_ekf_innovations:
                                 for window_innovations in online_ekf_innovations:
                                     window_avg = []
                                     for step_innovations in window_innovations:
@@ -470,7 +634,7 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                                     else:
                                         online_avg_y_s_inv_y.append(0)
                             
-                            if has_training_data and training_ekf_innovations:
+                            if has_training_data and not training_avg_innovations and training_ekf_innovations:
                                 for window_innovations in training_ekf_innovations:
                                     window_avg = []
                                     for step_innovations in window_innovations:
@@ -503,6 +667,7 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                             
                             metrics_by_eta[eta] = {
                                 "window_losses": window_losses[1:],  # Exclude first window
+                                "static_window_indices": static_window_indices[1:] if len(static_window_indices) > 1 else [],
                                 "ekf_improvement": ekf_improvement,
                                 "window_eta_values": window_eta_values[1:] if len(window_eta_values) > 1 else [],  # Exclude first window
                                 "avg_innovations": avg_innovations[1:] if len(avg_innovations) > 1 else [],
@@ -537,11 +702,23 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                 
                 # Create comparison plot for this parameter combination
                 fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-                
-                # Determine the number of windows (assuming all eta values have same length)
+
+                def _static_x(metrics):
+                    x = metrics.get("static_window_indices")
+                    losses = metrics.get("window_losses", [])
+                    if x and len(x) == len(losses):
+                        return np.array(x)
+                    return np.arange(1, len(losses) + 1)
+
                 first_eta = valid_etas[0]
-                n_windows = len(metrics_by_eta[first_eta]["window_losses"])
-                window_indices = np.arange(1, n_windows + 1)  # Start from window 1
+                training_start_window = metrics_by_eta[first_eta].get("learning_start_window")
+                training_end_window = None
+                for eta in valid_etas:
+                    ol_raw = eta_results[eta].get("online_learning_results", {})
+                    if ol_raw.get("training_end_window") is not None:
+                        training_end_window = ol_raw["training_end_window"]
+                        break
+                has_any_online = any(metrics_by_eta[e]["has_online_data"] for e in valid_etas)
                 
                 # For each eta scenario, find where eta changes occur within that scenario
                 eta_change_markers = {}
@@ -550,13 +727,12 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                     
                     # Get the window eta values for this scenario
                     scenario_eta_values = metrics_by_eta[eta]["window_eta_values"]
+                    scenario_x = _static_x(metrics_by_eta[eta])
                     
-                    if len(scenario_eta_values) > 1:
-                        # Find indices where eta changes (similar to original implementation)
+                    if len(scenario_eta_values) > 1 and len(scenario_x) == len(scenario_eta_values):
                         for i in range(1, len(scenario_eta_values)):
-                            if abs(scenario_eta_values[i] - scenario_eta_values[i-1]) > 1e-6:
-                                # Window index adjustment: +1 because we start from window 1 (excluded first window)
-                                eta_change_markers[eta]["positions"].append(i + 1)
+                            if abs(scenario_eta_values[i] - scenario_eta_values[i - 1]) > 1e-6:
+                                eta_change_markers[eta]["positions"].append(scenario_x[i])
                                 eta_change_markers[eta]["values"].append(scenario_eta_values[i])
                 
                 # Plot 1: Window Losses (Both EKF and SubspaceNet)
@@ -567,9 +743,10 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                 
                 for i, eta in enumerate(valid_etas):
                     color = colors[i]
+                    static_x = _static_x(metrics_by_eta[eta])
                     
                     # Plot EKF Loss (solid line, circle markers)
-                    ax1.plot(window_indices, metrics_by_eta[eta]["window_losses"], 
+                    ax1.plot(static_x, metrics_by_eta[eta]["window_losses"], 
                             color=color, linestyle='-', marker='o', 
                             label=f'EKF η={eta:.3f}', linewidth=2, markersize=4)
                     
@@ -577,7 +754,7 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                     # Calculate SubspaceNet loss from EKF loss + improvement
                     subspacenet_losses = [ekf_loss + improvement for ekf_loss, improvement in 
                                         zip(metrics_by_eta[eta]["window_losses"], metrics_by_eta[eta]["ekf_improvement"])]
-                    ax1.plot(window_indices, subspacenet_losses, 
+                    ax1.plot(static_x, subspacenet_losses, 
                             color=color, linestyle='--', marker='s', 
                             label=f'SubspaceNet η={eta:.3f}', linewidth=2, markersize=4)
                     
@@ -639,7 +816,8 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                 ax2 = axes[0, 1]
                 for i, eta in enumerate(valid_etas):
                     color = colors[i]
-                    ax2.plot(window_indices, metrics_by_eta[eta]["ekf_improvement"], 
+                    static_x = _static_x(metrics_by_eta[eta])
+                    ax2.plot(static_x, metrics_by_eta[eta]["ekf_improvement"], 
                             color=color, linestyle='-', marker='s', 
                             label=f'η={eta:.3f}', linewidth=2, markersize=4)
                     
@@ -670,11 +848,11 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                             ax2.plot([last_training_x, first_online_x], [last_training_improvement, first_online_improvement], 
                                     color=color, linestyle='-', linewidth=2, alpha=0.7)
                     
-                # Add eta change markers (adjusted for starting from second sample)
-                for idx, eta in zip(eta_changes, eta_values):
-                    if idx >= 1:  # Only show markers from second sample onwards
-                        ax2.axvline(x=idx, color='red', linestyle='--', alpha=0.3)
-                        ax2.text(idx, ax2.get_ylim()[0] + (ax2.get_ylim()[1] - ax2.get_ylim()[0]) * 0.1, 'Distribution Change', rotation=90, verticalalignment='bottom', horizontalalignment='center', color='red', fontsize=14)
+                # Add eta change markers (same positions as ax1)
+                for pos in sorted(all_eta_positions):
+                    if pos >= 1:
+                        ax2.axvline(x=pos, color='red', linestyle='--', alpha=0.3)
+                        ax2.text(pos, ax2.get_ylim()[0] + (ax2.get_ylim()[1] - ax2.get_ylim()[0]) * 0.1, 'Distribution Change', rotation=90, verticalalignment='bottom', horizontalalignment='center', color='red', fontsize=14)
                 
                 # Add training end marker if available
                 if training_end_window is not None and training_end_window >= 1:
@@ -692,7 +870,7 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                 ax2.set_xlabel('Window Index')
                 ax2.set_ylabel('Loss Difference')
                 title = 'SubspaceNet Loss - EKF Loss vs Window Index (Starting from Window 1)\nImprovement = L_SubspaceNet - L_EKF'
-                if has_online_data:
+                if has_any_online:
                     title += '\n(Static + Online Models)'
                 ax2.set_title(title)
                 ax2.legend()
@@ -703,7 +881,10 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                 for i, eta in enumerate(valid_etas):
                     if metrics_by_eta[eta]["avg_innovations"]:
                         color = colors[i]
-                        ax3.plot(window_indices, metrics_by_eta[eta]["avg_innovations"], 
+                        static_x = _static_x(metrics_by_eta[eta])
+                        innov = metrics_by_eta[eta]["avg_innovations"]
+                        plot_x = static_x[: len(innov)] if len(static_x) != len(innov) else static_x
+                        ax3.plot(plot_x, innov, 
                                 color=color, linestyle='-', marker='d', 
                                 label=f'η={eta:.3f}', linewidth=2, markersize=4)
                     
@@ -755,7 +936,10 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                 for i, eta in enumerate(valid_etas):
                     if metrics_by_eta[eta]["avg_k_times_y"]:
                         color = colors[i]
-                        ax4.plot(window_indices, np.abs(metrics_by_eta[eta]["avg_k_times_y"]), 
+                        static_x = _static_x(metrics_by_eta[eta])
+                        kty = metrics_by_eta[eta]["avg_k_times_y"]
+                        plot_x = static_x[: len(kty)] if len(static_x) != len(kty) else static_x
+                        ax4.plot(plot_x, np.abs(kty), 
                                 color=color, linestyle='-', marker='v', 
                                 label=f'η={eta:.3f}', linewidth=2, markersize=4)
                     
@@ -807,7 +991,10 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                 for i, eta in enumerate(valid_etas):
                     if metrics_by_eta[eta]["avg_y_s_inv_y"]:
                         color = colors[i]
-                        ax5.plot(window_indices, metrics_by_eta[eta]["avg_y_s_inv_y"], 
+                        static_x = _static_x(metrics_by_eta[eta])
+                        ysy = metrics_by_eta[eta]["avg_y_s_inv_y"]
+                        plot_x = static_x[: len(ysy)] if len(static_x) != len(ysy) else static_x
+                        ax5.plot(plot_x, ysy, 
                                 color=color, linestyle='-', marker='^', 
                                 label=f'η={eta:.3f}', linewidth=2, markersize=4)
                     
@@ -985,7 +1172,7 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_typ
             # Get averaged online model dB losses (use last 10 windows for consistency)
             if 'averaged_online_trajectory' in averaged_data:
                 online_metrics = averaged_data['averaged_online_trajectory']
-                online_db_losses = online_metrics.get('main_losses_db', [])
+                online_db_losses = online_metrics.get('reference_metric_losses_db', [])
                 if online_db_losses:
                     # Use last 10 windows or all if fewer than 10
                     num_windows_to_use = min(10, len(online_db_losses))
@@ -995,7 +1182,7 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_typ
             # Get averaged pretrained model dB losses (use last 10 windows for consistency)
             if 'averaged_pretrained_trajectory' in averaged_data:
                 pretrained_metrics = averaged_data['averaged_pretrained_trajectory']
-                pretrained_db_losses = pretrained_metrics.get('main_losses_db', [])
+                pretrained_db_losses = pretrained_metrics.get('reference_metric_losses_db', [])
                 if pretrained_db_losses:
                     # Use last 10 windows or all if fewer than 10
                     num_windows_to_use = min(10, len(pretrained_db_losses))
@@ -1005,7 +1192,7 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_typ
             # Get averaged supervised model dB losses (use last 10 windows for consistency)
             if 'averaged_supervised_trajectory' in averaged_data:
                 supervised_metrics = averaged_data['averaged_supervised_trajectory']
-                supervised_db_losses = supervised_metrics.get('main_losses_db', [])
+                supervised_db_losses = supervised_metrics.get('reference_metric_losses_db', [])
                 if supervised_db_losses:
                     # Use last 10 windows or all if fewer than 10
                     num_windows_to_use = min(10, len(supervised_db_losses))
@@ -1029,8 +1216,8 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_typ
                         start_window = max(0, total_windows - num_windows_to_use)
                         post_learning_db_losses = []
                         for window_result in trajectory_results.window_results[start_window:]:
-                            if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'main_loss_db'):
-                                post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
+                            if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'reference_metric_loss_db'):
+                                post_learning_db_losses.append(window_result.loss_metrics.reference_metric_loss_db)
                         if post_learning_db_losses:
                             online_avg_db = np.mean(post_learning_db_losses)
                             logger.info(f"{value_label} {val}: Online model (fallback) - last {len(post_learning_db_losses)} windows, avg dB loss = {online_avg_db:.2f}")
@@ -1045,8 +1232,8 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_typ
                         start_window = max(0, total_windows - num_windows_to_use)
                         post_learning_db_losses = []
                         for window_result in pretrained_trajectory_results.window_results[start_window:]:
-                            if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'main_loss_db'):
-                                post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
+                            if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'reference_metric_loss_db'):
+                                post_learning_db_losses.append(window_result.loss_metrics.reference_metric_loss_db)
                         if post_learning_db_losses:
                             pretrained_avg_db = np.mean(post_learning_db_losses)
                             logger.info(f"{value_label} {val}: Pretrained model (fallback) - last {len(post_learning_db_losses)} windows, avg dB loss = {pretrained_avg_db:.2f}")
@@ -1061,8 +1248,8 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_typ
                         start_window = max(0, total_windows - num_windows_to_use)
                         post_learning_db_losses = []
                         for window_result in supervised_trajectory_results.window_results[start_window:]:
-                            if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'main_loss_db'):
-                                post_learning_db_losses.append(window_result.loss_metrics.main_loss_db)
+                            if hasattr(window_result, 'loss_metrics') and hasattr(window_result.loss_metrics, 'reference_metric_loss_db'):
+                                post_learning_db_losses.append(window_result.loss_metrics.reference_metric_loss_db)
                         if post_learning_db_losses:
                             supervised_avg_db = np.mean(post_learning_db_losses)
                             logger.info(f"{value_label} {val}: Supervised trained model (fallback) - last {len(post_learning_db_losses)} windows, avg dB loss = {supervised_avg_db:.2f}")
@@ -1222,8 +1409,8 @@ def plot_eta_scenario_comparison(scenario_results: dict, output_dir: Path) -> No
         learning_rate_std = None
         
         # Try to get from glrt_results (top level)
-        if 'glrt_results' in result and 'main_loss' in result['glrt_results']:
-            main_glrt = result['glrt_results']['main_loss']
+        if 'glrt_results' in result and 'adaptation_loss' in result['glrt_results']:
+            main_glrt = result['glrt_results']['adaptation_loss']
             detection_window = main_glrt.get('avg_changepoint_window')
             detection_window_std = main_glrt.get('std_changepoint_window')
             z_score = main_glrt.get('avg_z_score')
@@ -1234,8 +1421,8 @@ def plot_eta_scenario_comparison(scenario_results: dict, output_dir: Path) -> No
         # Fallback to averaged_results -> glrt_results
         if detection_window is None and 'averaged_results' in result:
             averaged_data = result['averaged_results']
-            if 'glrt_results' in averaged_data and 'main_loss' in averaged_data['glrt_results']:
-                main_glrt = averaged_data['glrt_results']['main_loss']
+            if 'glrt_results' in averaged_data and 'adaptation_loss' in averaged_data['glrt_results']:
+                main_glrt = averaged_data['glrt_results']['adaptation_loss']
                 detection_window = main_glrt.get('avg_changepoint_window')
                 detection_window_std = main_glrt.get('std_changepoint_window')
                 z_score = main_glrt.get('avg_z_score')
@@ -1476,7 +1663,7 @@ def _plot_glrt_scenario_results(scenario_results: dict, output_dir: Path) -> Non
     logger.info(f"GLRT scenario results violin plots saved to: {plot_path}")
 
 
-def plot_online_learning_results_structured(output_dir, pretrained_trajectory_results, online_trajectory_results, main_loss_config, training_reference_loss_config, training_start_window=None, training_end_window=None, eta_change_windows=None):
+def plot_online_learning_results_structured(output_dir, pretrained_trajectory_results, online_trajectory_results, reference_metric_config, adaptation_loss_config, training_start_window=None, training_end_window=None, eta_change_windows=None):
     """
     Plot online learning results using structured data approach.
     
@@ -1484,8 +1671,8 @@ def plot_online_learning_results_structured(output_dir, pretrained_trajectory_re
         output_dir: Output directory for saving plots
         pretrained_trajectory_results: List of TrajectoryResults for pretrained model
         online_trajectory_results: List of TrajectoryResults for online model
-        main_loss_config: Configuration string for main loss (e.g., "supervised_rmspe")
-        training_reference_loss_config: Configuration string for training reference loss (e.g., "multimoment")
+        reference_metric_config: Configuration string for main loss (e.g., "supervised_rmspe")
+        adaptation_loss_config: Configuration string for training reference loss (e.g., "multimoment")
         training_start_window: Window index where training started (optional)
         training_end_window: Window index where training ended (optional)
         eta_change_windows: List of window indices where eta changed (optional)
@@ -1507,9 +1694,9 @@ def plot_online_learning_results_structured(output_dir, pretrained_trajectory_re
         for trajectory_results in trajectory_results_list:
             for i, window_result in enumerate(trajectory_results.window_results):
                 if loss_type == "main":
-                    loss_value = window_result.loss_metrics.main_loss
+                    loss_value = window_result.loss_metrics.reference_metric_loss
                 elif loss_type == "training_reference":
-                    loss_value = window_result.loss_metrics.online_training_reference_loss
+                    loss_value = window_result.loss_metrics.adaptation_loss
                 else:
                     continue
                     
@@ -1601,19 +1788,48 @@ def plot_online_learning_results_structured(output_dir, pretrained_trajectory_re
     print(f"Structured online learning comparison plot saved to: {plot_path}")
 
 
-def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metrics, averaged_online_metrics, main_loss_config, training_reference_loss_config, training_start_window=None, training_end_window=None, eta_change_windows=None, averaged_supervised_metrics=None):
+def _derive_eta_change_windows(window_indices, eta_values, tol=1e-6):
+    """Return actual window indices where eta transitions in a plotted series."""
+    if not window_indices or not eta_values or len(window_indices) != len(eta_values):
+        return []
+    return [
+        window_indices[i]
+        for i in range(1, len(eta_values))
+        if abs(eta_values[i] - eta_values[i - 1]) > tol
+    ]
+
+
+def _filter_series_after_training(window_indices, values, training_end_window):
+    """Keep only post-training evaluation windows (strictly after training_end_window)."""
+    if training_end_window is None:
+        return [], []
+    filtered_indices, filtered_values = [], []
+    for w, v in zip(window_indices, values):
+        if w > training_end_window:
+            filtered_indices.append(w)
+            filtered_values.append(v)
+    return filtered_indices, filtered_values
+
+
+def plot_averaged_online_learning_results(
+    output_dir,
+    averaged_pretrained_metrics,
+    averaged_online_metrics,
+    reference_metric_config,
+    adaptation_loss_config,
+    training_start_window=None,
+    training_end_window=None,
+    drift_detection_window=None,
+    eta_change_windows=None,
+    averaged_supervised_metrics=None,
+):
     """
     Plot online learning results using directly averaged metrics (no TrajectoryResults conversion).
-    
-    Args:
-        output_dir: Output directory for saving plots
-        averaged_pretrained_metrics: Dictionary with averaged metrics from pretrained model
-        averaged_online_metrics: Dictionary with averaged metrics from online model
-        main_loss_config: Configuration string for main loss (e.g., "supervised_rmspe")
-        training_reference_loss_config: Configuration string for training reference loss (e.g., "multimoment")
-        training_start_window: Window index where training started (optional)
-        training_end_window: Window index where training ended (optional)
-        eta_change_windows: List of window indices where eta changed (optional)
+
+    Pretrained model is shown for all windows. Algorithm 1 and supervised oracle appear only
+    after training_end_window (post-adaptation evaluation phase).
+
+    Distribution Change = η increment (eta_change_windows). One marker per logged change.
     """
     import matplotlib.pyplot as plt
     import numpy as np
@@ -1627,13 +1843,13 @@ def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metric
     
     # Extract data directly from averaged metrics
     pretrained_window_indices = averaged_pretrained_metrics.get("window_indices", [])
-    pretrained_main_losses = averaged_pretrained_metrics.get("main_losses", [])
-    pretrained_training_losses = averaged_pretrained_metrics.get("training_reference_losses", [])
+    pretrained_main_losses = averaged_pretrained_metrics.get("reference_metric_losses", [])
+    pretrained_training_losses = averaged_pretrained_metrics.get("adaptation_losses", [])
     pretrained_eta_values = averaged_pretrained_metrics.get("window_eta_values", [])
     
     online_window_indices = averaged_online_metrics.get("window_indices", [])
-    online_main_losses = averaged_online_metrics.get("main_losses", [])
-    online_training_losses = averaged_online_metrics.get("training_reference_losses", [])
+    online_main_losses = averaged_online_metrics.get("reference_metric_losses", [])
+    online_training_losses = averaged_online_metrics.get("adaptation_losses", [])
     online_eta_values = averaged_online_metrics.get("window_eta_values", [])
     
     # Extract supervised model data if available
@@ -1644,9 +1860,53 @@ def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metric
     
     if averaged_supervised_metrics is not None:
         supervised_window_indices = averaged_supervised_metrics.get("window_indices", [])
-        supervised_main_losses = averaged_supervised_metrics.get("main_losses", [])
-        supervised_training_losses = averaged_supervised_metrics.get("training_reference_losses", [])
+        supervised_main_losses = averaged_supervised_metrics.get("reference_metric_losses", [])
+        supervised_training_losses = averaged_supervised_metrics.get("adaptation_losses", [])
         supervised_eta_values = averaged_supervised_metrics.get("window_eta_values", [])
+
+    # Online / supervised: post-training eval only
+    online_window_indices, online_main_losses = _filter_series_after_training(
+        online_window_indices, online_main_losses, training_end_window
+    )
+    online_window_indices_msie, online_training_losses = _filter_series_after_training(
+        averaged_online_metrics.get("window_indices", []),
+        averaged_online_metrics.get("adaptation_losses", []),
+        training_end_window,
+    )
+    supervised_window_indices, supervised_main_losses = _filter_series_after_training(
+        supervised_window_indices, supervised_main_losses, training_end_window
+    )
+
+    distribution_change_windows = _derive_eta_change_windows(
+        pretrained_window_indices, pretrained_eta_values
+    )
+    if not distribution_change_windows and eta_change_windows:
+        distribution_change_windows = list(eta_change_windows)
+
+    def _add_phase_markers(ax):
+        distribution_labeled = False
+        for eta_window in distribution_change_windows:
+            if eta_window >= 0:
+                ax.axvline(
+                    x=eta_window, color='red', linestyle='--', alpha=0.5, linewidth=1.5,
+                    label='Distribution Change' if not distribution_labeled else None,
+                )
+                distribution_labeled = True
+        if drift_detection_window is not None and drift_detection_window >= 0:
+            ax.axvline(
+                x=drift_detection_window, color='crimson', linestyle=':', alpha=0.7, linewidth=1.5,
+                label='Drift Detected (GLRT)',
+            )
+        if training_start_window is not None and training_start_window >= 0:
+            ax.axvline(
+                x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2,
+                label='Training Start',
+            )
+        if training_end_window is not None and training_end_window >= 0:
+            ax.axvline(
+                x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2,
+                label='Training End',
+            )
     
     # Create separate figure for Main Loss Comparison
     fig1 = plt.figure(figsize=(14, 5))
@@ -1661,23 +1921,7 @@ def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metric
         ax1.plot(supervised_window_indices, supervised_main_losses, 'g-', linewidth=3, 
                 label='Supervised Trained Model', marker='^', markersize=6)
     
-    # Add eta change markers
-    distribution_change_added = False
-    if eta_change_windows:
-        for eta_window in eta_change_windows:
-            if eta_window >= 1:
-                if not distribution_change_added:
-                    ax1.axvline(x=eta_window, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Distribution Change')
-                    distribution_change_added = True
-                else:
-                    ax1.axvline(x=eta_window, color='red', linestyle='--', alpha=0.5, linewidth=1.5)
-    
-    # Add training markers
-    if training_start_window is not None and training_start_window >= 1:
-        ax1.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2, label='Training Start')
-    
-    if training_end_window is not None and training_end_window >= 1:
-        ax1.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2, label='Training End')
+    _add_phase_markers(ax1)
     
     ax1.set_xlabel('Window Index', fontsize=20)
     ax1.set_ylabel('RMSPE (Supervised)', fontsize=20)
@@ -1697,6 +1941,7 @@ def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metric
         ax1.set_xlim(0, max_window + 1)  # Add small padding
     else:
         ax1.set_xlim(0, 60)  # Fallback if no data
+    ax1.legend(fontsize=14, loc='best')
     plt.tight_layout()
     
     # Create separate figure for Training Reference Loss Comparison
@@ -1705,27 +1950,11 @@ def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metric
     if pretrained_training_losses and pretrained_window_indices:
         ax2.plot(pretrained_window_indices, pretrained_training_losses, 'b-', linewidth=3, 
                 label='Pretrained Model', marker='o', markersize=6)
-    if online_training_losses and online_window_indices:
-        ax2.plot(online_window_indices, online_training_losses, 'r-', linewidth=3, 
+    if online_training_losses and online_window_indices_msie:
+        ax2.plot(online_window_indices_msie, online_training_losses, 'r-', linewidth=3, 
                 label='Algorithm 1', marker='s', markersize=6)
     
-    # Add eta change markers
-    distribution_change_added_ax2 = False
-    if eta_change_windows:
-        for eta_window in eta_change_windows:
-            if eta_window >= 1:
-                if not distribution_change_added_ax2:
-                    ax2.axvline(x=eta_window, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Distribution Change')
-                    distribution_change_added_ax2 = True
-                else:
-                    ax2.axvline(x=eta_window, color='red', linestyle='--', alpha=0.5, linewidth=1.5)
-    
-    # Add training markers
-    if training_start_window is not None and training_start_window >= 1:
-        ax2.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2, label='Training Start')
-    
-    if training_end_window is not None and training_end_window >= 1:
-        ax2.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2, label='Training End')
+    _add_phase_markers(ax2)
     
     ax2.set_xlabel('Window Index', fontsize=20)
     ax2.set_ylabel('MSIE (Unsupervised)', fontsize=20)
@@ -1738,6 +1967,7 @@ def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metric
         ax2.set_xlim(0, max_window + 1)  # Add small padding
     else:
         ax2.set_xlim(0, 60)  # Fallback if no data
+    ax2.legend(fontsize=14, loc='best')
     plt.tight_layout()
     
     # Save the plots separately
@@ -1747,9 +1977,249 @@ def plot_averaged_online_learning_results(output_dir, averaged_pretrained_metric
     fig2.savefig(plot_path_training, dpi=150, bbox_inches='tight')
     plt.close(fig1)
     plt.close(fig2)
+
+    kf_plot_path = plot_averaged_kf_gain_comparison(
+        output_dir,
+        averaged_pretrained_metrics,
+        averaged_online_metrics=averaged_online_metrics,
+        training_end_window=training_end_window,
+        drift_detection_window=drift_detection_window,
+        eta_change_windows=distribution_change_windows,
+        training_start_window=training_start_window,
+    )
     
     logger.info(f"Averaged online learning comparison plots saved to: {plot_path_main} and {plot_path_training}")
+    if kf_plot_path:
+        logger.info(f"KF gain comparison plot saved to: {kf_plot_path}")
     return plot_path_main, plot_path_training
+
+
+def plot_averaged_kf_gain_comparison(
+    output_dir,
+    averaged_pretrained_metrics,
+    averaged_online_metrics=None,
+    training_start_window=None,
+    training_end_window=None,
+    drift_detection_window=None,
+    eta_change_windows=None,
+):
+    """
+    Plot SubspaceNet-only vs EKF posterior (both vs GT) and the KF improvement gap.
+
+    Pretrained curves span all windows. Online curves (if provided) appear only after training_end_window.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+
+    logger = logging.getLogger(__name__)
+
+    pretrained_indices = averaged_pretrained_metrics.get("window_indices", [])
+    pretrained_pre_ekf = averaged_pretrained_metrics.get("pre_ekf_losses", [])
+    pretrained_ekf = averaged_pretrained_metrics.get("reference_metric_losses", [])
+    pretrained_eta = averaged_pretrained_metrics.get("window_eta_values", [])
+
+    if not pretrained_indices or not pretrained_pre_ekf or not pretrained_ekf:
+        logger.warning("Skipping KF gain plot: missing pretrained pre_ekf or EKF loss series")
+        return None
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    distribution_change_windows = _derive_eta_change_windows(pretrained_indices, pretrained_eta)
+    if not distribution_change_windows and eta_change_windows:
+        distribution_change_windows = list(eta_change_windows)
+
+    online_indices, online_pre_ekf, online_ekf = [], [], []
+    if averaged_online_metrics is not None:
+        online_indices, online_pre_ekf = _filter_series_after_training(
+            averaged_online_metrics.get("window_indices", []),
+            averaged_online_metrics.get("pre_ekf_losses", []),
+            training_end_window,
+        )
+        _, online_ekf = _filter_series_after_training(
+            averaged_online_metrics.get("window_indices", []),
+            averaged_online_metrics.get("reference_metric_losses", []),
+            training_end_window,
+        )
+
+    def _add_phase_markers(ax):
+        distribution_labeled = False
+        for eta_window in distribution_change_windows:
+            if eta_window >= 0:
+                ax.axvline(
+                    x=eta_window, color='red', linestyle='--', alpha=0.5, linewidth=1.5,
+                    label='Distribution Change' if not distribution_labeled else None,
+                )
+                distribution_labeled = True
+        if drift_detection_window is not None and drift_detection_window >= 0:
+            ax.axvline(
+                x=drift_detection_window, color='crimson', linestyle=':', alpha=0.7, linewidth=1.5,
+                label='Drift Detected (GLRT)',
+            )
+        if training_start_window is not None and training_start_window >= 0:
+            ax.axvline(
+                x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2,
+                label='Training Start',
+            )
+        if training_end_window is not None and training_end_window >= 0:
+            ax.axvline(
+                x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2,
+                label='Training End',
+            )
+
+    fig = plt.figure(figsize=(14, 10))
+
+    ax1 = fig.add_subplot(2, 1, 1)
+    ax1.plot(
+        pretrained_indices, pretrained_pre_ekf, 'b-', linewidth=3,
+        label='SubspaceNet-only (pre-EKF)', marker='s', markersize=6,
+    )
+    ax1.plot(
+        pretrained_indices, pretrained_ekf, 'r-', linewidth=3,
+        label='EKF posterior', marker='o', markersize=6,
+    )
+    if online_indices and online_pre_ekf and online_ekf:
+        ax1.plot(
+            online_indices, online_pre_ekf, color='cornflowerblue', linewidth=2, linestyle='--',
+            label='Algorithm 1 SubspaceNet-only', marker='^', markersize=5,
+        )
+        ax1.plot(
+            online_indices, online_ekf, color='salmon', linewidth=2, linestyle='--',
+            label='Algorithm 1 EKF posterior', marker='v', markersize=5,
+        )
+    _add_phase_markers(ax1)
+    ax1.set_xlabel('Window Index', fontsize=20)
+    ax1.set_ylabel('RMSPE vs GT (rad)', fontsize=20)
+    ax1.set_title('SubspaceNet-only vs EKF Posterior (Supervised)', fontsize=22, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.tick_params(axis='both', which='major', labelsize=16)
+    ax1.legend(fontsize=14, loc='best')
+
+    ax2 = fig.add_subplot(2, 1, 2)
+    pretrained_gain = np.array(pretrained_pre_ekf) - np.array(pretrained_ekf)
+    ax2.plot(
+        pretrained_indices, pretrained_gain, 'g-', linewidth=3,
+        label='Pretrained KF gain (pre-EKF − EKF)', marker='d', markersize=6,
+    )
+    ax2.axhline(y=0.0, color='black', linestyle='-', alpha=0.3, linewidth=1)
+    if online_indices and online_pre_ekf and online_ekf:
+        online_gain = np.array(online_pre_ekf) - np.array(online_ekf)
+        ax2.plot(
+            online_indices, online_gain, color='darkgreen', linewidth=2, linestyle='--',
+            label='Algorithm 1 KF gain', marker='x', markersize=6,
+        )
+    _add_phase_markers(ax2)
+    ax2.set_xlabel('Window Index', fontsize=20)
+    ax2.set_ylabel('RMSPE reduction (rad)', fontsize=20)
+    ax2.set_title('EKF Improvement vs SubspaceNet-only (positive = KF helped)', fontsize=22, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    ax2.tick_params(axis='both', which='major', labelsize=16)
+    ax2.legend(fontsize=14, loc='best')
+
+    all_indices = list(pretrained_indices)
+    if online_indices:
+        all_indices.extend(online_indices)
+    if all_indices:
+        ax1.set_xlim(0, max(all_indices) + 1)
+        ax2.set_xlim(0, max(all_indices) + 1)
+
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, 'averaged_kf_gain_comparison.png')
+    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    return plot_path
+
+
+def plot_eval_dnn_ekf_loss_vs_time(dnn_trajectory_results, output_dir):
+    """
+    Plot per-step SubspaceNet-only vs EKF posterior RMSPE vs GT (batch eval trajectories).
+
+    Averages across trajectories when multiple are present.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    import torch
+
+    from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
+
+    logger = logging.getLogger(__name__)
+    if not dnn_trajectory_results:
+        logger.warning("Skipping eval KF plot: no trajectory results")
+        return None
+
+    os.makedirs(output_dir, exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    rmspe_criterion = RMSPELoss().to(device)
+
+    per_traj_dnn = []
+    per_traj_ekf = []
+
+    for traj in dnn_trajectory_results:
+        dnn_steps = []
+        ekf_steps = []
+        model_preds = traj.get("model_predictions", [])
+        kf_preds = traj.get("kf_predictions", [])
+        gt = traj.get("ground_truth", [])
+
+        for t in range(min(len(model_preds), len(kf_preds), len(gt))):
+            pred = model_preds[t]
+            kf = kf_preds[t]
+            truth = gt[t]
+            if pred is None or kf is None or truth is None:
+                continue
+            if len(pred) == 0 or len(kf) == 0 or len(truth) == 0:
+                continue
+            with torch.no_grad():
+                p = torch.tensor(np.asarray(pred), device=device, dtype=torch.float64).unsqueeze(0)
+                k = torch.tensor(np.asarray(kf), device=device, dtype=torch.float64).unsqueeze(0)
+                tr = torch.tensor(np.asarray(truth), device=device, dtype=torch.float64).unsqueeze(0)
+                dnn_steps.append(rmspe_criterion(p, tr).item())
+                ekf_steps.append(rmspe_criterion(k, tr).item())
+
+        if dnn_steps:
+            per_traj_dnn.append(dnn_steps)
+            per_traj_ekf.append(ekf_steps)
+
+    if not per_traj_dnn:
+        logger.warning("Skipping eval KF plot: no valid step losses computed")
+        return None
+
+    max_len = max(len(s) for s in per_traj_dnn)
+    dnn_avg = []
+    ekf_avg = []
+    for step in range(max_len):
+        dnn_vals = [s[step] for s in per_traj_dnn if step < len(s)]
+        ekf_vals = [s[step] for s in per_traj_ekf if step < len(s)]
+        dnn_avg.append(float(np.mean(dnn_vals)))
+        ekf_avg.append(float(np.mean(ekf_vals)))
+
+    steps = np.arange(max_len)
+    gain = np.array(dnn_avg) - np.array(ekf_avg)
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+
+    ax1.plot(steps, dnn_avg, 'b-', linewidth=2, marker='s', markersize=4, label='SubspaceNet-only (pre-EKF)')
+    ax1.plot(steps, ekf_avg, 'r-', linewidth=2, marker='o', markersize=4, label='EKF posterior')
+    ax1.set_ylabel('RMSPE vs GT (rad)', fontsize=18)
+    ax1.set_title('Eval: SubspaceNet-only vs EKF Posterior', fontsize=20, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(fontsize=14)
+
+    ax2.plot(steps, gain, 'g-', linewidth=2, marker='d', markersize=4, label='KF gain (pre-EKF − EKF)')
+    ax2.axhline(y=0.0, color='black', linestyle='-', alpha=0.3, linewidth=1)
+    ax2.set_xlabel('Trajectory step', fontsize=18)
+    ax2.set_ylabel('RMSPE reduction (rad)', fontsize=18)
+    ax2.set_title('EKF Improvement vs SubspaceNet-only', fontsize=20, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(fontsize=14)
+
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, 'eval_kf_gain_comparison.png')
+    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    logger.info("Eval KF comparison plot saved to: %s", plot_path)
+    return plot_path
 
 
 def plot_performance_improvement_table(scenario_results: dict, output_dir: Path) -> Path:
@@ -1810,8 +2280,8 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
                 supervised_metrics = averaged_data.get('averaged_supervised_trajectory')
                 
                 # Get last 15 windows for RMSPE (main losses)
-                pretrained_rmspe = pretrained_metrics.get('main_losses', [])
-                online_rmspe = online_metrics.get('main_losses', [])
+                pretrained_rmspe = pretrained_metrics.get('reference_metric_losses', [])
+                online_rmspe = online_metrics.get('reference_metric_losses', [])
                 
                 if pretrained_rmspe and online_rmspe:
                     # Use last 15 windows or all if fewer than 15
@@ -1832,7 +2302,7 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
                 
                 # Calculate supervised model RMSPE improvement if available
                 if supervised_metrics is not None:
-                    supervised_rmspe = supervised_metrics.get('main_losses', [])
+                    supervised_rmspe = supervised_metrics.get('reference_metric_losses', [])
                     if supervised_rmspe:
                         num_windows = min(15, len(pretrained_rmspe), len(supervised_rmspe))
                         supervised_last15 = supervised_rmspe[-num_windows:]
@@ -1845,8 +2315,8 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
                         logger.info(f"SNR {snr}: RMSPE Supervised - Supervised Trained: {supervised_rmspe_avg:.6f} rad ({(supervised_rmspe_avg / np.pi) * 180:.3f}°), vs Pretrained Improvement: {supervised_rmspe_improvement:.6f} rad ({(supervised_rmspe_improvement / np.pi) * 180:.3f}°)")
                 
                 # Get last 15 windows for MSIE (training reference losses)
-                pretrained_msie = pretrained_metrics.get('training_reference_losses', [])
-                online_msie = online_metrics.get('training_reference_losses', [])
+                pretrained_msie = pretrained_metrics.get('adaptation_losses', [])
+                online_msie = online_metrics.get('adaptation_losses', [])
                 
                 if pretrained_msie and online_msie:
                     # Use last 15 windows or all if fewer than 15
@@ -1866,7 +2336,7 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
                 
                 # Calculate supervised model MSIE improvement if available
                 if supervised_metrics is not None:
-                    supervised_msie = supervised_metrics.get('training_reference_losses', [])
+                    supervised_msie = supervised_metrics.get('adaptation_losses', [])
                     if supervised_msie:
                         num_windows = min(15, len(pretrained_msie), len(supervised_msie))
                         supervised_last15 = supervised_msie[-num_windows:]
@@ -2185,8 +2655,8 @@ def plot_performance_improvement_table_eta(scenario_results: dict, output_dir: P
                 supervised_metrics = averaged_data.get('averaged_supervised_trajectory')
                 
                 # Get last 15 windows for RMSPE (main losses)
-                pretrained_rmspe = pretrained_metrics.get('main_losses', [])
-                online_rmspe = online_metrics.get('main_losses', [])
+                pretrained_rmspe = pretrained_metrics.get('reference_metric_losses', [])
+                online_rmspe = online_metrics.get('reference_metric_losses', [])
                 
                 if pretrained_rmspe and online_rmspe:
                     # Use last 15 windows or all if fewer than 15
@@ -2207,7 +2677,7 @@ def plot_performance_improvement_table_eta(scenario_results: dict, output_dir: P
                 
                 # Calculate supervised model RMSPE improvement if available
                 if supervised_metrics is not None:
-                    supervised_rmspe = supervised_metrics.get('main_losses', [])
+                    supervised_rmspe = supervised_metrics.get('reference_metric_losses', [])
                     if supervised_rmspe:
                         num_windows = min(15, len(pretrained_rmspe), len(supervised_rmspe))
                         supervised_last15 = supervised_rmspe[-num_windows:]
@@ -2220,8 +2690,8 @@ def plot_performance_improvement_table_eta(scenario_results: dict, output_dir: P
                         logger.info(f"Eta {eta}: RMSPE Supervised - Supervised Trained: {supervised_rmspe_avg:.6f} rad ({(supervised_rmspe_avg / np.pi) * 180:.3f}°), vs Pretrained Improvement: {supervised_rmspe_improvement:.6f} rad ({(supervised_rmspe_improvement / np.pi) * 180:.3f}°)")
                 
                 # Get last 15 windows for MSIE (training reference losses)
-                pretrained_msie = pretrained_metrics.get('training_reference_losses', [])
-                online_msie = online_metrics.get('training_reference_losses', [])
+                pretrained_msie = pretrained_metrics.get('adaptation_losses', [])
+                online_msie = online_metrics.get('adaptation_losses', [])
                 
                 if pretrained_msie and online_msie:
                     # Use last 15 windows or all if fewer than 15
@@ -2241,7 +2711,7 @@ def plot_performance_improvement_table_eta(scenario_results: dict, output_dir: P
                 
                 # Calculate supervised model MSIE improvement if available
                 if supervised_metrics is not None:
-                    supervised_msie = supervised_metrics.get('training_reference_losses', [])
+                    supervised_msie = supervised_metrics.get('adaptation_losses', [])
                     if supervised_msie:
                         num_windows = min(15, len(pretrained_msie), len(supervised_msie))
                         supervised_last15 = supervised_msie[-num_windows:]
@@ -3308,7 +3778,40 @@ def plot_online_learning_results(output_dir, window_losses, window_covariances, 
         return None, None
 
 
-def plot_online_learning_trajectory(window_labels, plot_dir, timestamp):
+def _collect_deduplicated_trajectory_steps(window_labels, window_indices=None, stride=1):
+    """
+    Build one GT label per trajectory step, deduplicating overlapping sliding windows.
+
+    Returns:
+        sorted_steps: ascending trajectory step indices
+        step_labels: list of label arrays (radians), one per sorted step
+        step_window_ids: window index that last wrote each step
+    """
+    import numpy as np
+
+    if window_indices is None:
+        window_indices = list(range(len(window_labels)))
+
+    step_map = {}
+    step_window_ids = {}
+    for window_idx, window_label_list in zip(window_indices, window_labels):
+        start_step = int(window_idx) * int(stride)
+        for step_offset, step_labels in enumerate(window_label_list):
+            global_step = start_step + step_offset
+            step_map[global_step] = np.asarray(step_labels)
+            step_window_ids[global_step] = int(window_idx)
+
+    sorted_steps = sorted(step_map.keys())
+    return sorted_steps, [step_map[s] for s in sorted_steps], [step_window_ids[s] for s in sorted_steps]
+
+
+def plot_online_learning_trajectory(
+    window_labels,
+    plot_dir,
+    timestamp,
+    window_indices=None,
+    stride=1,
+):
     """
     Plot the full trajectory across all windows for online learning.
     
@@ -3316,9 +3819,11 @@ def plot_online_learning_trajectory(window_labels, plot_dir, timestamp):
         window_labels: List of labels for each window, where each window contains a list of numpy arrays
         plot_dir: Directory to save the plots
         timestamp: Timestamp for the plot filename
+        window_indices: Actual window indices (required when stride < window_size)
+        stride: Sliding-window stride used during online learning
         
     Returns:
-        Path to saved trajectory plot
+        Path to saved trajectory plot, or None
     """
     try:
         import matplotlib.pyplot as plt
@@ -3326,39 +3831,22 @@ def plot_online_learning_trajectory(window_labels, plot_dir, timestamp):
         from pathlib import Path
         
         logger = logging.getLogger(__name__)
-        
-        # Flatten all labels across all windows to get the complete trajectory
-        all_angles = []
-        all_distances = []
-        window_indices = []  # Track which window each step belongs to
-        
-        for window_idx, window_label_list in enumerate(window_labels):
-            for step_idx, step_labels in enumerate(window_label_list):
-                # step_labels is a numpy array containing [angle1, angle2, ..., angleM] (in radians)
-                # For far-field, we assume distances are constant (e.g., 30m)
-                # For near-field, distances would be included in the labels
-                
-                # Convert radians to degrees for plotting
-                angles_deg = step_labels * (180.0 / np.pi)
-                all_angles.append(angles_deg)
-                
-                # Use the same range increment mechanism as in generate_trajectories
-                # Start at 20m and increment by 1m each step
-                global_step = len(all_angles) - 1  # Current global step index
-                base_distance = 20.0 + global_step * 1.0  # Increment by 1m each step
-                
-                num_sources = len(step_labels)
-                distances = np.full(num_sources, base_distance)
-                all_distances.append(distances)
-                
-                # Track window index
-                window_indices.append(window_idx)
-        
-        if not all_angles:
+
+        sorted_steps, step_labels_list, step_window_ids = _collect_deduplicated_trajectory_steps(
+            window_labels, window_indices=window_indices, stride=stride
+        )
+        if not step_labels_list:
             logger.warning("No trajectory data available for plotting")
             return None
-        
-        # Find the maximum number of sources across all steps
+
+        all_angles = []
+        all_distances = []
+        for global_step, step_labels in zip(sorted_steps, step_labels_list):
+            angles_deg = step_labels * (180.0 / np.pi)
+            all_angles.append(angles_deg)
+            base_distance = 20.0 + global_step * 1.0
+            all_distances.append(np.full(len(step_labels), base_distance))
+
         max_sources = max(len(angles) for angles in all_angles)
         total_steps = len(all_angles)
         
@@ -3414,42 +3902,36 @@ def plot_online_learning_trajectory(window_labels, plot_dir, timestamp):
         plt.axis('equal')
         plt.xlabel('X (meters)')
         plt.ylabel('Y (meters)')
-        plt.title(f'Online Learning Full Trajectory (T={total_steps}, Sources={max_sources}, Windows={len(window_labels)})')
+        plt.title(
+            f'Online Learning Full Trajectory (T={total_steps} steps, Sources={max_sources}, '
+            f'Windows={len(window_labels)}, stride={stride})'
+        )
         plt.legend()
-        
-        # Add window boundary markers if there are multiple windows
-        if len(window_labels) > 1:
-            # Find window boundaries
-            window_boundaries = []
-            current_window = window_indices[0]
-            for i, window_idx in enumerate(window_indices):
-                if window_idx != current_window:
-                    window_boundaries.append(i)
-                    current_window = window_idx
-            
-            # Add vertical lines for window boundaries
-            for boundary_idx in window_boundaries:
-                if boundary_idx < len(all_angles):
-                    # Get the position at the boundary
-                    angles_at_boundary = all_angles[boundary_idx]
-                    distances_at_boundary = all_distances[boundary_idx]
-                    
-                    # Plot boundary markers for each source
-                    for s in range(len(angles_at_boundary)):
-                        if not np.isnan(angles_at_boundary[s]):
-                            angle_rad = angles_at_boundary[s] * (np.pi / 180.0)
-                            distance = distances_at_boundary[s]
-                            x = distance * np.cos(angle_rad)
-                            y = distance * np.sin(angle_rad)
-                            plt.plot(x, y, 'ks', markersize=10, markerfacecolor='none', markeredgewidth=2)
-        
-        # Save the plot
+
         plot_path = Path(plot_dir) / f"online_learning_trajectory_{timestamp}.png"
         plt.savefig(plot_path)
         plt.close()
-        logger.info(f"Online learning trajectory plot saved to {plot_dir}:")
-        logger.info(f"  - Trajectory plot: {plot_path.name}")
-        
+
+        # Angle vs trajectory step (far-field; more useful than fake-range xy for sine_accel)
+        fig, ax = plt.subplots(figsize=(12, 5))
+        padded = np.full((total_steps, max_sources), np.nan)
+        for i, angles in enumerate(all_angles):
+            padded[i, : len(angles)] = angles
+        for s in range(max_sources):
+            ax.plot(sorted_steps, padded[:, s], "-o", markersize=3, label=f"Source {s + 1}")
+        ax.set_xlabel("Trajectory step")
+        ax.set_ylabel("DOA (degrees)")
+        ax.set_title("Ground-truth DOA vs trajectory step")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        angles_plot_path = Path(plot_dir) / f"online_learning_trajectory_angles_{timestamp}.png"
+        fig.savefig(angles_plot_path, bbox_inches="tight")
+        plt.close(fig)
+
+        logger.info(f"Online learning trajectory plots saved to {plot_dir}:")
+        logger.info(f"  - XY trajectory: {plot_path.name}")
+        logger.info(f"  - Angles vs step: {angles_plot_path.name}")
+
         return plot_path
         
     except ImportError:

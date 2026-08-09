@@ -87,12 +87,13 @@ To detect significant drift, we maintain a rolling baseline from recent history:
 
 - **Baseline window size**: $W_b$ (default: 20 windows)
 - **Minimum samples for statistics**: $N_{\min}$ (default: 10 windows)
+- **Baseline exclusion**: $N_e$ (default: 5 windows) — the most recent $N_e$ values are excluded from baseline computation to avoid contamination by the current drift event
 
-The baseline statistics are computed from the most recent $W_b$ log-GLR values (excluding the current value):
+The history is kept to at most $W_b$ values. Baseline statistics are computed from the oldest portion of that history, excluding the most recent $N_e$ entries:
 
-$$\bar{G}_b = \frac{1}{W_b-1}\sum_{i=t-W_b}^{t-1} G_i$$
+$$\bar{G}_b = \frac{1}{|B|}\sum_{i \in B} G_i, \quad B = \{G_1, \ldots, G_{t-N_e}\} \text{ (last } W_b \text{ values, then drop last } N_e \text{)}$$
 
-$$s_b = \sqrt{\frac{1}{W_b-2}\sum_{i=t-W_b}^{t-1}(G_i - \bar{G}_b)^2}$$
+$$s_b = \sqrt{\frac{1}{|B|}\sum_{i \in B}(G_i - \bar{G}_b)^2} \quad \text{(population std, ddof=0)}$$
 
 ### 2.2 Z-Score Computation
 
@@ -130,48 +131,56 @@ The magnitude of drift, as quantified by the difference between current GLRT val
 - **Large drift** (large GLRT difference) → Higher learning rate for faster adaptation
 - **Small drift** (small GLRT difference) → Lower learning rate for stable, gradual adaptation
 
-**Note**: Z-score is still used for drift detection (Section 2), but the adaptive learning rate uses the GLRT difference directly.
+**Note**: Z-score is still used for drift detection (Section 2), but the adaptive learning rate uses the raw GLRT difference directly.
 
 ### 3.2 Learning Rate Formula
 
-When adaptive learning rate is enabled, the learning rate is computed as:
+When adaptive learning rate is enabled, the learning rate is mapped from the GLRT difference using a **sigmoid function on the log₁₀ scale**:
 
-$$\text{LR}_{\text{adaptive}} = \text{LR}_{\text{base}} \times (1 + k \times \max(0, G_t - G_{\text{baseline}}))$$
+$$\Delta G = G_t - \bar{G}_b$$
+
+$$\log_{10}(\text{LR}_{\text{adaptive}}) = \log_{10}(\text{LR}_{\min}) + \frac{\log_{10}(\text{LR}_{\max}) - \log_{10}(\text{LR}_{\min})}{1 + e^{-k\,(\Delta G - \Delta G_0)}}$$
+
+$$\text{LR}_{\text{adaptive}} = 10^{\,\log_{10}(\text{LR}_{\text{adaptive}})}$$
 
 where:
-- $G_t$ = current GLRT value (main_log_glr)
-- $G_{\text{baseline}}$ = baseline mean of GLRT history ($\bar{G}_b$)
-- $k = 0.03$ (scaling constant)
+- $G_t$ = current GLRT value from the detection signal (the `online_training_reference_loss` = RMSPE(θ̂^ekf, θ̂^pre) series)
+- $\bar{G}_b$ = baseline mean of GLRT history
+- $\Delta G_0 = 69.2599$ (inflection point / midpoint of sigmoid, `adaptive_lr_dG0`)
+- $k = 0.7336$ (sigmoid steepness, `adaptive_lr_k_sigmoid`)
+- $\text{LR}_{\min} = 0.0005$ (minimum learning rate, `adaptive_lr_min`)
+- $\text{LR}_{\max} = 0.0356$ (maximum learning rate, `adaptive_lr_max`)
 
 ### 3.3 Formula Explanation
 
-The formula directly uses the difference between the current GLRT value and the baseline mean:
+The learning rate is interpolated on a log scale between $\text{LR}_{\min}$ and $\text{LR}_{\max}$ using a logistic sigmoid whose argument is $(\Delta G - \Delta G_0)$:
 
 **Step-by-step computation:**
 
-1. **Compute GLRT difference**: $\Delta G = \max(0, G_t - G_{\text{baseline}})$
-   - Only positive differences are used (negative differences indicate values below baseline, use base LR)
-   
-2. **Apply scaling**: $\text{LR}_{\text{adaptive}} = \text{LR}_{\text{base}} \times (1 + k \times \Delta G)$
-   - Minimum learning rate: $\text{LR}_{\text{base}}$ (when $\Delta G = 0$ or negative)
-   - Learning rate increases linearly with GLRT difference
-   - No upper bound (unlike the previous z-score-based formula)
+1. **Compute GLRT difference**: $\Delta G = G_t - \bar{G}_b$ (no clamping — the sigmoid handles small/negative values naturally)
+
+2. **Compute log10 learning rate via sigmoid**:
+   - When $\Delta G \ll \Delta G_0$: sigmoid → 0, so $\log_{10}(\text{LR}) \approx \log_{10}(\text{LR}_{\min})$ → LR ≈ $\text{LR}_{\min}$
+   - When $\Delta G = \Delta G_0$: sigmoid = 0.5, LR is the geometric mean of $\text{LR}_{\min}$ and $\text{LR}_{\max}$
+   - When $\Delta G \gg \Delta G_0$: sigmoid → 1, so $\log_{10}(\text{LR}) \approx \log_{10}(\text{LR}_{\max})$ → LR ≈ $\text{LR}_{\max}$
+
+3. **Exponentiate**: $\text{LR}_{\text{adaptive}} = 10^{\,\log_{10}(\text{LR})}$
 
 ### 3.4 Learning Rate Examples
 
-| GLRT ($G_t$) | Baseline ($G_{\text{baseline}}$) | Difference ($\Delta G$) | Learning Rate (if base=0.001, k=0.03) |
-|--------------|----------------------------------|-------------------------|----------------------------------------|
-| 2.0          | 2.0                              | 0.0                     | 0.001                                  |
-| 3.0          | 2.0                              | 1.0                     | 0.00103                                |
-| 5.0          | 2.0                              | 3.0                     | 0.00109                                |
-| 10.0         | 2.0                              | 8.0                     | 0.00124                                |
-| 1.0          | 2.0                              | 0.0 (clamped)           | 0.001                                  |
+| $\Delta G = G_t - \bar{G}_b$ | Sigmoid output | Learning Rate (defaults) |
+|------------------------------|----------------|--------------------------|
+| −100 (well below $\Delta G_0$) | ≈ 0.0          | ≈ 0.0005 (LR_min)        |
+| 0                            | ≈ 0.0          | ≈ 0.0005                 |
+| 69.26 (= $\Delta G_0$)       | 0.5            | ≈ 0.00421 (geometric mean) |
+| 150 (well above $\Delta G_0$)| ≈ 1.0          | ≈ 0.0356 (LR_max)        |
 
 **Key Properties:**
 - Monotonically increasing with GLRT difference
-- Linear scaling (no saturation)
-- Minimum learning rate equals base learning rate
-- Simple, interpretable formula
+- Sigmoid (S-curve) scaling — smooth saturation at both ends
+- Hard lower bound: $\text{LR}_{\min}$ (as $\Delta G \to -\infty$)
+- Hard upper bound: $\text{LR}_{\max}$ (as $\Delta G \to +\infty$)
+- Interpolation is on log scale so equal multiplicative steps feel equal in practice
 
 ---
 
@@ -230,9 +239,11 @@ The formula directly uses the difference between the current GLRT value and the 
           ▼
    ┌──────────────────────────────────────┐
    │ Calculate adaptive learning rate:    │
-   │   ΔG = max(0, G_t - G_baseline)      │
-   │   LR = LR_base × (1 + k × ΔG)        │
-   │   where k = 0.03                      │
+   │   ΔG = G_t - G_baseline              │
+   │   log_lr = log10(LR_min)             │
+   │     + (log10(LR_max)-log10(LR_min))  │
+   │     / (1 + exp(-k*(ΔG - ΔG0)))       │
+   │   LR = 10^log_lr                     │
    └──────┬───────────────────────────────┘
           │
           ▼
@@ -248,14 +259,18 @@ The formula directly uses the difference between the current GLRT value and the 
 
 | Parameter | Symbol | Default | Description |
 |-----------|--------|---------|-------------|
-| `min_segment_size` | $m$ | 3 | Minimum samples per segment for GLRT |
-| `glrt_baseline_window_size` | $W_b$ | 20 | Number of windows for baseline estimation |
-| `glrt_min_samples_for_statistics` | $N_{\min}$ | 10 | Minimum samples before computing z-score |
-| `glrt_detection_z_threshold` | $z_{\text{threshold}}$ | 2.5 | Z-score threshold for drift detection |
+| `GLRT_MIN_SEGMENT_SIZE` | $m$ | 5 | Minimum samples per segment for changepoint GLRT (internal, `utils/drift_gates.py`) |
+| `drift_warmup_windows` | $W$ | 7 | Skip first W trajectory windows; also min baseline g-count before z-score |
+| `drift_guard_samples` | $G$ | 3 | Most recent g-values excluded from baseline |
+| `drift_z_threshold` | $z_{\text{threshold}}$ | 2.5 | Z-score threshold for drift detection |
+| `drift_history_max_size` | - | null | Optional cap on g-history length |
 | `time_to_learn` | $T_d$ | Configurable | Windows to wait after detection before learning |
-| `use_adaptive_learning_rate` | - | False | Enable/disable adaptive LR |
-| `learning_rate` | $\text{LR}_{\text{base}}$ | 0.001 | Base learning rate |
-| adaptive LR scaling constant | $k$ | 0.03 | Scaling factor for GLRT difference in adaptive LR formula |
+| `use_adaptive_learning_rate` | - | False | Enable/disable adaptive LR (sigmoid mapping) |
+| `learning_rate` | $\text{LR}_{\text{base}}$ | 0.001 | Base (fixed) learning rate when adaptive LR is disabled |
+| `adaptive_lr_min` | $\text{LR}_{\min}$ | 0.0005 | Lower bound of the adaptive LR sigmoid |
+| `adaptive_lr_max` | $\text{LR}_{\max}$ | 0.0356 | Upper bound of the adaptive LR sigmoid |
+| `adaptive_lr_k_sigmoid` | $k$ | 0.7336 | Steepness of the sigmoid curve |
+| `adaptive_lr_dG0` | $\Delta G_0$ | 69.2599 | Inflection point of the sigmoid (GLRT difference midpoint) |
 
 ---
 
@@ -264,9 +279,9 @@ The formula directly uses the difference between the current GLRT value and the 
 1. **Statistical Rigor**: GLRT provides a principled statistical test for changepoint detection
 2. **Relative Detection**: Z-score normalization makes detection relative to recent history, adapting to different loss scales
 3. **Robust to Outliers**: Baseline smoothing and delayed activation reduce false positives
-4. **Adaptive Response**: Learning rate scales with drift magnitude (GLRT difference) for optimal adaptation
-5. **Simple Formula**: Linear scaling based on GLRT difference provides interpretable and predictable behavior
-6. **Separation of Concerns**: Z-score used for detection, GLRT difference used for learning rate adaptation
+4. **Adaptive Response**: Learning rate scales with drift magnitude via a sigmoid on log scale, giving smooth, bounded adaptation
+5. **Bounded Formula**: Sigmoid mapping guarantees the learning rate stays within $[\text{LR}_{\min}, \text{LR}_{\max}]$, preventing runaway updates
+6. **Separation of Concerns**: Z-score used for detection, raw GLRT difference used for learning rate adaptation
 
 ---
 
@@ -287,9 +302,10 @@ The formula directly uses the difference between the current GLRT value and the 
 ### 7.3 Adaptive Learning Rate Properties
 
 - **Monotonicity**: Learning rate is non-decreasing with GLRT difference $\Delta G$
-- **Linearity**: Learning rate scales linearly with GLRT difference (no saturation)
-- **Lower Bound**: Minimum learning rate equals base learning rate (when $\Delta G \leq 0$)
-- **Interpretability**: Direct relationship between GLRT magnitude and learning rate scaling
+- **Sigmoid (S-curve) Scaling**: Smooth transition from $\text{LR}_{\min}$ to $\text{LR}_{\max}$ with a configurable inflection point $\Delta G_0$
+- **Hard Bounds**: Learning rate is always in $[\text{LR}_{\min}, \text{LR}_{\max}]$ — no runaway scaling
+- **Log-scale Interpolation**: Equal multiplicative steps in LR correspond to equal steps in log-space, matching the perceptual scale of learning rates
+- **Inflection at $\Delta G_0$**: The sigmoid midpoint is at $\Delta G = \Delta G_0 = 69.26$, where LR equals the geometric mean of $\text{LR}_{\min}$ and $\text{LR}_{\max}$
 
 ---
 
