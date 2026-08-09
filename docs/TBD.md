@@ -64,13 +64,13 @@ simulation/drift/
 
 ## 5. CLI v2 cutover (Phase 6)
 
-**Status:** Mostly done (2026-08-09)
+**Status:** Done (2026-08-09)
 
 - [x] `.vscode/launch.json` → `main_v2.py run ...` recipes
 - [x] Deprecate `main.py` commands (`cli/legacy_bridge.warn_deprecated`)
 - [x] Remove duplicate sweep plotting from `main.py` → `legacy_postprocess` → `plot_dispatch`
 - [x] Delete unused `experiments/runner.py`
-- [ ] Full paper config manual run: 6-eta + LR sweep numeric + plot parity (use launch config **v2: paper eta sweep**)
+- [x] Full paper config: `experiments/results/paper_eta_sweep_v3/` — 6 η × 7 LR, all aggregate + per-subdir plots
 
 **Already done:** thin-config parity, paper-config numeric parity (trimmed), 51+ tests.
 
@@ -106,9 +106,12 @@ Monolithic `utils/plotting.py` removed. Call sites unchanged: `from utils.plotti
 
 ## 8. Stage 2 — import cleanup
 
-- Remove duplicate imports across runners
-- Lazy imports in CLI (`run --help` still loads torch today)
-- Fix `tests/kalman_filter/*` collection error (`ModuleNotFoundError: src` — DCD_MUSIC path)
+**Status:** Done (2026-08-09)
+
+- [x] `tests/conftest.py` — workspace + DCD_MUSIC on `sys.path` for all tests
+- [x] Fix `tests/kalman_filter/test_helpers.py` — patch `create_from_config` (was stale `from_config`)
+- [x] Lazy CLI — `_LazyCLI` static command list for top-level `--help`; heavy imports on subcommand only
+- [x] Runner import dedupe — `Online_learning.py`, `evaluation.py`, `training.py`
 
 ---
 
@@ -153,4 +156,4 @@ Monolithic `utils/plotting.py` removed. Call sites unchanged: `from utils.plotti
 
 - `goal=None` legacy path in `_run_sweep_iteration` can diverge from explicit `--goal` if YAML flags disagree
 - Grid 4D results shape differs from kalman_2d (`sim.results` not always set)
-- `main.py` remains authoritative until task 5 cutover
+- `main.py` deprecated; use `main_v2.py` for new work

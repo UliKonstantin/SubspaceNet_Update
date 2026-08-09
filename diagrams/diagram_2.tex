@@ -1,0 +1,269 @@
+\documentclass[11pt,a4paper]{article}
+
+% Required packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{tikz}
+\usepackage{geometry}
+\usepackage{xcolor}
+
+% TikZ libraries
+\usetikzlibrary{positioning, arrows.meta, shapes.geometric, fit, backgrounds, shadows}
+
+% Page geometry with smaller margins
+\geometry{
+    left=0.3cm,
+    right=0.3cm,
+    top=0.5cm,
+    bottom=0.5cm
+}
+
+% Define custom colors
+\definecolor{lightblue}{RGB}{173, 216, 230}
+\definecolor{lightorange}{RGB}{255, 218, 185}
+\definecolor{lightgreen}{RGB}{144, 238, 144}
+\definecolor{lightyellow}{RGB}{255, 255, 224}
+\definecolor{lightpink}{RGB}{255, 182, 193}
+\definecolor{lightpurple}{RGB}{221, 160, 221}
+\definecolor{mediumblue}{RGB}{135, 206, 235}
+\definecolor{mediumgreen}{RGB}{152, 251, 152}
+\definecolor{darkblue}{RGB}{70, 130, 180}
+\definecolor{darkpurple}{RGB}{138, 43, 226}
+
+% Compact TikZ styles with larger fonts
+\tikzset{
+    cascade_block/.style={
+        rectangle, 
+        minimum height=1.5cm, 
+        minimum width=3.5cm,
+        draw, 
+        thick, 
+        rounded corners=4pt,
+        align=center, 
+        font=\huge\bfseries,
+        inner sep=4pt
+    },
+    narrow_cascade_block/.style={
+        rectangle, 
+        minimum height=1.5cm, 
+        minimum width=3.5cm,
+        draw, 
+        thick, 
+        rounded corners=4pt,
+        align=center, 
+        font=\large\bfseries,
+        inner sep=4pt
+    },
+    block/.style={
+        rectangle, 
+        draw, 
+        thick, 
+        rounded corners=4pt,
+        align=center, 
+        font=\small\bfseries,
+        inner sep=4pt
+    },
+    toptextblock/.style={
+        rectangle, 
+        draw, 
+        thick, 
+        rounded corners=4pt,
+        minimum height=1.8cm, 
+        minimum width=1.0cm,
+        text width=0.8cm, 
+        align=center, 
+        font=\large\bfseries,
+        inner sep=0.5pt,
+        text depth=0pt,
+        text height=0.3cm
+    },
+    wideblock/.style={
+        rectangle, 
+        draw, 
+        thick, 
+        rounded corners=4pt,
+        align=center, 
+        font=\large\bfseries,
+        inner sep=4pt
+    },
+    smallblock/.style={
+        rectangle, 
+        draw, 
+        thick, 
+        rounded corners=3pt,
+        align=center, 
+        font=\large,
+        inner sep=3pt
+    },
+    circleblock/.style={
+        circle,
+        draw,
+        thick,
+        align=center,
+        font=\large,
+        inner sep=3pt
+    },
+    arrow/.style={-{Stealth[length=2mm, width=1.5mm]}, thick},
+    dashedarrow/.style={-{Stealth[length=2mm, width=1.5mm]}, thick, dashed, red},
+    estimatorbg/.style={
+        fill=lightblue!20, 
+        draw=darkblue, 
+        rounded corners=6pt,
+        inner sep=6pt
+    },
+    monitorbg/.style={
+        fill=lightpurple!15, 
+        draw=darkpurple, 
+        rounded corners=6pt,
+        inner sep=6pt
+    }
+}
+
+\begin{document}
+
+\begin{center}
+\resizebox{0.8\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.6cm]
+    
+    % Preliminary blocks (individual samples) - modified layout
+    \node[smallblock, fill=lightgray, text=black] (xdots) at (-13,4.3) {$\vdots$};
+    \node[smallblock, fill=lightgray, text=black] (x1) at (-13,5.2) {$X_1$};
+    \node[minimum width=2.5cm, minimum height=2.0cm, inner sep=0pt] (sensor_image) at (-13,0.5) {\includegraphics[width=9cm]{sensor_img.png}};
+    \node[smallblock, fill=lightgray, text=black] (x2) at (-13,6.1) {$X_2$};
+    \node[smallblock, fill=lightgray, text=black] (x3) at (-13,7.0) {$X_3$};
+    \node[smallblock, fill=lightgray, text=black] (xdots) at (-13,7.9) {$\vdots$};
+    
+    % Input (accumulated from samples) - cascade design
+    \coordinate (input_base) at (-13.0,10);
+    \node[cascade_block, fill=lightorange, xshift=0.225cm, yshift=0.225cm] (input4) at (input_base) {};
+    \node[cascade_block, fill=lightpink, xshift=0.15cm, yshift=0.15cm] (input3) at (input_base) {};
+    \node[cascade_block, fill=lightpurple, xshift=0.075cm, yshift=0.075cm] (input2) at (input_base) {};
+    \node[cascade_block, fill=lightblue, font=\huge] (input) at (input_base) {$\underline{\mathbf{X}} \in \mathbb{C}^{N \times T}$};
+   
+ 
+    % AI-aided localization block (single block, not cascade)
+    \coordinate (ai_base) at ([xshift=5cm, yshift=0cm] input.east);
+    \node[wideblock, fill=lightgreen, font=\huge] (ai_block) at (ai_base) {AI-Aided\\Localization\\$\hat{\theta} = g_\psi( \mathbf{X})\in \mathbb{C}^{M}$};
+    
+    % Signal model block exactly above AI block
+    \node[block, fill=lightorange, above=0.8cm of ai_block, font=\huge] (signal_model) {Signal Model\\$X=A(\theta(t))S+V$};
+    
+    % Preliminary theta blocks (individual estimates) - horizontal row
+    \coordinate (theta_prelim_base) at ([xshift=1.5cm] ai_block.east);
+    \node[smallblock, fill=lightgray, text=black, right=0.1cm of theta_prelim_base] (theta1) {$\hat{\theta}_{i}$};
+    \node[smallblock, fill=lightgray, text=black, right=0.1cm of theta1] (theta2) {$\hat{\theta}_{i+1}$};
+    \node[smallblock, fill=lightgray, text=black, right=0.1cm of theta2] (theta3_ind) {$\hat{\theta}_{i+2}$};
+    
+    % RMSPE block (inside monitor) - defined early for reference
+    \node[smallblock, fill=white, xshift=4.8cm, yshift=4.0cm, font=\huge] (minus) {$\frac{1}{I}\sum_{i=1}^{I}\mathbb{E}[\|\tilde{\theta}_i - \hat{\theta}_i\|]$};
+    
+    % Theta hat cascade (stacked blocks like folders) - positioned in adapt line
+    \coordinate (theta_base) at ([xshift=-4.9cm, yshift=2cm] minus);
+    \node[smallblock, fill=lightgray, text=black, above=2.5cm of theta_base] (theta_vdots) {$\vdots$};
+    \node[narrow_cascade_block, fill=lightblue, xshift=0.225cm, yshift=0.225cm] (theta4) at (theta_base) {};
+    \node[narrow_cascade_block, fill=lightpurple, xshift=0.15cm, yshift=0.15cm] (theta3) at (theta_base) {};
+    \node[narrow_cascade_block, fill=lightpink, xshift=0.075cm, yshift=0.075cm] (theta2) at (theta_base) {};
+    \node[narrow_cascade_block, fill=lightyellow, font=\huge] (new_block) at (theta_base) {$\mathbf{\hat{\underline{\theta}}} \in \mathbb{C}^{I\times{M}}$};
+    
+    % Monitor section
+    \node[font=\large\bfseries, color=darkpurple, right=9.5cm of ai_block] (mon_title) {Estimate};
+
+    
+    % Monitor components
+    \node[block, fill=mediumblue, right=1.5cm of theta3_ind, font=\huge] (kalman) {Downstream Tracking\\Block};
+    
+    % State evolution model input to EKF
+    \node[block, fill=lightpink, above=1.4cm of kalman, font=\huge] (state_model) {Temporal Evolution Model\\$\theta(t) = f(\theta_{t-1})+w$};
+    
+    % Preliminary theta wave blocks (individual estimates) - horizontal row
+    \coordinate (wave_prelim_base) at ([xshift=1.5cm] kalman.east);
+    \node[smallblock, fill=lightgray, text=black, right=0.15cm of wave_prelim_base] (wave1) {$\tilde{\theta}_{i}$};
+    \node[smallblock, fill=lightgray, text=black, right=0.15cm of wave1] (wave2) {$\tilde{\theta}_{i+1}$};
+    \node[smallblock, fill=lightgray, text=black, right=0.15cm of wave2] (wave3) {$\tilde{\theta}_{i+2}$};
+    \node[smallblock, fill=lightgray, text=black, right=0.15cm of wave3] (wave_dots) {$\cdots$};
+    
+    % Theta wave cascade (stacked blocks like folders) - positioned in adapt line
+    \coordinate (wave_base) at ([xshift=7.2cm, yshift=2cm] minus);
+    \node[smallblock, fill=lightgray, text=black, above=2.5cm of wave_base] (theta_tilde_vdots) {$\vdots$};
+    \node[narrow_cascade_block, fill=lightorange, xshift=0.225cm, yshift=0.225cm] (wave4) at (wave_base) {};
+    \node[narrow_cascade_block, fill=lightpink, xshift=0.15cm, yshift=0.15cm] (wave3) at (wave_base) {};
+    \node[narrow_cascade_block, fill=lightpurple, xshift=0.075cm, yshift=0.075cm] (wave2) at (wave_base) {};
+    \node[narrow_cascade_block, fill=lightgreen, font=\huge] (output) at (wave_base) {$\mathbf{\tilde{\underline{\theta}}} \in \mathbb{C}^{I\times{M}}$};
+    
+    % Adapt section title
+    \node[font=\huge\bfseries, color=darkpurple, above=1.2cm of minus] (adapt_title) {Adapt};
+    \node[font=\large, text width=4.5cm, align=center, below=0.01cm of adapt_title] (adapt_subtitle) {Novel Unsupervised \\Adaptation Block};
+    % Threshold circle block
+    \node[circleblock, fill=lightgray, below=0.6cm of minus, font=\huge] (threshold) {$>$Threshold};
+
+    
+    % Background regions (removed estimator and monitor backgrounds)
+    \begin{scope}[on background layer]
+        \node[monitorbg, fill=lightpurple!30, fit=(minus)(threshold)] {};
+    \end{scope}
+    
+    % Funnel lines from preliminary blocks to main input corners
+    \draw[thick, dashed] (xdots) -- (input.south west);
+    \draw[thick, dashed] (xdots) -- (input.south east);
+    
+    % Funnel lines from preliminary theta blocks to theta hat cascade corners
+    \draw[thick, dashed] (theta_vdots) -- (new_block.north west);
+    \draw[thick, dashed] (theta_vdots) -- (new_block.north east);
+    
+    % Funnel lines from preliminary theta wave blocks to theta wave cascade corners
+    \draw[thick, dashed] (theta_tilde_vdots) -- (output.north west);
+    \draw[thick, dashed] (theta_tilde_vdots) -- (output.north east);
+    
+    % Main flow arrows (sample cascade to input, then to AI block)
+    \draw[thick, dashed] (input) -- (ai_block);
+    \draw[arrow] (signal_model) -- (ai_block);
+    
+    % Monitor connections
+    \draw[thick, dashed] (ai_block) -- (theta_prelim_base) node[midway, above, font=\small] {};
+    
+    % Split point for theta hat to EKF connection
+    \coordinate (theta_split) at ([xshift=0.0cm, yshift=-1.2cm] new_block.south);
+    \node[circle, fill=black, minimum size=0.08cm, inner sep=0pt] at (theta_split) {};
+    \draw (new_block) -- (theta_split);
+    \draw[arrow] (theta_split) -- (minus);
+    
+    % Split point for theta tilde cascade to minus connection (mirror image)
+    \coordinate (wave_split) at ([xshift=0.0cm, yshift=-1.24cm] output.south);
+    \node[circle, fill=black, minimum size=0.08cm, inner sep=0pt] at (wave_split) {};
+    \draw (output) -- (wave_split);
+    \draw[arrow] (wave_split) -- (minus);
+    
+    \draw[arrow] (state_model) -- (kalman);
+    \draw[thick, dashed] (kalman) -- (wave1) node[midway, above, font=\small] {};
+    \draw[thick, dashed] (theta3_ind) -- (kalman);
+    
+    % Split point for feedback loop from EKF to theta wave cascade (middle of arrow)
+    \coordinate (feedback_split) at ([xshift=0.2cm] kalman.east);
+    \node[circle, fill=black, minimum size=0.15cm, inner sep=0pt] at (feedback_split) {};
+    \draw (kalman) -- (feedback_split);
+    
+    % Feedback loop (4 points: split-down-left-up-connection to below kalman.west)
+    \coordinate (fb_down_point) at ([yshift=-1.9cm] feedback_split);
+    \coordinate (fb_left_point) at ([xshift=-7.19cm] fb_down_point);
+    \coordinate (fb_up_point) at ([yshift=0cm, xshift=-0.2cm] kalman.west);
+    \draw[arrow] (feedback_split) -- (fb_down_point) -- (fb_left_point) node[midway, above, font=\huge] {Feedback} -- (fb_up_point) -- (kalman.west);
+    
+    % Output arrow from theta tilde dots
+    \draw[arrow] (wave_dots) -- ([xshift=1.8cm] wave_dots.east) node[midway, above, font=\large] {Output};
+    
+    
+    % Output from minus block to AI block through threshold (left->up) - Learning Trigger
+    \coordinate (intermediate1) at ([xshift=-11cm] threshold);
+    \coordinate (intermediate2) at ([yshift=0cm] intermediate1);
+    \draw[thick, dashed, red] (minus) -- (threshold);
+    \draw[thick, dashed, red] (threshold) -- (intermediate1) node[midway, above, font=\huge, red] {Trigger end-to-end Learning} -- (intermediate2);
+    \draw[dashedarrow] (intermediate2) -| (ai_block);
+    
+\end{tikzpicture}%
+}
+\end{center}
+
+\end{document}

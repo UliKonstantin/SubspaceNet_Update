@@ -12,8 +12,8 @@ from simulation.kalman_filter.extended import ExtendedKalmanFilter1D
 class TestHelperFunctions(unittest.TestCase):
     """Test the helper functions in the kalman_filter package."""
     
-    @patch('simulation.kalman_filter.ExtendedKalmanFilter1D.from_config')
-    @patch('simulation.kalman_filter.KalmanFilter1D.from_config')
+    @patch('simulation.kalman_filter.ExtendedKalmanFilter1D.create_from_config')
+    @patch('simulation.kalman_filter.KalmanFilter1D.create_from_config')
     def test_get_kalman_filter_standard(self, mock_kf_from_config, mock_ekf_from_config):
         """Test get_kalman_filter with standard filter type."""
         # Create mock config
@@ -33,8 +33,8 @@ class TestHelperFunctions(unittest.TestCase):
         mock_ekf_from_config.assert_not_called()
         self.assertEqual(filter, mock_kf)
     
-    @patch('simulation.kalman_filter.ExtendedKalmanFilter1D.from_config')
-    @patch('simulation.kalman_filter.KalmanFilter1D.from_config')
+    @patch('simulation.kalman_filter.ExtendedKalmanFilter1D.create_from_config')
+    @patch('simulation.kalman_filter.KalmanFilter1D.create_from_config')
     def test_get_kalman_filter_extended(self, mock_kf_from_config, mock_ekf_from_config):
         """Test get_kalman_filter with extended filter type."""
         # Create mock config
@@ -54,8 +54,8 @@ class TestHelperFunctions(unittest.TestCase):
         mock_kf_from_config.assert_not_called()
         self.assertEqual(filter, mock_ekf)
     
-    @patch('simulation.kalman_filter.ExtendedKalmanFilter1D.from_config')
-    @patch('simulation.kalman_filter.KalmanFilter1D.from_config')
+    @patch('simulation.kalman_filter.ExtendedKalmanFilter1D.create_from_config')
+    @patch('simulation.kalman_filter.KalmanFilter1D.create_from_config')
     def test_get_kalman_filter_nonlinear_trajectory(self, mock_kf_from_config, mock_ekf_from_config):
         """Test get_kalman_filter with non-linear trajectory type."""
         # Create mock config
@@ -75,8 +75,8 @@ class TestHelperFunctions(unittest.TestCase):
         mock_kf_from_config.assert_not_called()
         self.assertEqual(filter, mock_ekf)
     
-    @patch('simulation.kalman_filter.ExtendedKalmanFilter1D.from_config')
-    @patch('simulation.kalman_filter.KalmanFilter1D.from_config')
+    @patch('simulation.kalman_filter.ExtendedKalmanFilter1D.create_from_config')
+    @patch('simulation.kalman_filter.KalmanFilter1D.create_from_config')
     def test_get_kalman_filter_with_trajectory_type_param(self, mock_kf_from_config, mock_ekf_from_config):
         """Test get_kalman_filter with trajectory_type parameter."""
         # Create mock config

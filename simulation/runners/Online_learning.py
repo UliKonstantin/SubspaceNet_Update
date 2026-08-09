@@ -1,4 +1,3 @@
-from ast import Not
 from typing import Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
 import logging
@@ -13,19 +12,18 @@ import yaml
 from itertools import permutations
 import itertools
 from dataclasses import dataclass
-from typing import Optional, List, Union, Dict, Any
 
 from config.schema import Config
 from simulation.runners.data import TrajectoryDataHandler, create_online_learning_dataset
 from simulation.runners.training import Trainer, TrainingConfig, TrajectoryTrainer, OnlineTrainer
 from utils.utils import log_window_summary, save_model_state, log_online_learning_window_summary
 from simulation.kalman_filter import KalmanFilter1D, BatchKalmanFilter1D, BatchExtendedKalmanFilter1D
+from simulation.kalman_filter.extended import ExtendedKalmanFilter1D
 from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
 from DCD_MUSIC.src.metrics.rmape_loss import RMAPELoss
 from DCD_MUSIC.src.metrics.multimoment_innovation_consistency_loss import MultiMomentInnovationConsistencyLoss
 from DCD_MUSIC.src.signal_creation import Samples
 from DCD_MUSIC.src.evaluation import get_model_based_method, evaluate_model_based
-from simulation.kalman_filter.extended import ExtendedKalmanFilter1D
 from utils.ekf_handoff import (
     ekf_handoff_reuse_step0,
     ekf_handoff_step_index,

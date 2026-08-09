@@ -4,8 +4,6 @@ Training components for simulations.
 This module handles model creation and training.
 """
 
-from typing import Dict, Any, Optional
-
 class Trainer:
     """
     Handles model training for simulations.

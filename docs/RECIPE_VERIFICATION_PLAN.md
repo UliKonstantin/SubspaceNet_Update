@@ -539,4 +539,16 @@ This plan adds **plot/visual** verification and covers **eval / kalman / 4D** no
 
 ## Next step (current position)
 
-**Recipe verification complete (Steps 0–10).** Teardown done. TBD #1–2 embedded in `utils/lr_analysis.py` + postprocess. Next: plot consolidation (TBD #6), push commits.
+**Recipe verification complete (Steps 0–10).** Paper eta+LR sweep v3 signed off (`experiments/results/paper_eta_sweep_v3/`): 10/10 top-level artifacts, 42/42 LR subdirs with main-loss + KF gain plots. TBD #1–9 done except #10 (extended tests). Next: optional GLRT→adaptive-LR wiring (TBD #2 phase 2) or TBD #10 parity tests.
+
+---
+
+## Paper eta sweep v3 sign-off (2026-08-09)
+
+- **Output:** `experiments/results/paper_eta_sweep_v3/`
+- **Config:** `configs/Used_for_paper/SineAccel_base_model_Online_learning_eta_sweep_config.yaml`
+- **Command:** `python3 main_v2.py run -c … --goal online_learning --sweep 1d --axis eta --lr-sweep -o experiments/results/paper_eta_sweep_v3`
+- **Top-level artifacts:** all present (scenario comparison, drift detection ×2, LR heatmap + analysis, drift JSON)
+- **Per-subdir:** 6 η × 7 LR = 42 combos; `averaged_online_learning_comparison_main_loss.png` + `averaged_kf_gain_comparison.png` in each
+- **Plots OK (visual):** [x] user sign-off
+- **Logic OK:** [x] EKF handoff fix validated in v3

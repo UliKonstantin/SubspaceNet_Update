@@ -24,7 +24,6 @@ from cli.options import (
     values_option,
 )
 from cli.resolver import resolve_run_request
-from cli.runner import run as run_simulation
 from cli.types import RoutingError
 
 logger = logging.getLogger("SubspaceNet.cli")
@@ -84,6 +83,8 @@ def run_command(
                 list(kf_measurement_noise_values) if kf_measurement_noise_values else None
             ),
         )
+        from cli.runner import run as run_simulation
+
         run_simulation(request)
     except RoutingError as exc:
         click.echo(f"Error: {exc}", err=True)

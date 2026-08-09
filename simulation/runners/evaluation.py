@@ -14,8 +14,7 @@ from torch.utils.data import DataLoader
 
 from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
 from DCD_MUSIC.src.evaluation import get_model_based_method, evaluate_model_based
-from simulation.kalman_filter import KalmanFilter1D, BatchKalmanFilter1D
-from simulation.kalman_filter.extended import ExtendedKalmanFilter1D
+from simulation.kalman_filter import KalmanFilter1D, BatchKalmanFilter1D, ExtendedKalmanFilter1D
 
 logger = logging.getLogger(__name__)
 
