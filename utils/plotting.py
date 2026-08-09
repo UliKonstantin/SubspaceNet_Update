@@ -2222,6 +2222,253 @@ def plot_eval_dnn_ekf_loss_vs_time(dnn_trajectory_results, output_dir):
     return plot_path
 
 
+def plot_training_curves(metrics: dict, output_dir) -> None:
+    """Plot and save training loss/accuracy curves from stored trainer metrics."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from datetime import datetime
+    from pathlib import Path
+
+    logger = logging.getLogger(__name__)
+    output_dir = Path(output_dir)
+    plots_dir = output_dir / metrics.get("plots_subdir", "plots")
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    train_losses = metrics.get("train_losses", [])
+    valid_losses = metrics.get("valid_losses", [])
+    train_accuracies = metrics.get("train_accuracies", [])
+    valid_accuracies = metrics.get("valid_accuracies", [])
+    train_angles_losses = metrics.get("train_angles_losses", [])
+    valid_angles_losses = metrics.get("valid_angles_losses", [])
+    train_ranges_losses = metrics.get("train_ranges_losses", [])
+    valid_ranges_losses = metrics.get("valid_ranges_losses", [])
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    n_epochs = max(len(train_losses), len(valid_losses), 1)
+    epochs = np.arange(1, n_epochs + 1)
+    plot_kwargs = {"marker": "o", "linewidth": 2, "markersize": 6}
+
+    def _finite_series(values):
+        arr = np.asarray(values, dtype=float)
+        if arr.size == 0 or not np.any(np.isfinite(arr)):
+            return None
+        return arr
+
+    def _save_epoch_plot(y_series, ylabel, title, filename):
+        plt.figure(figsize=(10, 6))
+        plotted = False
+        for values, label in y_series:
+            arr = _finite_series(values)
+            if arr is None:
+                continue
+            x = epochs[: len(arr)]
+            plt.plot(x, arr, label=label, **plot_kwargs)
+            plotted = True
+        if not plotted:
+            plt.close()
+            logger.warning("Skipping %s: no finite training metrics to plot", filename)
+            return
+        plt.xlabel("Epoch")
+        plt.ylabel(ylabel)
+        plt.title(title)
+        if n_epochs == 1:
+            plt.xlim(0.5, 1.5)
+            plt.xticks([1])
+        else:
+            plt.xlim(0.5, n_epochs + 0.5)
+            plt.xticks(epochs)
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(plots_dir / filename)
+        plt.close()
+
+    _save_epoch_plot(
+        [(train_losses, "Training Loss"), (valid_losses, "Validation Loss")],
+        ylabel="Loss",
+        title="Training and Validation Loss",
+        filename=f"loss_curve_{timestamp}.png",
+    )
+
+    train_acc_pct = np.asarray(train_accuracies, dtype=float) * 100
+    valid_acc_pct = np.asarray(valid_accuracies, dtype=float) * 100
+    _save_epoch_plot(
+        [(train_acc_pct, "Training Accuracy"), (valid_acc_pct, "Validation Accuracy")],
+        ylabel="Accuracy (%)",
+        title="Training and Validation Accuracy",
+        filename=f"accuracy_curve_{timestamp}.png",
+    )
+
+    if train_angles_losses and valid_angles_losses:
+        plt.figure(figsize=(10, 6))
+        plt.plot(train_angles_losses, label="Training Angle Loss")
+        plt.plot(valid_angles_losses, label="Validation Angle Loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Angle Loss")
+        plt.title("Training and Validation Angle Loss")
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(plots_dir / f"angle_loss_curve_{timestamp}.png")
+        plt.close()
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(train_ranges_losses, label="Training Range Loss")
+        plt.plot(valid_ranges_losses, label="Validation Range Loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Range Loss")
+        plt.title("Training and Validation Range Loss")
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(plots_dir / f"range_loss_curve_{timestamp}.png")
+        plt.close()
+
+    logger.info("Training curves saved under %s", plots_dir)
+
+
+def plot_glrt_averaged_drift_results(
+    glrt_results: dict,
+    output_dir,
+    drift_warmup_windows: int,
+    drift_guard_samples: int,
+    eta_change_windows=None,
+) -> None:
+    """Plot averaged GLRT drift-detection figures for adaptation and reference losses."""
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    from simulation.runners.sandbox import glrt_changepoint_detection, plot_results
+    from utils import drift_gates
+
+    logger = logging.getLogger(__name__)
+    glrt_window_offset = drift_warmup_windows
+    eta_markers = eta_change_windows if eta_change_windows else None
+    gate_milestones = drift_gates.drift_detection_milestones(
+        drift_warmup_windows, drift_guard_samples
+    )
+
+    for key, label, loss_path, glrt_path in (
+        (
+            "adaptation_loss",
+            "Adaptation Loss",
+            "glrt_adaptation_loss_averaged_loss.png",
+            "glrt_adaptation_loss_averaged_glrt.png",
+        ),
+        (
+            "reference_metric",
+            "Reference Metric",
+            "glrt_reference_metric_averaged_loss.png",
+            "glrt_reference_metric_averaged_glrt.png",
+        ),
+    ):
+        if key not in glrt_results:
+            continue
+        data = glrt_results[key]
+        avg_losses = data["avg_losses"]
+        min_segment_size = data["min_segment_size"]
+        plot_offset = data.get("window_index_offset", glrt_window_offset)
+        if len(avg_losses) < 2 * min_segment_size + 1:
+            continue
+        try:
+            changepoint, _, all_log_glr, candidate_points = glrt_changepoint_detection(
+                avg_losses, min_segment_size=min_segment_size
+            )
+            fig_loss, fig_glrt = plot_results(
+                avg_losses,
+                changepoint,
+                all_log_glr,
+                candidate_points,
+                window_index_offset=plot_offset,
+                event_windows=eta_markers,
+                gate_milestones=gate_milestones,
+            )
+            title = (
+                f"GLRT Drift Detection - {label} "
+                f'(Averaged across {data["trajectory_count"]} trajectories)'
+            )
+            if data.get("avg_changepoint_window") is not None:
+                title += (
+                    f'\nAvg Changepoint Window: {data["avg_changepoint_window"]:.2f} '
+                    f'± {data["std_changepoint_window"]:.2f}, '
+                    f'Avg Log-GLR: {data["avg_likelihood"]:.4f} '
+                    f'± {data["std_likelihood"]:.4f}'
+                )
+            fig_loss.suptitle(title + " - Loss", fontsize=14)
+            fig_glrt.suptitle(title + " - GLRT Statistics", fontsize=14)
+            fig_loss.subplots_adjust(top=0.88)
+            fig_glrt.subplots_adjust(top=0.88)
+            loss_plot_path = Path(output_dir) / loss_path
+            glrt_plot_path = Path(output_dir) / glrt_path
+            fig_loss.savefig(loss_plot_path, dpi=150, bbox_inches="tight")
+            fig_glrt.savefig(glrt_plot_path, dpi=150, bbox_inches="tight")
+            plt.close(fig_loss)
+            plt.close(fig_glrt)
+            logger.info("Saved averaged GLRT %s plots to %s and %s", label, loss_plot_path, glrt_plot_path)
+        except Exception as exc:
+            logger.warning("Failed to plot averaged GLRT %s results: %s", label, exc)
+
+
+def plot_single_online_learning_run(result: dict, output_dir, config) -> None:
+    """Dispatch all single-run online learning plots from structured run results."""
+    import datetime
+    from pathlib import Path
+
+    logger = logging.getLogger(__name__)
+    output_dir = Path(output_dir)
+    ol_results = result.get("online_learning_results", {})
+    averaged_data = result.get("averaged_results")
+    if not averaged_data:
+        logger.warning("Skipping OL plots: no averaged_results in run output")
+        return
+
+    training_start_window = ol_results.get("training_start_window")
+    training_end_window = ol_results.get("training_end_window")
+    drift_detection_window = ol_results.get("drift_detection_window")
+    eta_change_windows = ol_results.get("eta_change_windows", [])
+    reference_metric_config = ol_results.get("reference_metric_config", "unknown")
+    adaptation_loss_config = ol_results.get("adaptation_loss_config", "unknown")
+
+    plot_averaged_online_learning_results(
+        output_dir,
+        averaged_data["averaged_pretrained_trajectory"],
+        averaged_data["averaged_online_trajectory"],
+        reference_metric_config,
+        adaptation_loss_config,
+        training_start_window=training_start_window,
+        training_end_window=training_end_window,
+        drift_detection_window=drift_detection_window,
+        eta_change_windows=eta_change_windows,
+        averaged_supervised_metrics=averaged_data.get("averaged_supervised_trajectory"),
+    )
+
+    glrt_results = averaged_data.get("glrt_results") or result.get("glrt_results")
+    if glrt_results:
+        online_config = getattr(config, "online_learning", None)
+        drift_warmup = getattr(online_config, "drift_warmup_windows", 7)
+        drift_guard = getattr(online_config, "drift_guard_samples", 3)
+        plot_glrt_averaged_drift_results(
+            glrt_results,
+            output_dir,
+            drift_warmup,
+            drift_guard,
+            eta_change_windows=eta_change_windows,
+        )
+
+    if getattr(config.online_learning, "plot_trajectory", False):
+        pretrained_trajectory_results = ol_results.get("pretrained_trajectory_results", [])
+        plot_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        stride = config.online_learning.stride
+        for traj_idx, traj_result in enumerate(pretrained_trajectory_results):
+            suffix = f"_traj{traj_idx}" if len(pretrained_trajectory_results) > 1 else ""
+            plot_online_learning_trajectory(
+                traj_result.window_labels,
+                output_dir,
+                f"{plot_ts}{suffix}",
+                window_indices=traj_result.window_indices,
+                stride=stride,
+            )
+
+    logger.info("Single-run online learning plots written to %s", output_dir)
+
+
 def plot_performance_improvement_table(scenario_results: dict, output_dir: Path) -> Path:
     """
     Plot a table showing performance improvement of online model vs pretrained model across SNR values.

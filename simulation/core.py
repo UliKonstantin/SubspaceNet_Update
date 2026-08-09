@@ -539,6 +539,20 @@ class Simulation:
         
         # Store the trained model back in components
         self.components["model"] = self.trained_model
+
+        trainer = self.components.get("trainer")
+        if trainer is not None and hasattr(trainer, "train_losses"):
+            self.results["training_curves"] = {
+                "train_losses": list(trainer.train_losses),
+                "valid_losses": list(trainer.valid_losses),
+                "train_accuracies": list(trainer.train_accuracies),
+                "valid_accuracies": list(trainer.valid_accuracies),
+                "train_angles_losses": list(getattr(trainer, "train_angles_losses", [])),
+                "valid_angles_losses": list(getattr(trainer, "valid_angles_losses", [])),
+                "train_ranges_losses": list(getattr(trainer, "train_ranges_losses", [])),
+                "valid_ranges_losses": list(getattr(trainer, "valid_ranges_losses", [])),
+                "plots_subdir": "plots",
+            }
         
         logger.info("Training completed")
         

@@ -206,9 +206,6 @@ class TrajectoryTrainer:
         # Restore best model weights
         self.model.load_state_dict(self.best_model_wts)
         
-        # Plot training curves
-        self._plot_training_curves()
-        
         # Save final model
         if self.config.save_checkpoint:
             self._save_checkpoint(f"final_{self.model.__class__.__name__}")
@@ -743,89 +740,6 @@ class TrajectoryTrainer:
         }, path)
         
         logger.info(f"Model checkpoint saved to {path}")
-    
-    def _plot_training_curves(self):
-        """Plot and save training curves."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        n_epochs = max(len(self.train_losses), len(self.valid_losses), 1)
-        epochs = np.arange(1, n_epochs + 1)
-        plot_kwargs = {"marker": "o", "linewidth": 2, "markersize": 6}
-
-        def _finite_series(values):
-            arr = np.asarray(values, dtype=float)
-            if arr.size == 0:
-                return None
-            if not np.any(np.isfinite(arr)):
-                return None
-            return arr
-
-        def _save_epoch_plot(y_series, ylabel, title, filename):
-            plt.figure(figsize=(10, 6))
-            plotted = False
-            for values, label in y_series:
-                arr = _finite_series(values)
-                if arr is None:
-                    continue
-                x = epochs[: len(arr)]
-                plt.plot(x, arr, label=label, **plot_kwargs)
-                plotted = True
-            if not plotted:
-                plt.close()
-                logger.warning("Skipping %s: no finite training metrics to plot", filename)
-                return
-            plt.xlabel("Epoch")
-            plt.ylabel(ylabel)
-            plt.title(title)
-            if n_epochs == 1:
-                plt.xlim(0.5, 1.5)
-                plt.xticks([1])
-            else:
-                plt.xlim(0.5, n_epochs + 0.5)
-                plt.xticks(epochs)
-            plt.legend()
-            plt.grid(True)
-            plt.savefig(self.plots_dir / filename)
-            plt.close()
-
-        _save_epoch_plot(
-            [(self.train_losses, "Training Loss"), (self.valid_losses, "Validation Loss")],
-            ylabel="Loss",
-            title="Training and Validation Loss",
-            filename=f"loss_curve_{timestamp}.png",
-        )
-
-        train_acc_pct = np.asarray(self.train_accuracies, dtype=float) * 100
-        valid_acc_pct = np.asarray(self.valid_accuracies, dtype=float) * 100
-        _save_epoch_plot(
-            [(train_acc_pct, "Training Accuracy"), (valid_acc_pct, "Validation Accuracy")],
-            ylabel="Accuracy (%)",
-            title="Training and Validation Accuracy",
-            filename=f"accuracy_curve_{timestamp}.png",
-        )
-        
-        # Plot angle and range losses if available
-        if self.train_angles_losses and self.valid_angles_losses:
-            # Angle loss
-            plt.figure(figsize=(10, 6))
-            plt.plot(self.train_angles_losses, label='Training Angle Loss')
-            plt.plot(self.valid_angles_losses, label='Validation Angle Loss')
-            plt.xlabel('Epoch')
-            plt.ylabel('Angle Loss')
-            plt.title('Training and Validation Angle Loss')
-            plt.legend()
-            plt.grid(True)
-            plt.savefig(self.plots_dir / f"angle_loss_curve_{timestamp}.png")
-            
-            # Range loss
-            plt.figure(figsize=(10, 6))
-            plt.plot(self.train_ranges_losses, label='Training Range Loss')
-            plt.plot(self.valid_ranges_losses, label='Validation Range Loss')
-            plt.xlabel('Epoch')
-            plt.ylabel('Range Loss')
-            plt.title('Training and Validation Range Loss')
-            plt.legend()
-            plt.grid(True)
-            plt.savefig(self.plots_dir / f"range_loss_curve_{timestamp}.png")
     
     def _print_training_info(self):
         """Print training configuration and model information."""

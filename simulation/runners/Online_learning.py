@@ -7,8 +7,6 @@ import torch
 import torch.optim as optim
 from tqdm import tqdm
 import datetime
-import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
 import time
 import copy
 import yaml
@@ -20,8 +18,6 @@ from typing import Optional, List, Union, Dict, Any
 from config.schema import Config
 from simulation.runners.data import TrajectoryDataHandler, create_online_learning_dataset
 from simulation.runners.training import Trainer, TrainingConfig, TrajectoryTrainer, OnlineTrainer
-from simulation.runners.evaluation import Evaluator
-from utils.plotting import plot_online_learning_results, plot_online_learning_trajectory
 from utils.utils import log_window_summary, save_model_state, log_online_learning_window_summary
 from simulation.kalman_filter import KalmanFilter1D, BatchKalmanFilter1D, BatchExtendedKalmanFilter1D
 from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
@@ -30,7 +26,7 @@ from DCD_MUSIC.src.metrics.multimoment_innovation_consistency_loss import MultiM
 from DCD_MUSIC.src.signal_creation import Samples
 from DCD_MUSIC.src.evaluation import get_model_based_method, evaluate_model_based
 from simulation.kalman_filter.extended import ExtendedKalmanFilter1D
-from simulation.runners.sandbox import glrt_changepoint_detection, plot_results
+from simulation.runners.sandbox import glrt_changepoint_detection
 from utils import drift_gates
 
 
@@ -362,14 +358,10 @@ class OnlineLearning:
                 logger.warning(f"Failed to average trajectory results: {averaged_results_across_trajectories.get('message')}")
             
 
-            # Use structured plotting approach with AVERAGED results
-            from utils.plotting import plot_online_learning_results_structured
-            
-            # Extract individual trajectory results for the old plotting method (will be removed later)
             pretrained_trajectory_results = [result["online_learning_results"]["pretrained_model_trajectory_results"] for result in all_results]
             online_trajectory_results = [result["online_learning_results"]["online_model_trajectory_results"] for result in all_results]
             
-            # Get loss configurations from the first result
+            # Get loss configurations from the first result (for postprocess plotting)
             if all_results and all_results[0]["online_learning_results"]["pretrained_model_trajectory_results"].window_results:
                 first_window_result = all_results[0]["online_learning_results"]["pretrained_model_trajectory_results"].window_results[0]
                 reference_metric_config = first_window_result.loss_metrics.reference_metric_config
@@ -390,118 +382,6 @@ class OnlineLearning:
                 eta_change_windows = first_result.get("eta_change_windows", [])
                 drift_detection_window = first_result.get("drift_detection_window")
             
-            # ALSO call the new direct averaged plotting function
-            if averaged_results_across_trajectories.get("status") == "success":
-                from utils.plotting import plot_averaged_online_learning_results
-                
-                averaged_data = averaged_results_across_trajectories["averaged_results"]
-                plot_averaged_online_learning_results(
-                    self.output_dir,
-                    averaged_data["averaged_pretrained_trajectory"],
-                    averaged_data["averaged_online_trajectory"],
-                    reference_metric_config,
-                    adaptation_loss_config,
-                    training_start_window=training_start_window,
-                    training_end_window=training_end_window,
-                    drift_detection_window=drift_detection_window,
-                    eta_change_windows=eta_change_windows,
-                    averaged_supervised_metrics=averaged_data.get("averaged_supervised_trajectory"),
-                )
-            
-            # GLRT drift detection averaged plotting (using results from averaging function)
-            glrt_results = averaged_results_across_trajectories.get("averaged_results", {}).get("glrt_results", {})
-            
-            glrt_window_offset = self.drift_warmup_windows
-            eta_markers = eta_change_windows if eta_change_windows else None
-            gate_milestones = drift_gates.drift_detection_milestones(
-                self.drift_warmup_windows, self.drift_guard_samples
-            )
-
-            # Plot reference loss GLRT results
-            if "adaptation_loss" in glrt_results:
-                ref_data = glrt_results["adaptation_loss"]
-                avg_ref_losses = ref_data["avg_losses"]
-                min_segment_size = ref_data["min_segment_size"]
-                plot_offset = ref_data.get("window_index_offset", glrt_window_offset)
-                
-                if len(avg_ref_losses) >= 2 * min_segment_size + 1:
-                    try:
-                        ref_changepoint, ref_log_glr, ref_all_log_glr, ref_candidate_points = glrt_changepoint_detection(
-                            avg_ref_losses, min_segment_size=min_segment_size
-                        )
-                        ref_fig_loss, ref_fig_glrt = plot_results(
-                            avg_ref_losses, ref_changepoint, ref_all_log_glr, ref_candidate_points,
-                            window_index_offset=plot_offset, event_windows=eta_markers,
-                            gate_milestones=gate_milestones,
-                        )
-                        title = f'GLRT Drift Detection - Adaptation Loss (Averaged across {ref_data["trajectory_count"]} trajectories)'
-                        if ref_data["avg_changepoint_window"] is not None:
-                            title += f'\nAvg Changepoint Window: {ref_data["avg_changepoint_window"]:.2f} ± {ref_data["std_changepoint_window"]:.2f}, Avg Log-GLR: {ref_data["avg_likelihood"]:.4f} ± {ref_data["std_likelihood"]:.4f}'
-                        ref_fig_loss.suptitle(title + ' - Loss', fontsize=14)
-                        ref_fig_glrt.suptitle(title + ' - GLRT Statistics', fontsize=14)
-                        ref_fig_loss.subplots_adjust(top=0.88)  # Adjust spacing after suptitle
-                        ref_fig_glrt.subplots_adjust(top=0.88)  # Adjust spacing after suptitle
-                        ref_loss_plot_path = self.output_dir / "glrt_adaptation_loss_averaged_loss.png"
-                        ref_glrt_plot_path = self.output_dir / "glrt_adaptation_loss_averaged_glrt.png"
-                        ref_fig_loss.savefig(ref_loss_plot_path, dpi=150, bbox_inches='tight')
-                        ref_fig_glrt.savefig(ref_glrt_plot_path, dpi=150, bbox_inches='tight')
-                        plt.close(ref_fig_loss)
-                        plt.close(ref_fig_glrt)
-                        logger.info(f"Saved averaged GLRT reference loss plots to {ref_loss_plot_path} and {ref_glrt_plot_path}")
-                        logger.info(f"Adaptation Loss GLRT: Avg Changepoint = {ref_data['avg_changepoint_window']:.2f} ± {ref_data['std_changepoint_window']:.2f}, "
-                                   f"Avg Log-GLR = {ref_data['avg_likelihood']:.4f} ± {ref_data['std_likelihood']:.4f}")
-                    except Exception as e:
-                        logger.warning(f"Failed to plot averaged GLRT reference loss results: {e}")
-            
-            # Plot main loss GLRT results
-            if "reference_metric" in glrt_results:
-                main_data = glrt_results["reference_metric"]
-                avg_main_losses = main_data["avg_losses"]
-                min_segment_size = main_data["min_segment_size"]
-                plot_offset = main_data.get("window_index_offset", glrt_window_offset)
-                
-                if len(avg_main_losses) >= 2 * min_segment_size + 1:
-                    try:
-                        main_changepoint, main_log_glr, main_all_log_glr, main_candidate_points = glrt_changepoint_detection(
-                            avg_main_losses, min_segment_size=min_segment_size
-                        )
-                        main_fig_loss, main_fig_glrt = plot_results(
-                            avg_main_losses, main_changepoint, main_all_log_glr, main_candidate_points,
-                            window_index_offset=plot_offset, event_windows=eta_markers,
-                            gate_milestones=gate_milestones,
-                        )
-                        title = f'GLRT Drift Detection - Reference Metric (Averaged across {main_data["trajectory_count"]} trajectories)'
-                        if main_data["avg_changepoint_window"] is not None:
-                            title += f'\nAvg Changepoint Window: {main_data["avg_changepoint_window"]:.2f} ± {main_data["std_changepoint_window"]:.2f}, Avg Log-GLR: {main_data["avg_likelihood"]:.4f} ± {main_data["std_likelihood"]:.4f}'
-                        main_fig_loss.suptitle(title + ' - Loss', fontsize=14)
-                        main_fig_glrt.suptitle(title + ' - GLRT Statistics', fontsize=14)
-                        main_fig_loss.subplots_adjust(top=0.88)  # Adjust spacing after suptitle
-                        main_fig_glrt.subplots_adjust(top=0.88)  # Adjust spacing after suptitle
-                        main_loss_plot_path = self.output_dir / "glrt_reference_metric_averaged_loss.png"
-                        main_glrt_plot_path = self.output_dir / "glrt_reference_metric_averaged_glrt.png"
-                        main_fig_loss.savefig(main_loss_plot_path, dpi=150, bbox_inches='tight')
-                        main_fig_glrt.savefig(main_glrt_plot_path, dpi=150, bbox_inches='tight')
-                        plt.close(main_fig_loss)
-                        plt.close(main_fig_glrt)
-                        logger.info(f"Saved averaged GLRT main loss plots to {main_loss_plot_path} and {main_glrt_plot_path}")
-                        logger.info(f"Reference Metric GLRT: Avg Changepoint = {main_data['avg_changepoint_window']:.2f} ± {main_data['std_changepoint_window']:.2f}, "
-                                   f"Avg Log-GLR = {main_data['avg_likelihood']:.4f} ± {main_data['std_likelihood']:.4f}")
-                    except Exception as e:
-                        logger.warning(f"Failed to plot averaged GLRT main loss results: {e}")
-
-            if getattr(self.config.online_learning, "plot_trajectory", False):
-                plot_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                stride = self.config.online_learning.stride
-                for traj_idx, traj_result in enumerate(pretrained_trajectory_results):
-                    suffix = f"_traj{traj_idx}" if len(pretrained_trajectory_results) > 1 else ""
-                    plot_online_learning_trajectory(
-                        traj_result.window_labels,
-                        self.output_dir,
-                        f"{plot_ts}{suffix}",
-                        window_indices=traj_result.window_indices,
-                        stride=stride,
-                    )
-            
             logger.info(f"Online learning completed over {dataset_size} trajectories")
             
             # Prepare return results
@@ -515,6 +395,8 @@ class OnlineLearning:
                     "training_end_window": training_end_window,
                     "eta_change_windows": eta_change_windows,
                     "drift_detection_window": drift_detection_window,
+                    "reference_metric_config": reference_metric_config,
+                    "adaptation_loss_config": adaptation_loss_config,
                 },
                 "drift_detection_dicts": all_drift_detection_dicts
             }
