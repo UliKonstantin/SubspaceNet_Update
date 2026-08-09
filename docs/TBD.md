@@ -25,7 +25,7 @@ Tracked follow-ups after CLI v2 and refactoring. Ordered roughly by dependency /
 - Output: `glrt_observable_to_optimal_lr.png`
 - `scratch_glrt_analysis.py` deleted
 
-**Optional phase 2:** wire fitted sigmoid params into adaptive LR config in `Online_learning.py`.
+Adaptive LR sigmoid params remain **manual YAML tuning** (`adaptive_lr_*`); no auto-calibration from sweep fits.
 
 ---
 
@@ -54,11 +54,12 @@ simulation/drift/
 | Item | Action |
 |------|--------|
 | `experiments/runner.py` | Already deleted (CLI v2 cutover) |
-| `main.py` dead imports | Already removed |
+| `main.py` dead imports | Already removed; module deprecated (see header) |
 | `simulation/losses/` | Deleted empty package |
 | `get_kalman_filter` helpers | Kept — used by `tests/kalman_filter/test_helpers.py` |
 | `tests/kalman_filter/standalone_test_*.py` | Moved to `tests/kalman_filter/legacy/` |
 | `simulation/runners/.png` | Deleted orphan file |
+| `data.py` inline trajectory verification PNG | Removed; no plotting from data loader |
 
 ---
 
@@ -95,9 +96,11 @@ simulation/drift/
 utils/plotting/
   __init__.py          ← re-export public API (backward compat)
   evaluation.py        ← eval + kalman 2D
-  online_learning.py   ← OL averaged, GLRT, KF gain, trajectory, training curves
+  online_learning.py   ← OL averaged, GLRT, KF gain, training curves
   sweeps.py            ← 1D/4D scenario sweeps, heatmap, improvement tables
   lr_plots.py          ← optimal LR / GLRT observable plots
+  trajectory.py        ← OL trajectory figures (dispatch-only)
+  style.py             ← shared paper rcParams + save_figure
 ```
 
 Monolithic `utils/plotting.py` removed. Call sites unchanged: `from utils.plotting import …`
@@ -122,38 +125,69 @@ Monolithic `utils/plotting.py` removed. Call sites unchanged: `from utils.plotti
 | Item | Action |
 |------|--------|
 | `experiments/debug_logs/` | Added to `.gitignore` |
-| `diagrams/` | Gitignore LaTeX build artifacts (`.aux`, `.log`, …); source `.tex` can be committed |
+| `diagrams/` | Gitignore LaTeX build artifacts (`.aux`, `.log`, …); source `.tex` committed |
 | `tmp/`, `.cursor/` | Added to `.gitignore` |
 | `.DS_Store` | Already in `.gitignore`; removed from git index |
+| Local diagram PDF/PNG binaries | Removed from working tree (regenerate from `.tex`) |
 
 ---
 
-## 10. Testing gaps
+## 10. Testing gaps (deferred — do last)
 
-- [ ] Full LR-sweep paper config numeric parity (legacy vs v2, all 6 η × 7 LR runs)
-- [ ] Kalman 2D evaluate e2e test
-- [ ] 4D grid result shape + postprocess plot test
-- [ ] Tests for tasks 1–2 (LR/GLRT analysis utils)
+**Status:** Backlog
+
+- [ ] **Full LR-sweep paper config numeric parity** (legacy vs v2, all 6 η × 7 LR runs) — only item worth heavy investment
+- [ ] Kalman 2D evaluate e2e test (low priority unless mode is used)
+- [ ] 4D grid result shape + postprocess plot test (low priority)
+- [x] LR/GLRT analysis utils — `tests/test_lr_analysis.py`
+
+---
+
+## 11. Plot visual polish (paper-ready figures)
+
+**Status:** In progress (2026-08-09)
+
+Systematic pass over all pipeline-generated plots for publication quality. **All figures must go through `plot_dispatch` / `utils/plotting/` — no inline `savefig` in runners or data loaders.**
+
+**Architecture (done):**
+- [x] `utils/plotting/style.py` — `apply_paper_plot_style()`, `save_figure()`
+- [x] OL trajectory plots moved to `utils/plotting/trajectory.py`, invoked from `plot_dispatch._plot_iteration_if_ol` (gated by `online_learning.plot_trajectory`)
+- [x] Removed inline trajectory verification plotting from `simulation/runners/data.py`
+- [x] First pass: paper style + dpi 300 on main/training loss, KF gain, GLRT, drift metrics, eta scenario comparison, trajectory XY/DOA plots
+
+**Per-plot checklist (remaining):**
+- [ ] **Style & format** — roll `apply_paper_plot_style()` through remaining modules (`evaluation.py`, `scenario_results_comparison`, heatmaps, improvement tables)
+- [ ] **No text overlap** — legends, annotations, suptitles, tick labels; `tight_layout` / `bbox_to_anchor` audit on v3 outputs
+- [ ] **Label choices** — η, RMSPE, window index; pretrained vs Algorithm 1 vs EKF; static vs adaptive LR
+- [ ] **Missing labels** — every curve in legend; drift/GLRT gate lines labeled once
+- [ ] **Self-explainability** — titles state comparison + phase markers (drift, training start/end, η step)
+- [ ] **Paper level** — optional PDF export; readable at 3.5" and 7" column width
+
+**Suggested order:**
+1. Sweep aggregates (`sweeps.py`, `lr_plots.py`) — scenario comparison, heatmap, improvement tables
+2. Per-run OL (`online_learning.py`) — remaining legacy `plot_online_learning_results` path if still reachable
+3. Training/eval (`evaluation.py`)
+
+**Deliverable:** re-dispatch v3 or recipe step 8 → visual before/after gallery for paper figure pick list
 
 ---
 
 ## Suggested execution order
 
 ```
-1–2  LR/GLRT analysis embed (user priority)
-3    sandbox → drift/ refactor (unblocks clean imports)
-4    dead code cleanup (quick win)
-6    unified plot dispatch (after recipe 0–9)
-5    CLI cutover
-7–8  plotting split + import cleanup (during/after #6)
-9    repo hygiene (anytime)
-10   extended tests (parallel with above)
+11   plot visual polish (in progress — finish remaining checklist)
+10   full legacy parity (last; only if regression proof needed)
 ```
 
 ---
 
-## Risk register (carry forward)
+## Risk register
 
-- `goal=None` legacy path in `_run_sweep_iteration` can diverge from explicit `--goal` if YAML flags disagree
-- Grid 4D results shape differs from kalman_2d (`sim.results` not always set)
-- `main.py` deprecated; use `main_v2.py` for new work
+| Risk | Status |
+|------|--------|
+| `goal=None` in `_run_sweep_iteration` diverges from `--goal` | **Fixed** — uses `cli.resolver.infer_goal()` before legacy fallback |
+| Grid 4D `sim.results` not set (unlike kalman_2d) | **Fixed** — `cli/runner.py` sets `sim.results["grid_4d"]` |
+| `main.py` vs `main_v2.py` | **Mitigated** — `main.py` deprecated; header + `warn_deprecated` on use |
+| `DCD_MUSIC` submodule dirty | **Local only** — see submodule note below |
+
+**DCD_MUSIC submodule:** parent repo tracks submodule SHA; working tree shows `M src/system_model.py` inside submodule — commit or discard inside `DCD_MUSIC/` separately from parent repo.

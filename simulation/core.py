@@ -1363,16 +1363,24 @@ class Simulation:
             output_dir=self.output_dir / output_subdir
         )
 
-        if goal == "full" or (goal is None and full_mode):
+        effective_goal = goal
+        if effective_goal is None:
+            from cli.resolver import infer_goal
+
+            inferred = infer_goal(modified_config)
+            if inferred is not None:
+                effective_goal = inferred.value
+
+        if effective_goal == "full" or (effective_goal is None and full_mode):
             return simulation.run()
-        if goal == "online_learning":
+        if effective_goal == "online_learning":
             return simulation.execute_online_learning()
-        if goal == "evaluate":
+        if effective_goal == "evaluate":
             return simulation.run_evaluation()
-        if goal == "train":
+        if effective_goal == "train":
             return simulation.run_training()
 
-        # Legacy routing from parent config flags (old main.py)
+        # Legacy routing when goal still unresolved (deprecated main.py paths)
         if full_mode:
             return simulation.run()
         elif self.config.simulation.load_model and not self.config.simulation.train_model:

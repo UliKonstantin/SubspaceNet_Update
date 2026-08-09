@@ -109,6 +109,25 @@ class TestPlotDispatch:
         mock_plot.assert_any_call(ol_result, tmp_path / "eta_0.5/lr_run0_0.001", config)
         mock_plot.assert_any_call(ol_result, tmp_path / "eta_0.5/lr_adaptive", config)
 
+    def test_plot_iteration_also_dispatches_trajectories(self, tmp_path):
+        ol_result = {
+            "status": "success",
+            "averaged_results": {"averaged_pretrained_trajectory": {}, "averaged_online_trajectory": {}},
+            "online_learning_results": {},
+        }
+        config = MagicMock()
+        config.online_learning.plot_trajectory = True
+        with patch("utils.plotting.plot_single_online_learning_run"), patch(
+            "utils.plotting.trajectory.plot_online_learning_trajectories_from_result"
+        ) as mock_traj:
+            dispatch_one_d_sweep_iteration_plots(
+                {0.5: {"lr_sweep_results": {0: {"result": ol_result}}}},
+                tmp_path,
+                config,
+                "eta",
+            )
+        mock_traj.assert_called_once()
+
     def test_dispatch_eta_sweep_calls_per_iteration_plots(self, tmp_path):
         request = RunRequest(
             goal=Goal.ONLINE_LEARNING,

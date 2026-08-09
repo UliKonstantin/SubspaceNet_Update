@@ -26,8 +26,11 @@ def plot_online_learning_results_structured(output_dir, pretrained_trajectory_re
     import matplotlib.pyplot as plt
     import numpy as np
     import os
-    
-    # Create output directory if it doesn't exist
+
+    from utils.plotting.style import apply_paper_plot_style, save_figure
+
+    apply_paper_plot_style()
+    logger = logging.getLogger(__name__)
     os.makedirs(output_dir, exist_ok=True)
     
     # Extract data from structured results
@@ -180,11 +183,13 @@ def plot_averaged_online_learning_results(
     import matplotlib.pyplot as plt
     import numpy as np
     import os
-    
+
+    from utils.plotting.style import apply_paper_plot_style, save_figure
+
+    apply_paper_plot_style()
     logger = logging.getLogger(__name__)
     logger.info("Creating averaged online learning results plot...")
     
-    # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
     
     # Extract data directly from averaged metrics
@@ -287,8 +292,8 @@ def plot_averaged_online_learning_results(
         ax1.set_xlim(0, max_window + 1)  # Add small padding
     else:
         ax1.set_xlim(0, 60)  # Fallback if no data
-    ax1.legend(fontsize=14, loc='best')
-    plt.tight_layout()
+    ax1.legend(fontsize=14, loc="best")
+    fig1.tight_layout()
     
     # Create separate figure for Training Reference Loss Comparison
     fig2 = plt.figure(figsize=(14, 5))
@@ -313,16 +318,13 @@ def plot_averaged_online_learning_results(
         ax2.set_xlim(0, max_window + 1)  # Add small padding
     else:
         ax2.set_xlim(0, 60)  # Fallback if no data
-    ax2.legend(fontsize=14, loc='best')
-    plt.tight_layout()
+    ax2.legend(fontsize=14, loc="best")
+    fig2.tight_layout()
     
-    # Save the plots separately
-    plot_path_main = os.path.join(output_dir, 'averaged_online_learning_comparison_main_loss.png')
-    plot_path_training = os.path.join(output_dir, 'averaged_online_learning_comparison_training_loss.png')
-    fig1.savefig(plot_path_main, dpi=150, bbox_inches='tight')
-    fig2.savefig(plot_path_training, dpi=150, bbox_inches='tight')
-    plt.close(fig1)
-    plt.close(fig2)
+    plot_path_main = os.path.join(output_dir, "averaged_online_learning_comparison_main_loss.png")
+    plot_path_training = os.path.join(output_dir, "averaged_online_learning_comparison_training_loss.png")
+    save_figure(fig1, plot_path_main)
+    save_figure(fig2, plot_path_training)
 
     kf_plot_path = plot_averaged_kf_gain_comparison(
         output_dir,
@@ -358,6 +360,9 @@ def plot_averaged_kf_gain_comparison(
     import numpy as np
     import os
 
+    from utils.plotting.style import apply_paper_plot_style
+
+    apply_paper_plot_style()
     logger = logging.getLogger(__name__)
 
     pretrained_indices = averaged_pretrained_metrics.get("window_indices", [])
@@ -471,7 +476,7 @@ def plot_averaged_kf_gain_comparison(
 
     plt.tight_layout()
     plot_path = os.path.join(output_dir, 'averaged_kf_gain_comparison.png')
-    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+    fig.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
     return plot_path
 
@@ -651,8 +656,8 @@ def plot_glrt_averaged_drift_results(
             fig_glrt.subplots_adjust(top=0.88)
             loss_plot_path = Path(output_dir) / loss_path
             glrt_plot_path = Path(output_dir) / glrt_path
-            fig_loss.savefig(loss_plot_path, dpi=150, bbox_inches="tight")
-            fig_glrt.savefig(glrt_plot_path, dpi=150, bbox_inches="tight")
+            fig_loss.savefig(loss_plot_path, dpi=300, bbox_inches="tight")
+            fig_glrt.savefig(glrt_plot_path, dpi=300, bbox_inches="tight")
             plt.close(fig_loss)
             plt.close(fig_glrt)
             logger.info("Saved averaged GLRT %s plots to %s and %s", label, loss_plot_path, glrt_plot_path)
@@ -705,20 +710,6 @@ def plot_single_online_learning_run(result: dict, output_dir, config) -> None:
             drift_guard,
             eta_change_windows=eta_change_windows,
         )
-
-    if getattr(config.online_learning, "plot_trajectory", False):
-        pretrained_trajectory_results = ol_results.get("pretrained_trajectory_results", [])
-        plot_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        stride = config.online_learning.stride
-        for traj_idx, traj_result in enumerate(pretrained_trajectory_results):
-            suffix = f"_traj{traj_idx}" if len(pretrained_trajectory_results) > 1 else ""
-            plot_online_learning_trajectory(
-                traj_result.window_labels,
-                output_dir,
-                f"{plot_ts}{suffix}",
-                window_indices=traj_result.window_indices,
-                stride=stride,
-            )
 
     logger.info("Single-run online learning plots written to %s", output_dir)
 
@@ -1738,7 +1729,10 @@ def plot_online_learning_trajectory(
         import matplotlib.pyplot as plt
         import numpy as np
         from pathlib import Path
-        
+
+        from utils.plotting.style import apply_paper_plot_style, save_figure
+
+        apply_paper_plot_style()
         logger = logging.getLogger(__name__)
 
         sorted_steps, step_labels_list, step_window_ids = _collect_deduplicated_trajectory_steps(
@@ -1768,78 +1762,53 @@ def plot_online_learning_trajectory(
             padded_angles[step_idx, :num_sources] = angles
             padded_distances[step_idx, :num_sources] = distances
         
-        # Create the trajectory plot
-        plt.figure(figsize=(12, 10))
-        
-        # Plot each source trajectory
+        # XY trajectory (far-field schematic; range axis is illustrative)
+        fig_xy, ax_xy = plt.subplots(figsize=(8, 7))
         for s in range(max_sources):
-            # Get valid data for this source (some steps might have fewer sources)
             valid_mask = ~np.isnan(padded_angles[:, s])
             if np.any(valid_mask):
-                angles_rad = padded_angles[valid_mask, s] * (np.pi / 180.0)  # Convert back to radians for plotting
+                angles_rad = padded_angles[valid_mask, s] * (np.pi / 180.0)
                 distances = padded_distances[valid_mask, s]
-                
-                # Convert from polar to Cartesian coordinates
                 x = distances * np.cos(angles_rad)
                 y = distances * np.sin(angles_rad)
-                
-                # Plot trajectory
-                plt.plot(x, y, '-o', markersize=4, label=f'Source {s+1}')
-                
-                # Mark start and end points
+                ax_xy.plot(x, y, "-o", markersize=4, label=f"Source {s + 1}")
                 if len(x) > 0:
-                    plt.plot(x[0], y[0], 'go', markersize=8)  # Green for start
-                    plt.plot(x[-1], y[-1], 'ro', markersize=8)  # Red for end
-        
-        # Plot radar location
-        plt.plot(0, 0, 'bD', markersize=12, label='Radar')
-        
-        # Add distance circles
+                    ax_xy.plot(x[0], y[0], "go", markersize=8, label="Start" if s == 0 else None)
+                    ax_xy.plot(x[-1], y[-1], "ro", markersize=8, label="End" if s == 0 else None)
+
+        ax_xy.plot(0, 0, "bD", markersize=10, label="Radar")
         for d in [20, 30, 40, 50]:
-            circle = plt.Circle((0, 0), d, fill=False, linestyle='--', alpha=0.3)
-            plt.gca().add_patch(circle)
-            plt.text(0, d, f'{d}m', va='bottom', ha='center')
-        
-        # Add angle lines
-        for a in range(-90, 91, 30):
-            a_rad = a * (np.pi/180)
-            plt.plot([0, 60*np.cos(a_rad)], [0, 60*np.sin(a_rad)], 'k:', alpha=0.2)
-            plt.text(55*np.cos(a_rad), 55*np.sin(a_rad), f'{a}°', 
-                    va='center', ha='center', bbox=dict(facecolor='white', alpha=0.5))
-        
-        plt.grid(True, alpha=0.3)
-        plt.axis('equal')
-        plt.xlabel('X (meters)')
-        plt.ylabel('Y (meters)')
-        plt.title(
-            f'Online Learning Full Trajectory (T={total_steps} steps, Sources={max_sources}, '
-            f'Windows={len(window_labels)}, stride={stride})'
+            circle = plt.Circle((0, 0), d, fill=False, linestyle="--", alpha=0.3)
+            ax_xy.add_patch(circle)
+        ax_xy.set_aspect("equal", adjustable="box")
+        ax_xy.set_xlabel("X (m)")
+        ax_xy.set_ylabel("Y (m)")
+        ax_xy.set_title(
+            f"DOA trajectory (steps={total_steps}, sources={max_sources}, "
+            f"windows={len(window_labels)}, stride={stride})"
         )
-        plt.legend()
-
+        ax_xy.legend(loc="best", fontsize=9)
+        fig_xy.tight_layout()
         plot_path = Path(plot_dir) / f"online_learning_trajectory_{timestamp}.png"
-        plt.savefig(plot_path)
-        plt.close()
+        save_figure(fig_xy, plot_path)
 
-        # Angle vs trajectory step (far-field; more useful than fake-range xy for sine_accel)
-        fig, ax = plt.subplots(figsize=(12, 5))
+        fig, ax = plt.subplots(figsize=(11, 4.5))
         padded = np.full((total_steps, max_sources), np.nan)
         for i, angles in enumerate(all_angles):
             padded[i, : len(angles)] = angles
         for s in range(max_sources):
             ax.plot(sorted_steps, padded[:, s], "-o", markersize=3, label=f"Source {s + 1}")
         ax.set_xlabel("Trajectory step")
-        ax.set_ylabel("DOA (degrees)")
+        ax.set_ylabel("DOA (deg)")
         ax.set_title("Ground-truth DOA vs trajectory step")
-        ax.grid(True, alpha=0.3)
-        ax.legend()
+        ax.legend(loc="best", fontsize=9)
+        fig.tight_layout()
         angles_plot_path = Path(plot_dir) / f"online_learning_trajectory_angles_{timestamp}.png"
-        fig.savefig(angles_plot_path, bbox_inches="tight")
-        plt.close(fig)
+        save_figure(fig, angles_plot_path)
 
-        logger.info(f"Online learning trajectory plots saved to {plot_dir}:")
-        logger.info(f"  - XY trajectory: {plot_path.name}")
-        logger.info(f"  - Angles vs step: {angles_plot_path.name}")
+        logger.info("Online learning trajectory plots saved to %s:", plot_dir)
+        logger.info("  - XY: %s", plot_path.name)
+        logger.info("  - DOA vs step: %s", angles_plot_path.name)
 
         return plot_path
         

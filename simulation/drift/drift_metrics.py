@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional, Union
 import matplotlib.pyplot as plt
 import numpy as np
 
+from utils.plotting.style import apply_paper_plot_style, save_figure
+
 logger = logging.getLogger(__name__)
 
 DRIFT_METRICS_PLOT_FILENAME = "drift_detection_metrics_vs_eta.png"
@@ -74,6 +76,7 @@ def plot_drift_detection_metrics_from_dicts(
     averaged_data = _average_drift_dicts_by_eta(drift_dicts)
     etas = averaged_data["eta"]
 
+    apply_paper_plot_style()
     fig, axes = plt.subplots(4, 2, figsize=(14, 16))
     axes = axes.flatten()
 
@@ -120,10 +123,8 @@ def plot_drift_detection_metrics_from_dicts(
 
     if output_path:
         output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_path, dpi=300, bbox_inches="tight")
+        save_figure(fig, output_path)
         logger.info("Saved drift detection metrics plot to %s", output_path)
-        plt.close(fig)
     else:
         plt.show()
 

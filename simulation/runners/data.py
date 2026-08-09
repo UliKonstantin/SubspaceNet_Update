@@ -335,83 +335,11 @@ class TrajectoryDataHandler:
                             np.random.uniform(angle_min, angle_max)
                         ])
             
-        # Plot the last trajectory for verification
-        self._plot_trajectory_verification(
-            angle_trajectories[-1, :, :sources_per_trajectory[-1]],
-            distance_trajectories[-1, :, :sources_per_trajectory[-1]]
-        )
-        
         return (angle_trajectories, distance_trajectories), sources_per_trajectory
     
     def _plot_trajectory_verification(self, angles, distances):
-        """
-        Plot a trajectory for verification purposes.
-        
-        Args:
-            angles: Tensor of shape [trajectory_length, num_sources]
-            distances: Tensor of shape [trajectory_length, num_sources]
-        """
-        try:
-            import matplotlib.pyplot as plt
-            
-            # Convert polar coordinates (angle, distance) to Cartesian (x, y)
-            angles_rad = angles * (np.pi / 180)  # Convert to radians if in degrees
-            
-            num_sources = angles.shape[1]
-            trajectory_length = angles.shape[0]
-            
-            plt.figure(figsize=(10, 8))
-            
-            # Plot each source trajectory
-            for s in range(num_sources):
-                # Convert from polar to Cartesian coordinates
-                x = distances[:, s] * torch.cos(angles_rad[:, s])
-                y = distances[:, s] * torch.sin(angles_rad[:, s])
-                
-                # Plot trajectory
-                plt.plot(x.numpy(), y.numpy(), '-o', label=f'Source {s+1}')
-                
-                # Mark start and end points
-                plt.plot(x[0].item(), y[0].item(), 'go', markersize=10)  # Green for start
-                plt.plot(x[-1].item(), y[-1].item(), 'ro', markersize=10)  # Red for end
-            
-            # Plot radar location
-            plt.plot(0, 0, 'bD', markersize=12, label='Radar')
-            
-            # Add distance circles
-            for d in [20, 30, 40, 50]:
-                circle = plt.Circle((0, 0), d, fill=False, linestyle='--', alpha=0.3)
-                plt.gca().add_patch(circle)
-                plt.text(0, d, f'{d}m', va='bottom', ha='center')
-            
-            # Add angle lines
-            for a in range(-90, 91, 30):
-                a_rad = a * (np.pi/180)
-                plt.plot([0, 60*np.cos(a_rad)], [0, 60*np.sin(a_rad)], 'k:', alpha=0.2)
-                plt.text(55*np.cos(a_rad), 55*np.sin(a_rad), f'{a}°', 
-                        va='center', ha='center', bbox=dict(facecolor='white', alpha=0.5))
-            
-            plt.grid(True, alpha=0.3)
-            plt.axis('equal')
-            plt.xlabel('X (meters)')
-            plt.ylabel('Y (meters)')
-            plt.title(f'Trajectory Verification (T={trajectory_length}, Sources={num_sources})')
-            plt.legend()
-            
-            # Save the plot - Fixed the f-string syntax issue
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"trajectory_verification_{timestamp}.png"
-            output_dir = Path('experiments/results/trajectory_plots')
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = output_dir / filename
-            plt.savefig(output_path)
-            logger.info(f"Trajectory plot saved to: {output_path}")
-            
-        except ImportError:
-            logger.warning("matplotlib not available for trajectory verification plot")
-        except Exception as e:
-            logger.error(f"Error generating trajectory verification plot: {e}")
-    
+        """Deprecated: trajectory figures are produced via plot_dispatch only."""
+        return
     def _create_observations(self, 
                            trajectory_data: Tuple[Tuple[torch.Tensor, torch.Tensor], List[int]]) -> Tuple[List, List, List]:
         """

@@ -57,6 +57,8 @@ def run(request: RunRequest) -> Dict:
 
     if request.is_sweep:
         result = _dispatch_sweep(sim, request)
+        if request.sweep == SweepType.GRID_4D:
+            sim.results["grid_4d"] = result
     else:
         result = _run_single(sim, request)
 

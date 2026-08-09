@@ -1070,7 +1070,10 @@ def plot_eta_scenario_comparison(scenario_results: dict, output_dir: Path) -> No
     import matplotlib.pyplot as plt
     import numpy as np
     from pathlib import Path
-    
+
+    from utils.plotting.style import apply_paper_plot_style
+
+    apply_paper_plot_style()
     logger = logging.getLogger(__name__)
     logger.info("Creating eta scenario comparison plot...")
     

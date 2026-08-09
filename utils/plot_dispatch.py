@@ -46,8 +46,10 @@ def _plot_iteration_if_ol(result: dict, output_dir: Path, config) -> None:
     if not result or result.get("status") != "success" or not result.get("averaged_results"):
         return
     from utils.plotting import plot_single_online_learning_run
+    from utils.plotting.trajectory import plot_online_learning_trajectories_from_result
 
     plot_single_online_learning_run(result, output_dir, config)
+    plot_online_learning_trajectories_from_result(result, output_dir, config)
 
 
 def _lr_sweep_output_subdir(scenario_type: str, scenario_value, lr_key, lr_data: dict) -> str:
