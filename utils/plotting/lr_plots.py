@@ -9,36 +9,7 @@ from typing import Dict
 import matplotlib.pyplot as plt
 import numpy as np
 
-def _apply_lr_analysis_plot_style():
-    """Paper-style matplotlib rcParams for LR optimality plots."""
-    import matplotlib.pyplot as plt
-
-    plt.rcParams.update(
-        {
-            "font.family": "serif",
-            "font.serif": ["Times New Roman", "DejaVu Serif"],
-            "mathtext.fontset": "dejavuserif",
-            "font.size": 12,
-            "axes.labelsize": 16,
-            "axes.titlesize": 18,
-            "xtick.labelsize": 13,
-            "ytick.labelsize": 13,
-            "legend.fontsize": 12,
-            "figure.dpi": 300,
-            "savefig.dpi": 300,
-            "axes.linewidth": 1.2,
-            "xtick.major.width": 1.0,
-            "ytick.major.width": 1.0,
-            "xtick.direction": "in",
-            "ytick.direction": "in",
-            "xtick.major.size": 5,
-            "ytick.major.size": 5,
-            "xtick.minor.visible": True,
-            "ytick.minor.visible": True,
-            "xtick.minor.size": 3,
-            "ytick.minor.size": 3,
-        }
-    )
+from utils.plotting.style import apply_lr_analysis_plot_style
 
 
 def plot_optimal_lr_vs_eta(heatmap_data: Dict, output_dir: Path) -> Path | None:
@@ -62,7 +33,7 @@ def plot_optimal_lr_vs_eta(heatmap_data: Dict, output_dir: Path) -> Path | None:
     eta_dense = np.linspace(etas.min() * 0.8, etas.max() * 1.05, 300)
     lr_fit = 10 ** sigmoid(eta_dense, *fit.params)
 
-    _apply_lr_analysis_plot_style()
+    apply_lr_analysis_plot_style()
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(
         eta_dense,
@@ -155,7 +126,7 @@ def plot_loss_vs_eta_per_lr(heatmap_data: Dict, output_dir: Path) -> Path | None
     ]
     adaptive_style = {"color": "#D6604D", "marker": "D", "ls": "-"}
 
-    _apply_lr_analysis_plot_style()
+    apply_lr_analysis_plot_style()
     fig, ax = plt.subplots(figsize=(8, 5.5))
     static_idx = 0
     for curve in curves:
@@ -233,7 +204,7 @@ def plot_glrt_observable_to_optimal_lr(
             fit_glr.r_squared,
         )
 
-    _apply_lr_analysis_plot_style()
+    apply_lr_analysis_plot_style()
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
 
     x_dense = np.linspace(map_log_glrs.min() * 0.9, map_log_glrs.max() * 1.05, 300)

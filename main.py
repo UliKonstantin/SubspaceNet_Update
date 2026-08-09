@@ -14,14 +14,13 @@ from pathlib import Path
 from typing import List, Optional
 import torch
 
-from config.loader import save_config
 from config_handler import setup_configuration
-from experiments.runner import run_experiment
 from cli.commands import show_command, save_command
+from cli.legacy_bridge import legacy_postprocess, sweep_axis_from_scenario, warn_deprecated
 from cli.options import config_option, output_option, override_option
+from cli.types import Goal, SweepAxis, SweepType
 from simulation.core import Simulation
 from utils.logging_utils import setup_logging_from_config
-from utils.plotting import plot_scenario_results
 
 # Device setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -42,6 +41,7 @@ def cli():
               help='Scenario to run (training, evaluation, online_learning, or full for all components)')
 def run_command(config: str, output: Optional[str], override: List[str], scenario: str):
     """Run an experiment with the specified configuration."""
+    warn_deprecated("run")
     logger = logging.getLogger('SubspaceNet')  # Initialize logger early
     try:
         # Use config_handler to set up configuration and components
@@ -65,6 +65,14 @@ def run_command(config: str, output: Optional[str], override: List[str], scenari
             results = sim.run()  # Run the complete pipeline with all components
         
         logger.info(f"{scenario.capitalize()} completed successfully")
+
+        goal_map = {
+            "training": Goal.TRAIN,
+            "evaluation": Goal.EVALUATE,
+            "online_learning": Goal.ONLINE_LEARNING,
+            "full": Goal.FULL,
+        }
+        legacy_postprocess(sim, results, config_path=config, goal=goal_map[scenario])
         
     except Exception as e:
         logger.error(f"Error running {scenario}: {e}", exc_info=True)
@@ -81,6 +89,7 @@ def run_command(config: str, output: Optional[str], override: List[str], scenari
 def evaluate_command(config: str, output: Optional[str], override: List[str],
                     model: str, trajectory: bool, scenario: Optional[str], values: List[float]):
     """Evaluate a pre-trained model without training. Optionally run parameter sweeps."""
+    warn_deprecated("evaluate")
     # Initialize logger at function start to avoid UnboundLocalError
     logger = None
     
@@ -193,24 +202,17 @@ def evaluate_command(config: str, output: Optional[str], override: List[str],
                         else:
                             logger.info(f"  meas_noise={meas_noise:6.3f}, proc_noise={proc_noise:6.3f} => No DNN loss recorded")
                 
-                # --- Plotting 2D heatmap for Kalman noise sweep ---
-                try:
-                    from utils.plotting import plot_2d_kalman_noise_sweep
-                    plot_path = plot_2d_kalman_noise_sweep(scenario_results, output_dir)
-                    logger.info(f"Saved 2D Kalman noise heatmap to {plot_path}")
-                except Exception as e:
-                    logger.warning(f"Could not plot 2D Kalman noise heatmap: {e}")
-                    
+                legacy_postprocess(
+                    sim, scenario_results, config_path=config,
+                    goal=Goal.EVALUATE, sweep=SweepType.KALMAN_2D,
+                )
             else:
                 logger.info(f"Evaluation sweep completed with {len(scenario_results)} results")
-
-                # --- Plotting loss vs. swept parameter ---
-                try:
-                    from utils.plotting import plot_loss_vs_scenario
-                    plot_path = plot_loss_vs_scenario(scenario_results, scenario, output_dir)
-                    logger.info(f"Saved loss plot to {plot_path}")
-                except Exception as e:
-                    logger.warning(f"Could not plot loss vs. {scenario}: {e}")
+                legacy_postprocess(
+                    sim, scenario_results, config_path=config,
+                    goal=Goal.EVALUATE, sweep=SweepType.ONE_D,
+                    sweep_axis=sweep_axis_from_scenario(scenario),
+                )
             
         else:
             # Run standard evaluation
@@ -221,6 +223,7 @@ def evaluate_command(config: str, output: Optional[str], override: List[str],
                 sys.exit(1)
                 
             logger.info("Evaluation completed successfully")
+            legacy_postprocess(sim, results, config_path=config, goal=Goal.EVALUATE)
         
     except Exception as e:
         if logger is not None:
@@ -245,6 +248,7 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
                     scenario: Optional[str], values: List[float], trajectory: bool,
                     mode: str):
     """Run a simulation with the specified configuration."""
+    warn_deprecated("simulate")
     # Initialize logger at function start to avoid UnboundLocalError
     logger = None
     
@@ -279,33 +283,25 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
             logger.info(f"Running {scenario} scenario with values {values}")
             results = sim.run_scenario(scenario, list(values), full_mode=(mode=='full'))
             logger.info(f"Scenario completed with {len(results)} results")
-            
-            # Plot scenario results if it's an SNR scenario
-            if scenario.lower() == 'snr' and mode == 'online_learning':
-                from utils.plotting import plot_scenario_results, plot_performance_improvement_table
-                plot_scenario_results(results, sim.output_dir)
-                plot_performance_improvement_table(results, sim.output_dir)
-            
-            # Plot scenario results if it's an eta scenario
-            if scenario.lower() == 'eta' and mode == 'online_learning':
-                from utils.plotting import plot_eta_scenario_comparison, plot_performance_improvement_table_eta, plot_scenario_results, plot_lr_sweep_heatmap
-                # Plot drift detection comparison (detection window, z-score, learning rate)
-                plot_eta_scenario_comparison(results, sim.output_dir)
-                # Plot performance improvement table for eta scenario
-                plot_performance_improvement_table_eta(results, sim.output_dir)
-                # Plot averaged comparison (same as SNR case but with eta values)
-                plot_scenario_results(results, sim.output_dir, scenario_type='eta')
-                
-                # Plot LR sweep heatmap if enabled
-                if hasattr(sim.config, 'online_learning') and sim.config.online_learning.enable_lr_sweep:
-                    if "lr_sweep_heatmap_data" in sim.results:
-                        plot_lr_sweep_heatmap(sim.results["lr_sweep_heatmap_data"], sim.output_dir)
-                        from utils.lr_analysis import postprocess_lr_sweep_analysis
 
-                        postprocess_lr_sweep_analysis(
-                            sim.output_dir,
-                            sim.results["lr_sweep_heatmap_data"],
-                        )
+            goal = Goal.FULL if mode == "full" else (
+                Goal.ONLINE_LEARNING if mode == "online_learning" else Goal.TRAIN
+            )
+            axis = sweep_axis_from_scenario(scenario)
+            lr_sweep = (
+                axis == SweepAxis.ETA
+                and hasattr(sim.config, "online_learning")
+                and getattr(sim.config.online_learning, "enable_lr_sweep", False)
+            )
+            legacy_postprocess(
+                sim,
+                results,
+                config_path=config,
+                goal=goal,
+                sweep=SweepType.ONE_D,
+                sweep_axis=axis,
+                lr_sweep=lr_sweep,
+            )
         else:
             if mode == 'full':
                 logger.info("Running full simulation (training, evaluation, and online learning)")
@@ -317,6 +313,11 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
                 logger.info("Running training-only simulation")
                 results = sim.run_training()
             logger.info(f"{mode.capitalize()} simulation completed successfully")
+
+            goal = Goal.FULL if mode == "full" else (
+                Goal.ONLINE_LEARNING if mode == "online_learning" else Goal.TRAIN
+            )
+            legacy_postprocess(sim, results, config_path=config, goal=goal)
         
     except Exception as e:
         if logger is not None:
@@ -342,6 +343,7 @@ def online_learning_command(config: str, output: Optional[str], override: List[s
                             eta_values: List[float], process_noise_values: List[float], 
                             kf_process_noise_values: List[float], kf_measurement_noise_values: List[float]):
     """Run online learning with a pre-trained model."""
+    warn_deprecated("online_learning")
     # Initialize logger at function start to avoid UnboundLocalError
     logger = None
     
@@ -433,15 +435,14 @@ def online_learning_command(config: str, output: Optional[str], override: List[s
             )
             logger.info(f"4D grid search completed with {total_results} combinations")
             
-            # Generate eta comparison plots
-            try:
-                from utils.plotting import plot_eta_comparison_4d_grid
-                logger.info("Starting eta comparison plotting...")
-                saved_plots = plot_eta_comparison_4d_grid(scenario_results, output_dir)
-                logger.info(f"Eta comparison plotting completed: {len(saved_plots)} plots saved")
-            except Exception as e:
-                logger.error(f"Error during eta comparison plotting: {e}")
-                logger.debug("Plotting error details:", exc_info=True)
+            grid_sim = Simulation(modified_config, components, output_dir)
+            legacy_postprocess(
+                grid_sim,
+                scenario_results,
+                config_path=config,
+                goal=Goal.ONLINE_LEARNING,
+                sweep=SweepType.GRID_4D,
+            )
             
             logger.info("4D grid search completed successfully")
             
@@ -457,6 +458,7 @@ def online_learning_command(config: str, output: Optional[str], override: List[s
                 sys.exit(1)
                 
             logger.info("Online learning completed successfully")
+            legacy_postprocess(sim, results, config_path=config, goal=Goal.ONLINE_LEARNING)
         
     except Exception as e:
         if logger is not None:

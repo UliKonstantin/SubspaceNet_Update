@@ -1,0 +1,87 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "v2: OL eta+LR sweep (smoke)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main_v2.py",
+      "args": [
+        "run",
+        "-c",
+        "tmp/lr_plot_test/config.yaml",
+        "--goal",
+        "online_learning",
+        "--sweep",
+        "1d",
+        "--axis",
+        "eta",
+        "--lr-sweep",
+        "-m",
+        "experiments/results/base_model_random_data_snr_10_SubspaceNet_esprit_N9_M3_SNR10.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_084930.pt",
+        "-o",
+        "tmp/lr_plot_test/run_debug"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "v2: train only",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main_v2.py",
+      "args": [
+        "run",
+        "-c",
+        "tests/configs/test_training.yaml",
+        "--goal",
+        "train",
+        "-o",
+        "tmp/debug_train"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "v2: evaluate single",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main_v2.py",
+      "args": [
+        "run",
+        "-c",
+        "tests/configs/test_training.yaml",
+        "--goal",
+        "evaluate",
+        "-m",
+        "experiments/results/base_model_random_data_snr_10_SubspaceNet_esprit_N9_M3_SNR10.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_084930.pt",
+        "-o",
+        "tmp/debug_eval"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "v2: paper eta sweep",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main_v2.py",
+      "args": [
+        "run",
+        "-c",
+        "configs/Used_for_paper/SineAccel_base_model_Online_learning_eta_sweep_config.yaml",
+        "--goal",
+        "online_learning",
+        "--sweep",
+        "1d",
+        "--axis",
+        "eta",
+        "--lr-sweep",
+        "-o",
+        "experiments/results/paper_eta_sweep_v2"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

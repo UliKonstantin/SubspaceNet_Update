@@ -62,12 +62,15 @@ simulation/drift/
 
 ## 5. CLI v2 cutover (Phase 6)
 
-- [ ] Update `.vscode/launch.json` → `main_v2.py run ...`
-- [ ] Deprecate `main.py` commands (banner warning)
-- [ ] Remove duplicate sweep logic from `main.py` after parity sign-off
-- [ ] Full paper config manual run: 6-eta + LR sweep numeric + plot parity
+**Status:** Mostly done (2026-08-09)
 
-**Already done:** thin-config parity, paper-config numeric parity (trimmed), 51 tests.
+- [x] `.vscode/launch.json` → `main_v2.py run ...` recipes
+- [x] Deprecate `main.py` commands (`cli/legacy_bridge.warn_deprecated`)
+- [x] Remove duplicate sweep plotting from `main.py` → `legacy_postprocess` → `plot_dispatch`
+- [x] Delete unused `experiments/runner.py`
+- [ ] Full paper config manual run: 6-eta + LR sweep numeric + plot parity (use launch config **v2: paper eta sweep**)
+
+**Already done:** thin-config parity, paper-config numeric parity (trimmed), 51+ tests.
 
 ---
 
