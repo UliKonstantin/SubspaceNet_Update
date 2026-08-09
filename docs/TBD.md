@@ -49,13 +49,16 @@ simulation/drift/
 
 ## 4. Dead code cleanup
 
+**Status:** Done (2026-08-09)
+
 | Item | Action |
 |------|--------|
-| `experiments/runner.py` | Delete; remove unused import from `main.py` |
-| `main.py` dead imports | Remove `save_config`, `run_experiment`, unused top-level `plot_scenario_results` |
-| `simulation/losses/` | Delete empty package or add real loss modules when needed |
-| `get_kalman_filter` helpers | Keep if public API; else remove unused exports from `kalman_filter/__init__.py` |
-| `tests/kalman_filter/standalone_test_*.py` | Move to `tests/kalman_filter/legacy/` or delete if redundant with `test_extended.py` |
+| `experiments/runner.py` | Already deleted (CLI v2 cutover) |
+| `main.py` dead imports | Already removed |
+| `simulation/losses/` | Deleted empty package |
+| `get_kalman_filter` helpers | Kept — used by `tests/kalman_filter/test_helpers.py` |
+| `tests/kalman_filter/standalone_test_*.py` | Moved to `tests/kalman_filter/legacy/` |
+| `simulation/runners/.png` | Deleted orphan file |
 
 ---
 
@@ -111,12 +114,14 @@ Monolithic `utils/plotting.py` removed. Call sites unchanged: `from utils.plotti
 
 ## 9. Repo hygiene
 
+**Status:** Done (2026-08-09)
+
 | Item | Action |
 |------|--------|
-| `experiments/debug_logs/` | Add to `.gitignore`; optional rotation in EKF logger |
-| `diagrams/` | Commit source (`.tex`) only; gitignore build artifacts (`.aux`, `.log`, …) |
-| `simulation/runners/.png` | Delete orphan file |
-| `.DS_Store` | gitignore |
+| `experiments/debug_logs/` | Added to `.gitignore` |
+| `diagrams/` | Gitignore LaTeX build artifacts (`.aux`, `.log`, …); source `.tex` can be committed |
+| `tmp/`, `.cursor/` | Added to `.gitignore` |
+| `.DS_Store` | Already in `.gitignore`; removed from git index |
 
 ---
 

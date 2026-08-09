@@ -23,7 +23,20 @@ wheels/
 
 # Experiment results
 experiments/results/
-experiments/debug_logs/git
+experiments/debug_logs/
+
+# Local scratch / IDE
+tmp/
+.cursor/
+
+# LaTeX build artifacts (keep source .tex in diagrams/)
+diagrams/*.aux
+diagrams/*.log
+diagrams/*.fls
+diagrams/*.fdb_latexmk
+diagrams/*.synctex.gz
+diagrams/*.out
+
 # Models
 *.pth
 *.pt
