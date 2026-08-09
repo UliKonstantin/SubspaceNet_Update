@@ -300,6 +300,12 @@ def simulate_command(config: str, output: Optional[str], override: List[str],
                 if hasattr(sim.config, 'online_learning') and sim.config.online_learning.enable_lr_sweep:
                     if "lr_sweep_heatmap_data" in sim.results:
                         plot_lr_sweep_heatmap(sim.results["lr_sweep_heatmap_data"], sim.output_dir)
+                        from utils.lr_analysis import postprocess_lr_sweep_analysis
+
+                        postprocess_lr_sweep_analysis(
+                            sim.output_dir,
+                            sim.results["lr_sweep_heatmap_data"],
+                        )
         else:
             if mode == 'full':
                 logger.info("Running full simulation (training, evaluation, and online learning)")

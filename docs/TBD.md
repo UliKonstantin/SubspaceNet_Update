@@ -6,54 +6,26 @@ Tracked follow-ups after CLI v2 and refactoring. Ordered roughly by dependency /
 
 ## 1. Embed LR optimality analysis (`scratch.py`)
 
-**Current state:** Root-level one-off script. Reads `lr_sweep_heatmap_data.json`, picks best LR per η, fits log-space sigmoid, plots:
-- `optimal_lr_vs_eta.png`
-- `loss_vs_eta_per_lr.png`
+**Status:** Done (2026-08-09)
 
-**Target design:**
-
-| Piece | Location | Notes |
-|-------|----------|-------|
-| Data loading + best-LR selection | `utils/lr_analysis.py` | `load_heatmap_data(path)`, `best_lr_per_eta(data) -> DataFrame` |
-| Sigmoid fit (η → LR*) | `utils/lr_analysis.py` | `fit_eta_to_lr_sigmoid(etas, lrs) -> FitResult` (params + R²) |
-| Plots | `utils/plotting.py` | `plot_optimal_lr_vs_eta(...)`, `plot_loss_vs_eta_per_lr(...)` — reuse existing matplotlib style helpers |
-| Postprocess hook | `cli/postprocess.py` | When `goal=online_learning`, `sweep=1d`, `axis=eta`, `lr_sweep=True`: call after `plot_lr_sweep_heatmap` |
-| Optional CLI | `main_v2.py analyze` or `run --analyze-lr` | Re-run analysis on existing results dir without re-simulating |
-
-**Acceptance:**
-- Paper eta+LR sweep produces the two PNGs automatically in output dir
-- Unit test on synthetic `lr_sweep_heatmap_data.json` (fit + plot smoke)
-- Delete `scratch.py` after cutover
-
-**Related:** `plot_lr_sweep_heatmap` in `utils/plotting.py` already handles heatmap; this adds optimality curve + per-LR loss curves.
+- `utils/lr_analysis.py` — data loading, best-LR selection, sigmoid fits
+- `utils/plotting.py` — `plot_optimal_lr_vs_eta`, `plot_loss_vs_eta_per_lr`
+- Auto-generated after eta+LR sweep via `cli/postprocess.py` + `main.py`
+- Tests: `tests/test_lr_analysis.py`
+- `scratch.py` deleted
 
 ---
 
 ## 2. Embed GLRT → optimal LR analysis (`scratch_glrt_analysis.py`)
 
-**Current state:** Root-level script. Joins `drift_detection_dicts.json` + `lr_sweep_heatmap_data.json`, fits sigmoid(observable → LR*) for:
-- `main_log_glr`
-- `glr_diff` (GLR − baseline)
+**Status:** Done (2026-08-09)
 
-Outputs `glrt_observable_to_optimal_lr.png`.
+- `build_glrt_lr_mapping` + `plot_glrt_observable_to_optimal_lr` in same postprocess hook
+- Reads `drift_detection_dicts.json` from output dir when present
+- Output: `glrt_observable_to_optimal_lr.png`
+- `scratch_glrt_analysis.py` deleted
 
-**Target design:**
-
-| Piece | Location | Notes |
-|-------|----------|-------|
-| Join heatmap + drift dicts | `utils/lr_analysis.py` | `build_glrt_lr_mapping(heatmap_path, drift_path) -> mapping table` |
-| Sigmoid fit (observable → LR*) | `utils/lr_analysis.py` | `fit_observable_to_lr_sigmoid(x, log_lrs) -> FitResult` |
-| Compare observables | same module | Return R² for `main_log_glr` vs `glr_diff`; log which wins |
-| Plot | `utils/plotting.py` | `plot_glrt_observable_to_optimal_lr(mapping, fits, output_dir)` |
-| Postprocess hook | `cli/postprocess.py` | After eta LR sweep if both JSON files exist in `output_dir` |
-| Wire to adaptive LR | `simulation/runners/Online_learning.py` | **Optional phase 2:** use fitted sigmoid params from config (`adaptive_lr_*` already in YAML) — validate params match fitted values |
-
-**Acceptance:**
-- Automatic plot after OL eta+LR sweep when drift dicts saved
-- Test with fixture JSON (2–3 η values)
-- Delete `scratch_glrt_analysis.py` after cutover
-
-**Note:** This closes the loop between GLRT drift detection and adaptive LR tuning documented in `GLRT_DRIFT_DETECTION_AND_ADAPTIVE_LEARNING.md`.
+**Optional phase 2:** wire fitted sigmoid params into adaptive LR config in `Online_learning.py`.
 
 ---
 

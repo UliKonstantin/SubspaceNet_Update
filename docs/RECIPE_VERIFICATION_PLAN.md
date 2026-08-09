@@ -539,4 +539,4 @@ This plan adds **plot/visual** verification and covers **eval / kalman / 4D** no
 
 ## Next step (current position)
 
-**Recipe verification complete (Steps 0–10).** Follow-ups: teardown, commit, plot consolidation (TBD #6), LR/GLRT analysis (TBD #1–2).
+**Recipe verification complete (Steps 0–10).** Teardown done. TBD #1–2 embedded in `utils/lr_analysis.py` + postprocess. Next: plot consolidation (TBD #6), push commits.

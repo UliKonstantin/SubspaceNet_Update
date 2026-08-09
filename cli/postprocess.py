@@ -52,5 +52,11 @@ def postprocess(result: Dict, request: RunRequest, output_dir: Path, sim) -> Non
                 plot_scenario_results(result, output_dir, scenario_type="eta")
                 if request.lr_sweep and "lr_sweep_heatmap_data" in sim.results:
                     plot_lr_sweep_heatmap(sim.results["lr_sweep_heatmap_data"], output_dir)
+                    from utils.lr_analysis import postprocess_lr_sweep_analysis
+
+                    postprocess_lr_sweep_analysis(
+                        output_dir,
+                        sim.results["lr_sweep_heatmap_data"],
+                    )
     except Exception as exc:
         logger.warning("Post-processing plots failed: %s", exc)
