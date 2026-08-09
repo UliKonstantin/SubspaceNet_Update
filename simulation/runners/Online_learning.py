@@ -31,7 +31,7 @@ from utils.ekf_handoff import (
     ekf_handoff_step_index,
     ekf_next_predict_time_index,
 )
-from simulation.runners.sandbox import glrt_changepoint_detection
+from simulation.drift import glrt_changepoint_detection
 from utils import drift_gates
 
 

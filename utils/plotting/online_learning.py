@@ -589,7 +589,7 @@ def plot_glrt_averaged_drift_results(
     import matplotlib.pyplot as plt
     from pathlib import Path
 
-    from simulation.runners.sandbox import glrt_changepoint_detection, plot_results
+    from simulation.drift import glrt_changepoint_detection, plot_results
     from utils import drift_gates
 
     logger = logging.getLogger(__name__)

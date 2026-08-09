@@ -163,12 +163,19 @@ def _handle_online_learning_one_d_eta(ctx: PlotContext) -> None:
     dispatch_one_d_sweep_iteration_plots(ctx.result, ctx.output_dir, ctx.sim.config, "eta")
 
 
+def _maybe_plot_drift_detection_metrics(output_dir: Path) -> None:
+    from simulation.drift.drift_metrics import plot_drift_detection_metrics_in_output_dir
+
+    plot_drift_detection_metrics_in_output_dir(output_dir)
+
+
 def _handle_online_learning_one_d(ctx: PlotContext) -> None:
     axis = ctx.request.sweep_axis.value if ctx.request.sweep_axis else None
     if axis == "snr":
         _handle_online_learning_one_d_snr(ctx)
     elif axis == "eta":
         _handle_online_learning_one_d_eta(ctx)
+    _maybe_plot_drift_detection_metrics(ctx.output_dir)
 
 
 PLOT_REGISTRY: Dict[PlotKey, PlotHandler] = {

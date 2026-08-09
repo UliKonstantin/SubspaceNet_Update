@@ -128,6 +128,9 @@ class TestPlotDispatch:
             "utils.plotting.plot_lr_sweep_heatmap"
         ), patch("utils.lr_analysis.postprocess_lr_sweep_analysis"), patch(
             "utils.plot_dispatch.dispatch_one_d_sweep_iteration_plots"
-        ) as mock_iter:
+        ) as mock_iter, patch(
+            "simulation.drift.drift_metrics.plot_drift_detection_metrics_in_output_dir"
+        ) as mock_drift:
             dispatch_plots(scenario_results, request, tmp_path, sim)
         mock_iter.assert_called_once_with(scenario_results, tmp_path, sim.config, "eta")
+        mock_drift.assert_called_once_with(tmp_path)

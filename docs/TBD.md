@@ -31,20 +31,19 @@ Tracked follow-ups after CLI v2 and refactoring. Ordered roughly by dependency /
 
 ## 3. Refactor `sandbox.py` (GLRT module)
 
-**Current state:** Misnamed file mixing production GLRT + dev plotting + commented demo + CLI.
-
-**Target design:**
+**Status:** Done (2026-08-09)
 
 ```
 simulation/drift/
-  glrt.py              ← glrt_changepoint_detection (from sandbox)
-  plotting.py          ← plot_results (GLRT loss/GLRT stat figures)
-  drift_metrics.py     ← plot_drift_detection_metrics (optional CLI)
+  glrt.py              ← glrt_changepoint_detection
+  plotting.py          ← plot_results
+  drift_metrics.py     ← plot_drift_detection_metrics (+ pipeline hook)
 ```
 
-- Update imports in `Online_learning.py`, `tests/test_integration.py`
-- Remove ~150 lines of commented demo code
-- Keep backward compat alias `simulation.runners.sandbox` → re-export from `drift/` for one release, then remove
+- `simulation.runners.sandbox` re-exports from `simulation.drift` (CLI preserved)
+- `plot_drift_detection_metrics_in_output_dir` wired in `utils/plot_dispatch.py` for 1D OL sweeps
+- Output: `drift_detection_metrics_vs_eta.png` when `drift_detection_dicts.json` exists
+- Tests: `tests/test_drift_metrics.py`
 
 ---
 
