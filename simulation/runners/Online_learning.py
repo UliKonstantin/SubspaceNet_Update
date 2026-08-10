@@ -702,13 +702,14 @@ class OnlineLearning:
 
                                 import math
                                 base_lr = getattr(self.config.online_learning, "learning_rate", 1e-3)
+                                dG_at_detection = None
                                 if self.use_adaptive_learning_rate:
                                     G = adapt_log_glr if adapt_log_glr is not None else self.adaptive_lr_dG0
-                                    dG = G - baseline_mean if baseline_mean is not None else 0.0
+                                    dG_at_detection = G - baseline_mean if baseline_mean is not None else 0.0
                                     log_lr_min = math.log10(self.adaptive_lr_min)
                                     log_lr_max = math.log10(self.adaptive_lr_max)
                                     log_lr = log_lr_min + (log_lr_max - log_lr_min) / (
-                                        1.0 + math.exp(-self.adaptive_lr_k_sigmoid * (dG - self.adaptive_lr_dG0))
+                                        1.0 + math.exp(-self.adaptive_lr_k_sigmoid * (dG_at_detection - self.adaptive_lr_dG0))
                                     )
                                     self.learning_rate_at_detection = 10 ** log_lr
                                 else:
@@ -736,6 +737,9 @@ class OnlineLearning:
                                     "baseline_std": baseline_std,
                                     "current_glrt_z_score": current_glrt_z_score,
                                     "learning_rate_at_detection": self.learning_rate_at_detection,
+                                    "dG_at_detection": dG_at_detection,
+                                    "use_adaptive_learning_rate": self.use_adaptive_learning_rate,
+                                    "adaptive_lr_dG0": self.adaptive_lr_dG0 if self.use_adaptive_learning_rate else None,
                                 })
                         else:
                             logger.info(

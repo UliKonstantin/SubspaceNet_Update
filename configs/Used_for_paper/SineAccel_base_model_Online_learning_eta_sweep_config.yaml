@@ -153,11 +153,11 @@ online_learning:
   drift_z_threshold: 2.5
   adaptation_window_count: 5
 
-  # Adaptive LR sigmoid parameters
+  # Adaptive LR sigmoid parameters (retuned 2026-08-09: dG0 to trigger-time ΔG scale ~8–23)
   adaptive_lr_min: 0.0005
-  adaptive_lr_max: 0.0356
+  adaptive_lr_max: 0.02
   adaptive_lr_k_sigmoid: 0.7336
-  adaptive_lr_dG0: 69.2599
+  adaptive_lr_dG0: 14.5
   num_gd_steps: 3
   
   # LR sweep configuration

@@ -9,7 +9,7 @@ from typing import Dict
 import matplotlib.pyplot as plt
 import numpy as np
 
-from utils.plotting.style import apply_lr_analysis_plot_style
+from utils.plotting.style import apply_lr_analysis_plot_style, save_figure
 
 
 def plot_optimal_lr_vs_eta(heatmap_data: Dict, output_dir: Path) -> Path | None:
@@ -93,8 +93,7 @@ def plot_optimal_lr_vs_eta(heatmap_data: Dict, output_dir: Path) -> Path | None:
     plt.tight_layout()
 
     plot_path = Path(output_dir) / "optimal_lr_vs_eta.png"
-    fig.savefig(plot_path, bbox_inches="tight")
-    plt.close(fig)
+    save_figure(fig, plot_path)
     logger.info(
         "Saved optimal LR plot to %s (eta sigmoid R²=%.4f)",
         plot_path,
@@ -163,8 +162,7 @@ def plot_loss_vs_eta_per_lr(heatmap_data: Dict, output_dir: Path) -> Path | None
     plt.tight_layout()
 
     plot_path = Path(output_dir) / "loss_vs_eta_per_lr.png"
-    fig.savefig(plot_path, bbox_inches="tight")
-    plt.close(fig)
+    save_figure(fig, plot_path)
     logger.info("Saved per-LR loss plot to %s", plot_path)
     return plot_path
 
@@ -271,8 +269,7 @@ def plot_glrt_observable_to_optimal_lr(
 
     plt.tight_layout()
     plot_path = Path(output_dir) / "glrt_observable_to_optimal_lr.png"
-    fig.savefig(plot_path, bbox_inches="tight")
-    plt.close(fig)
+    save_figure(fig, plot_path)
     logger.info("Saved GLRT→LR plot to %s", plot_path)
     return plot_path
 

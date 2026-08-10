@@ -181,6 +181,9 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
     Returns:
         List of paths to the saved plots
     """
+    from utils.plotting.style import ETA_XLABEL, apply_paper_plot_style, save_figure
+
+    apply_paper_plot_style()
     logger = logging.getLogger("SubspaceNet.plotting")
     
     # Create timestamp and plot directory
@@ -782,10 +785,10 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                            label='Mean EKF Improvement', alpha=0.9, color='orange', 
                            edgecolor='black', linewidth=0.5)
                 
-                ax6.set_xlabel('Eta Values')
+                ax6.set_xlabel(ETA_XLABEL)
                 ax6.set_ylabel('Mean Loss')
                 ax6_twin.set_ylabel('Mean EKF Improvement', color='orange')
-                ax6.set_title('Summary: EKF vs SubspaceNet Loss by Eta\nDark=EKF, Light=SubspaceNet')
+                ax6.set_title('Summary: EKF vs SubspaceNet Loss by η\nDark=EKF, Light=SubspaceNet')
                 ax6.set_xticks(x_pos)
                 ax6.set_xticklabels(summary_labels)
                 ax6.grid(True, alpha=0.3)
@@ -799,13 +802,12 @@ def plot_eta_comparison_4d_grid(scenario_results, output_dir):
                 fig.suptitle(f'Eta Comparison: proc_noise={proc_noise:.3f}, kf_proc_noise={kf_proc_noise:.3f}, kf_meas_noise={kf_meas_noise:.3f}', 
                             fontsize=16, y=0.98)
                 
-                plt.tight_layout()
+                fig.tight_layout()
                 
                 # Save the plot
                 plot_filename = f"eta_comparison_pn{proc_noise:.3f}_kfpn{kf_proc_noise:.3f}_kfmn{kf_meas_noise:.3f}_{timestamp}.png"
                 plot_path = plot_dir / plot_filename
-                plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-                plt.close()
+                save_figure(fig, plot_path)
                 
                 saved_plots.append(plot_path)
                 logger.info(f"Saved eta comparison plot {combination_count}/{total_combinations}: {plot_path.name}")
@@ -839,10 +841,21 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_typ
     import matplotlib.pyplot as plt
     import numpy as np
     from pathlib import Path
-    
+
+    from utils.plotting.style import (
+        ETA_XLABEL,
+        PLOT_COLORS,
+        RMSPE_DB_LABEL,
+        SNR_XLABEL,
+        apply_paper_plot_style,
+        save_current_figure,
+        style_axes,
+    )
+
+    apply_paper_plot_style()
     logger = logging.getLogger(__name__)
     logger.info(f"Creating scenario results plot for {scenario_type.upper()} scenario...")
-    
+
     # Extract scenario values and sort them (preserve original key type for lookup)
     # Keys can be int, float, or string depending on how they were stored
     scenario_keys = [key for key in scenario_results.keys() if scenario_results[key] is not None]
@@ -983,74 +996,56 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_typ
             logger.info(f"{value_label} {val}: No loss data available")
     
     # Create the plot
-    plt.figure(figsize=(10, 6))
-    
-    # Plot all three models
-    plt.plot(scenario_values, online_avg_db_losses, 'o-', label='Algorithm 1', linewidth=2, markersize=8)
-    plt.plot(scenario_values, pretrained_avg_db_losses, 's-', label='Pretrained Model', linewidth=2, markersize=8)
-    
-    # Add supervised model if data is available
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    ax.plot(
+        scenario_values, online_avg_db_losses, "o-",
+        label="Online (Algorithm 1)", linewidth=2, markersize=7, color=PLOT_COLORS["online"],
+    )
+    ax.plot(
+        scenario_values, pretrained_avg_db_losses, "s-",
+        label="Pretrained SubspaceNet", linewidth=2, markersize=7, color=PLOT_COLORS["pretrained"],
+    )
     if any(not np.isnan(loss) for loss in supervised_avg_db_losses):
-        plt.plot(scenario_values, supervised_avg_db_losses, '^-', label='Supervised Trained Model', linewidth=2, markersize=8)
-    
-    # Customize the plot with scenario-appropriate labels
-    plt.xlabel(f'{value_label}{value_unit}', fontsize=20)
-    plt.ylabel('Average RMSPE (Supervised) (dB)', fontsize=20)
-    title_text = f'Averaged RMSPE (Supervised) vs {value_label}'
-    if scenario_type.lower() == 'snr':
-        title_text += ' (SNR)'
-    plt.title(title_text, fontsize=24, fontweight='bold')
-    plt.legend(fontsize=18)
-    plt.grid(True, alpha=0.3)
-    
-    # Set custom x-axis ticks based on scenario type
+        ax.plot(
+            scenario_values, supervised_avg_db_losses, "^-",
+            label="Supervised oracle", linewidth=2, markersize=7, color=PLOT_COLORS["supervised"],
+        )
+
+    xlabel = SNR_XLABEL if scenario_type.lower() == "snr" else ETA_XLABEL
+    title = (
+        f"Post-learning tracking error vs SNR"
+        if scenario_type.lower() == "snr"
+        else f"Post-learning tracking error vs {ETA_XLABEL}"
+    )
+    style_axes(ax, xlabel=xlabel, ylabel=RMSPE_DB_LABEL, title=title)
+    ax.legend(loc="best")
+
     min_val = min(scenario_values)
     max_val = max(scenario_values)
-    
-    if scenario_type.lower() == 'snr':
-        # For SNR: use 5dB spacing
-        start_tick = int(min_val // 5) * 5  # Round down to nearest 5
-        end_tick = int(max_val // 5) * 5 + 5  # Round up to nearest 5
-        x_ticks = list(range(start_tick, end_tick + 1, 5))
-        plt.xticks(x_ticks, fontsize=18)
-        # Set axis limits with exact SNR range (0-10) if applicable
+    if scenario_type.lower() == "snr":
+        start_tick = int(min_val // 5) * 5
+        end_tick = int(max_val // 5) * 5 + 5
+        ax.set_xticks(list(range(start_tick, end_tick + 1, 5)))
         if min_val >= 0 and max_val <= 10:
-            plt.xlim(0, 10)
+            ax.set_xlim(0, 10)
     else:
-        # For eta: use automatic ticks
-        plt.xticks(fontsize=18)
-    
-    # Set custom y-axis ticks with 5dB spacing
+        ax.set_xlim(min_val - 0.05, max_val + 0.05)
+
     all_losses = online_avg_db_losses + pretrained_avg_db_losses
     if any(not np.isnan(loss) for loss in supervised_avg_db_losses):
         all_losses += supervised_avg_db_losses
-    
-    # Filter out NaN values for min/max calculation
     valid_losses = [loss for loss in all_losses if not np.isnan(loss)]
-    min_loss = min(valid_losses) if valid_losses else -30
-    max_loss = max(valid_losses) if valid_losses else 0
-    
-    # Create ticks with 5dB spacing for y-axis, starting from the nearest 5dB value below min_loss
-    start_y_tick = int(min_loss // 5) * 5  # Round down to nearest 5
-    end_y_tick = int(max_loss // 5) * 5 + 5  # Round up to nearest 5
-    
-    # Generate y-axis ticks with 5dB spacing
-    y_ticks = list(range(start_y_tick, end_y_tick + 1, 5))
-    plt.yticks(y_ticks, fontsize=18)
-    
-    # Set y-axis limits
-    if scenario_type.lower() == 'snr' and min_val >= 0 and max_val <= 10:
-        plt.ylim(min_loss - 2.5, max_loss + 2.5)
-    else:
-        plt.ylim(min_loss - 2.5, max_loss + 2.5)
-    
-    # Add some styling
-    plt.tight_layout()
-    
-    # Save the plot
-    plot_path = output_dir / 'scenario_results_comparison.png'
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-    plt.close()
+    if valid_losses:
+        min_loss = min(valid_losses)
+        max_loss = max(valid_losses)
+        start_y_tick = int(min_loss // 5) * 5
+        end_y_tick = int(max_loss // 5) * 5 + 5
+        ax.set_yticks(list(range(start_y_tick, end_y_tick + 1, 5)))
+        ax.set_ylim(min_loss - 2.5, max_loss + 2.5)
+
+    fig.tight_layout()
+    plot_path = output_dir / "scenario_results_comparison.png"
+    save_current_figure(plot_path)
     logger.info(f"Saved scenario results plot to {plot_path}")
 
 
@@ -1071,7 +1066,7 @@ def plot_eta_scenario_comparison(scenario_results: dict, output_dir: Path) -> No
     import numpy as np
     from pathlib import Path
 
-    from utils.plotting.style import apply_paper_plot_style
+    from utils.plotting.style import ETA_XLABEL, PLOT_COLORS, apply_paper_plot_style, save_figure, style_axes
 
     apply_paper_plot_style()
     logger = logging.getLogger(__name__)
@@ -1156,8 +1151,7 @@ def plot_eta_scenario_comparison(scenario_results: dict, output_dir: Path) -> No
                    if detection_window is not None and z_score is not None and learning_rate is not None 
                    else f"Eta {eta}: Incomplete GLRT data")
     
-    # Create figure with 3 subplots
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4.2), sharex=True)
     
     # Subplot 1: Change detection window vs eta
     ax1 = axes[0]
@@ -1165,12 +1159,9 @@ def plot_eta_scenario_comparison(scenario_results: dict, output_dir: Path) -> No
     if np.any(valid_mask):
         ax1.errorbar(np.array(eta_values)[valid_mask], np.array(detection_windows)[valid_mask],
                     yerr=np.array(detection_window_stds)[valid_mask], 
-                    fmt='o-', linewidth=2, markersize=8, capsize=5, capthick=2, label='Detection Window')
-    ax1.set_xlabel('Eta', fontsize=14)
-    ax1.set_ylabel('Change Detection Window', fontsize=14)
-    ax1.set_title('Drift Detection Window vs Eta', fontsize=16, fontweight='bold')
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(fontsize=12)
+                    fmt='o-', linewidth=2, markersize=6, capsize=4, capthick=1.5, color=PLOT_COLORS["online"])
+    style_axes(ax1, xlabel=ETA_XLABEL, ylabel="Drift detection window", title="Detection window vs η")
+    ax1.legend(["GLRT trigger"], loc="best", fontsize=9)
     
     # Subplot 2: GLRT z-score vs eta
     ax2 = axes[1]
@@ -1178,13 +1169,9 @@ def plot_eta_scenario_comparison(scenario_results: dict, output_dir: Path) -> No
     if np.any(valid_mask):
         ax2.errorbar(np.array(eta_values)[valid_mask], np.array(z_scores)[valid_mask],
                     yerr=np.array(z_score_stds)[valid_mask],
-                    fmt='s-', linewidth=2, markersize=8, capsize=5, capthick=2, 
-                    color='green', label='GLRT Z-Score')
-    ax2.set_xlabel('Eta', fontsize=14)
-    ax2.set_ylabel('GLRT Z-Score at Detection', fontsize=14)
-    ax2.set_title('GLRT Z-Score vs Eta', fontsize=16, fontweight='bold')
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(fontsize=12)
+                    fmt='s-', linewidth=2, markersize=6, capsize=4, capthick=1.5, 
+                    color=PLOT_COLORS["glrt"])
+    style_axes(ax2, xlabel=ETA_XLABEL, ylabel="GLRT z-score at detection", title="GLRT z-score vs η")
     
     # Subplot 3: Learning rate vs eta
     ax3 = axes[2]
@@ -1192,23 +1179,16 @@ def plot_eta_scenario_comparison(scenario_results: dict, output_dir: Path) -> No
     if np.any(valid_mask):
         ax3.errorbar(np.array(eta_values)[valid_mask], np.array(learning_rates)[valid_mask],
                     yerr=np.array(learning_rate_stds)[valid_mask],
-                    fmt='^-', linewidth=2, markersize=8, capsize=5, capthick=2,
-                    color='orange', label='Learning Rate')
-    ax3.set_xlabel('Eta', fontsize=14)
-    ax3.set_ylabel('Learning Rate at Detection', fontsize=14)
-    ax3.set_title('Learning Rate vs Eta', fontsize=16, fontweight='bold')
-    ax3.grid(True, alpha=0.3)
-    ax3.legend(fontsize=12)
+                    fmt='^-', linewidth=2, markersize=6, capsize=4, capthick=1.5,
+                    color=PLOT_COLORS["adaptive"])
+    style_axes(ax3, xlabel=ETA_XLABEL, ylabel="Learning rate at detection", title="LR at detection vs η")
     
-    plt.tight_layout()
+    fig.suptitle("Drift detection observables across calibration-error sweep", fontsize=14, y=1.02)
+    fig.tight_layout()
     
-    # Save the plot
     plot_path = output_dir / "eta_scenario_drift_detection_comparison.png"
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-    plt.close()
+    save_figure(fig, plot_path)
     logger.info(f"Saved eta scenario comparison plot to {plot_path}")
-    
-    logger.info(f"Scenario results plot saved to: {plot_path}")
     
     # GLRT drift detection violin plots
     _plot_glrt_scenario_results(scenario_results, output_dir)
@@ -1236,7 +1216,17 @@ def _plot_glrt_scenario_results(scenario_results: dict, output_dir: Path) -> Non
     
     import matplotlib.pyplot as plt
     import numpy as np
-    
+
+    from utils.plotting.style import (
+        ETA_XLABEL,
+        FIG_WIDE,
+        WINDOW_XLABEL,
+        apply_paper_plot_style,
+        save_figure,
+        style_axes,
+    )
+
+    apply_paper_plot_style()
     logger = logging.getLogger(__name__)
     
     # Extract scenario values and sort them
@@ -1281,7 +1271,7 @@ def _plot_glrt_scenario_results(scenario_results: dict, output_dir: Path) -> Non
         return
     
     # Create figure with two subplots
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=FIG_WIDE)
     
     # Plot 1: Changepoint window detection
     if changepoint_data_by_scenario:
@@ -1304,10 +1294,12 @@ def _plot_glrt_scenario_results(scenario_results: dict, output_dir: Path) -> Non
             })
             
             sns.violinplot(data=data_for_violin, x='Scenario', y='Changepoint Window', ax=ax1)
-            ax1.set_xlabel('Scenario (SNR)', fontsize=14)
-            ax1.set_ylabel('Changepoint Window', fontsize=14)
-            ax1.set_title('GLRT Changepoint Window Detection Across Scenarios', fontsize=16, fontweight='bold')
-            ax1.grid(True, alpha=0.3)
+            style_axes(
+                ax1,
+                xlabel=ETA_XLABEL,
+                ylabel=WINDOW_XLABEL,
+                title="GLRT changepoint window distribution",
+            )
             
             # Add mean and std markers
             handles_added = False
@@ -1345,10 +1337,12 @@ def _plot_glrt_scenario_results(scenario_results: dict, output_dir: Path) -> Non
             })
             
             sns.violinplot(data=data_for_violin, x='Scenario', y='Likelihood (Log-GLR)', ax=ax2)
-            ax2.set_xlabel('Scenario (SNR)', fontsize=14)
-            ax2.set_ylabel('Likelihood (Log-GLR)', fontsize=14)
-            ax2.set_title('GLRT Likelihood at Changepoint Window (Reference Loss)', fontsize=16, fontweight='bold')
-            ax2.grid(True, alpha=0.3)
+            style_axes(
+                ax2,
+                xlabel=ETA_XLABEL,
+                ylabel="Log-GLR at detection",
+                title="GLRT statistic at changepoint (reference loss)",
+            )
             
             # Add mean and std markers
             handles_added = False
@@ -1365,12 +1359,11 @@ def _plot_glrt_scenario_results(scenario_results: dict, output_dir: Path) -> Non
             if handles_added:
                 ax2.legend(fontsize=10, loc='best')
     
-    plt.tight_layout()
+    fig.suptitle("GLRT drift detection across calibration-error sweep", fontsize=14, y=1.02)
+    fig.tight_layout()
     
-    # Save the plot
     plot_path = output_dir / 'glrt_scenario_results.png'
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-    plt.close()
+    save_figure(fig, plot_path)
     
     logger.info(f"GLRT scenario results violin plots saved to: {plot_path}")
 
@@ -1389,7 +1382,10 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
     import matplotlib.pyplot as plt
     import numpy as np
     import os
-    
+
+    from utils.plotting.style import FIG_TABLE, apply_paper_plot_style, save_figure
+
+    apply_paper_plot_style()
     logger = logging.getLogger(__name__)
     logger.info("Creating performance improvement table...")
     
@@ -1508,7 +1504,7 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
         supervised_msie_improvements.append(supervised_msie_improvement)
     
     # Create the table plot with minimal margins
-    fig, ax = plt.subplots(figsize=(8, 12))
+    fig, ax = plt.subplots(figsize=FIG_TABLE)
     ax.axis('off')  # Turn off axes for table
     
     # Remove all margins and set tight spacing
@@ -1574,14 +1570,14 @@ def plot_performance_improvement_table(scenario_results: dict, output_dir: Path)
                 table[(i+1, j)].set_fontsize(16)  # Larger but reasonable data cell font size for degree values
     
     # Add title and subtitle with proper spacing to avoid overlap
-    plt.suptitle('Performance Improvement of Algorithms vs Pretrained Model', fontsize=20, fontweight='bold', y=0.95)
-    ax.text(0.5, 0.82, 'Average L2 Distance (Pretrained - Algorithm) over Last 15 Windows', 
-            ha='center', va='center', transform=ax.transAxes, fontsize=18, style='italic')
+    fig.suptitle('Performance Improvement of Algorithms vs Pretrained Model', fontsize=16, fontweight='bold', y=0.95)
+    ax.text(
+        0.5, 0.82, 'Average L2 Distance (Pretrained − Algorithm) over Last 15 Windows',
+        ha='center', va='center', transform=ax.transAxes, fontsize=12, style='italic',
+    )
     
-    # Save the plot with absolute minimal whitespace
     plot_path = output_dir / 'performance_improvement_table.png'
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight', pad_inches=0)
-    plt.close()
+    save_figure(fig, plot_path, bbox_inches='tight')
     logger.info(f"Saved performance improvement table to {plot_path}")
     return plot_path
 
@@ -1605,7 +1601,10 @@ def plot_lr_sweep_heatmap(heatmap_data: Dict, output_dir: Path) -> Path:
     import matplotlib.pyplot as plt
     import numpy as np
     import pandas as pd
-    
+
+    from utils.plotting.style import ETA_XLABEL, apply_paper_plot_style, save_figure
+
+    apply_paper_plot_style()
     logger = logging.getLogger(__name__)
     logger.info("Creating LR sweep heatmap...")
     
@@ -1716,20 +1715,17 @@ def plot_lr_sweep_heatmap(heatmap_data: Dict, output_dir: Path) -> Path:
                 ax.text(j + 0.5, i + 0.5, cell_text,
                        ha="center", va="center", color=text_color, fontsize=9, weight='bold')
     
-    # Labels and title
-    ax.set_xlabel('Eta Value', fontsize=12)
-    ax.set_ylabel('Learning Rate Value', fontsize=12)
-    ax.set_title('Average RMSPE Loss Heatmap: Eta vs Learning Rate', fontsize=14)
+    ax.set_xlabel(ETA_XLABEL)
+    ax.set_ylabel("Learning rate")
+    ax.set_title("Post-learning RMSPE: η vs learning rate (lower is better)", fontweight="bold")
     
     # Invert y-axis so first row is at top
     ax.invert_yaxis()
     
-    plt.tight_layout()
+    fig.tight_layout()
     
-    # Save plot
     plot_path = output_dir / "lr_sweep_heatmap.png"
-    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
+    save_figure(fig, plot_path)
     
     logger.info(f"LR sweep heatmap saved to {plot_path}")
     return plot_path
@@ -1751,7 +1747,10 @@ def plot_performance_improvement_table_eta(scenario_results: dict, output_dir: P
     import matplotlib.pyplot as plt
     import numpy as np
     import os
-    
+
+    from utils.plotting.style import FIG_TABLE, apply_paper_plot_style, save_figure
+
+    apply_paper_plot_style()
     logger = logging.getLogger(__name__)
     logger.info("Creating performance improvement table for eta scenario...")
     
@@ -1883,14 +1882,14 @@ def plot_performance_improvement_table_eta(scenario_results: dict, output_dir: P
         supervised_msie_improvements.append(supervised_msie_improvement)
     
     # Create the table plot with minimal margins
-    fig, ax = plt.subplots(figsize=(8, 12))
+    fig, ax = plt.subplots(figsize=FIG_TABLE)
     ax.axis('off')  # Turn off axes for table
     
     # Remove all margins and set tight spacing
     fig.subplots_adjust(left=0, right=1, top=0.85, bottom=0.02)
     
     # Prepare table data (Eta as rows, loss types as columns)
-    eta_labels = [f'Eta {eta:.2f}' for eta in eta_values]
+    eta_labels = [f'η = {eta:.2f}' for eta in eta_values]
     table_headers = ['Eta', 'RMSPE (Alg 1)', 'MSIE (Alg 1)', 'RMSPE (Supervised)']
     
     # Format the improvement values with degree conversion
@@ -1949,21 +1948,18 @@ def plot_performance_improvement_table_eta(scenario_results: dict, output_dir: P
                 table[(i+1, j)].set_fontsize(16)
     
     # Add title and subtitle with proper spacing
-    plt.suptitle('Performance Improvement of Algorithms vs Pretrained Model (Eta Scenario)', 
-                 fontsize=20, fontweight='bold', y=0.95)
-    ax.text(0.5, 0.82, 'Average L2 Distance (Pretrained - Algorithm) over Last 15 Windows', 
-            ha='center', va='center', transform=ax.transAxes, fontsize=18, style='italic')
+    fig.suptitle(
+        'Performance Improvement of Algorithms vs Pretrained Model (η sweep)',
+        fontsize=16, fontweight='bold', y=0.95,
+    )
+    ax.text(
+        0.5, 0.82, 'Average L2 Distance (Pretrained − Algorithm) over Last 15 Windows',
+        ha='center', va='center', transform=ax.transAxes, fontsize=12, style='italic',
+    )
     
-    # Save the plot
     plot_path = output_dir / 'performance_improvement_table_eta.png'
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight', pad_inches=0)
-    plt.close()
+    save_figure(fig, plot_path, bbox_inches='tight')
     logger.info(f"Saved performance improvement table for eta scenario to {plot_path}")
-    return plot_path
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight', pad_inches=0.02)
-    plt.close()
-    
-    logger.info(f"Performance improvement table saved to: {plot_path}")
     return plot_path
 
 

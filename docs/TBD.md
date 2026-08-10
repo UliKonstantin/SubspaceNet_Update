@@ -145,39 +145,36 @@ Monolithic `utils/plotting.py` removed. Call sites unchanged: `from utils.plotti
 
 ## 11. Plot visual polish (paper-ready figures)
 
-**Status:** In progress (2026-08-09)
+**Status:** Done (2026-08-09)
 
 Systematic pass over all pipeline-generated plots for publication quality. **All figures must go through `plot_dispatch` / `utils/plotting/` — no inline `savefig` in runners or data loaders.**
 
-**Architecture (done):**
-- [x] `utils/plotting/style.py` — `apply_paper_plot_style()`, `save_figure()`
-- [x] OL trajectory plots moved to `utils/plotting/trajectory.py`, invoked from `plot_dispatch._plot_iteration_if_ol` (gated by `online_learning.plot_trajectory`)
+**Architecture:**
+- [x] `utils/plotting/style.py` — `apply_paper_plot_style()`, `save_figure()`, shared labels/colors/fig sizes
+- [x] OL trajectory plots in `utils/plotting/trajectory.py`, invoked from `plot_dispatch._plot_iteration_if_ol`
 - [x] Removed inline trajectory verification plotting from `simulation/runners/data.py`
-- [x] First pass: paper style + dpi 300 on main/training loss, KF gain, GLRT, drift metrics, eta scenario comparison, trajectory XY/DOA plots
+- [x] Paper style + dpi 300 on main/training loss, KF gain, GLRT, drift metrics, eta scenario comparison, trajectory XY/DOA plots
+- [x] Sweep aggregates (`sweeps.py`, `lr_plots.py`) — scenario comparison, heatmap, improvement tables, GLRT violins
+- [x] Training/eval (`evaluation.py`, `online_learning.py`) — unified `save_figure` export
+- [x] `scripts/replot_paper_aggregates.py` — offline replot from JSON artifacts
+- [x] `scenario_results_stub.json` saved during eta-sweep postprocess for offline aggregate replot
 
-**Per-plot checklist (remaining):**
-- [ ] **Style & format** — roll `apply_paper_plot_style()` through remaining modules (`evaluation.py`, `scenario_results_comparison`, heatmaps, improvement tables)
-- [ ] **No text overlap** — legends, annotations, suptitles, tick labels; `tight_layout` / `bbox_to_anchor` audit on v3 outputs
-- [ ] **Label choices** — η, RMSPE, window index; pretrained vs Algorithm 1 vs EKF; static vs adaptive LR
-- [ ] **Missing labels** — every curve in legend; drift/GLRT gate lines labeled once
-- [ ] **Self-explainability** — titles state comparison + phase markers (drift, training start/end, η step)
-- [ ] **Paper level** — optional PDF export; readable at 3.5" and 7" column width
+**Deferred (non-blocking):**
+- Per-subdir OL replot from v3 without full result dicts (re-run sweep or restore stubs)
+- Optional PDF export toggle
 
-**Suggested order:**
-1. Sweep aggregates (`sweeps.py`, `lr_plots.py`) — scenario comparison, heatmap, improvement tables
-2. Per-run OL (`online_learning.py`) — remaining legacy `plot_online_learning_results` path if still reachable
-3. Training/eval (`evaluation.py`)
-
-**Deliverable:** re-dispatch v3 or recipe step 8 → visual before/after gallery for paper figure pick list
+**Deliverable:** re-dispatch v3 step 8 or `python scripts/replot_paper_aggregates.py <output_dir>` for aggregate refresh
 
 ---
 
 ## Suggested execution order
 
 ```
-11   plot visual polish (in progress — finish remaining checklist)
 10   full legacy parity (last; only if regression proof needed)
+     DCD_MUSIC submodule cleanup (local dirty state)
 ```
+
+TBD #11 plot polish is complete. Circle back to DCD_MUSIC + TBD #10 when ready.
 
 ---
 

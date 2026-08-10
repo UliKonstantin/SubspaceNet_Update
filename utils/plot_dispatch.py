@@ -163,6 +163,20 @@ def _handle_online_learning_one_d_eta(ctx: PlotContext) -> None:
         postprocess_lr_sweep_analysis(ctx.output_dir, ctx.sim.results["lr_sweep_heatmap_data"])
 
     dispatch_one_d_sweep_iteration_plots(ctx.result, ctx.output_dir, ctx.sim.config, "eta")
+    _save_scenario_results_stub(ctx.output_dir, ctx.result)
+
+
+def _save_scenario_results_stub(output_dir: Path, result: dict) -> None:
+    """Persist scenario results for offline aggregate replot (JSON-only artifacts)."""
+    import json
+
+    stub_path = output_dir / "scenario_results_stub.json"
+    try:
+        with open(stub_path, "w", encoding="utf-8") as handle:
+            json.dump(result, handle, default=str)
+        logger.debug("Saved scenario_results_stub.json for offline replot")
+    except Exception as exc:
+        logger.warning("Could not save scenario_results_stub.json: %s", exc)
 
 
 def _maybe_plot_drift_detection_metrics(output_dir: Path) -> None:

@@ -9,316 +9,158 @@ from typing import Dict
 import matplotlib.pyplot as plt
 import numpy as np
 
+from utils.plotting.style import (
+    PLOT_COLORS,
+    apply_paper_plot_style,
+    save_current_figure,
+    save_figure,
+    style_axes,
+)
 from utils.plotting.sweeps import SCENARIO_AXIS_LABELS, SCENARIO_PLOT_TITLES
 
 
 def plot_loss_vs_scenario(scenario_results, scenario, output_dir):
-    """
-    Plot SubspaceNet snapshot and EKF posterior RMSPE vs sweep values and save the plot.
-    """
+    """Plot SubspaceNet snapshot and EKF posterior RMSPE vs sweep values."""
+    apply_paper_plot_style()
     logger = logging.getLogger("SubspaceNet.plotting")
     x_vals = list(scenario_results.keys())
-    esprit_losses = []
-    dnn_losses = []
-    ekf_losses = []
+    esprit_losses, dnn_losses, ekf_losses = [], [], []
     for v in x_vals:
         res = scenario_results[v]
-        # If result is a float, treat as ESPRIT loss
-        if isinstance(res, float) or isinstance(res, int):
-            esprit_loss = res
-            dnn_loss = None
-            ekf_loss = None
+        if isinstance(res, (float, int)):
+            esprit_loss, dnn_loss, ekf_loss = res, None, None
         elif isinstance(res, dict):
             esprit_loss = None
-            if 'evaluation_results' in res and 'classic_methods_test_losses' in res['evaluation_results'] and 'ESPRIT' in res['evaluation_results']['classic_methods_test_losses']:
-                esprit_loss = res['evaluation_results']['classic_methods_test_losses']['ESPRIT']
-            eval_results = res.get('evaluation_results', res)
-            dnn_loss = eval_results.get('dnn_test_loss')
-            ekf_loss = eval_results.get('ekf_test_loss')
+            if (
+                "evaluation_results" in res
+                and "classic_methods_test_losses" in res["evaluation_results"]
+                and "ESPRIT" in res["evaluation_results"]["classic_methods_test_losses"]
+            ):
+                esprit_loss = res["evaluation_results"]["classic_methods_test_losses"]["ESPRIT"]
+            eval_results = res.get("evaluation_results", res)
+            dnn_loss = eval_results.get("dnn_test_loss")
+            ekf_loss = eval_results.get("ekf_test_loss")
         else:
-            esprit_loss = None
-            dnn_loss = None
-            ekf_loss = None
+            esprit_loss = dnn_loss = ekf_loss = None
         esprit_losses.append(esprit_loss)
         dnn_losses.append(dnn_loss)
         ekf_losses.append(ekf_loss)
-        logger.debug(f"eta={v}: ESPRIT loss={esprit_loss}, DNN loss={dnn_loss}, EKF loss={ekf_loss}")
-    if all(l is None for l in esprit_losses) and all(l is None for l in dnn_losses) and all(l is None for l in ekf_losses):
-        logger.warning(f"All losses are None for scenario {scenario}. Plot will be empty.")
-    plt.figure(figsize=(10, 6))
+    if all(l is None for l in esprit_losses + dnn_losses + ekf_losses):
+        logger.warning("All losses are None for scenario %s. Plot will be empty.", scenario)
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
     if any(l is not None for l in esprit_losses):
-        plt.plot(x_vals, esprit_losses, '-o', label='ESPRIT (RMSPE, rad)', color='green')
+        ax.plot(x_vals, esprit_losses, "-o", label="ESPRIT", color=PLOT_COLORS["esprit"])
     if any(l is not None for l in dnn_losses):
-        plt.plot(x_vals, dnn_losses, '-s', label='SubspaceNet snapshot (RMSPE, rad)', color='blue')
+        ax.plot(x_vals, dnn_losses, "-s", label="SubspaceNet snapshot", color=PLOT_COLORS["dnn"])
     if any(l is not None for l in ekf_losses):
-        plt.plot(x_vals, ekf_losses, '-^', label='EKF posterior (RMSPE, rad)', color='red')
+        ax.plot(x_vals, ekf_losses, "-^", label="EKF posterior", color=PLOT_COLORS["ekf"])
     x_label = SCENARIO_AXIS_LABELS.get(scenario, scenario)
     title = SCENARIO_PLOT_TITLES.get(scenario, f"DOA tracking error vs {scenario}")
-    plt.xlabel(x_label)
-    plt.ylabel("Mean RMSPE (rad) — lower is better")
-    plt.title(title)
-    plt.legend()
-    plt.grid(True)
+    style_axes(ax, xlabel=x_label, ylabel="Mean RMSPE (rad)", title=title)
+    ax.legend(loc="best")
+    fig.tight_layout()
     plot_path = Path(output_dir) / f"loss_vs_{scenario}.png"
-    plt.savefig(plot_path)
-    plt.close()
+    save_current_figure(plot_path)
     return plot_path
 
 
 def plot_2d_kalman_noise_sweep(scenario_results, output_dir):
-    """
-    Plot a 2D heatmap showing DNN loss vs. measurement and process noise standard deviations.
-    
-    Args:
-        scenario_results: 2D dict with structure {meas_noise: {proc_noise: result}}
-        output_dir: Output directory for saving the plot
-        
-    Returns:
-        Path to the saved plot
-    """
+    """Plot 2D heatmaps: DNN / EKF / ESPRIT loss vs KF noise parameters."""
+    apply_paper_plot_style()
     logger = logging.getLogger("SubspaceNet.plotting")
-    
-    # Extract measurement and process noise values
     meas_noise_values = sorted(scenario_results.keys())
     proc_noise_values = sorted(list(scenario_results.values())[0].keys())
-    
-    logger.info(f"Creating 2D heatmap for {len(meas_noise_values)} x {len(proc_noise_values)} combinations")
-    
-    # Create 2D arrays for the heatmap
     dnn_loss_matrix = np.full((len(proc_noise_values), len(meas_noise_values)), np.nan)
     ekf_loss_matrix = np.full((len(proc_noise_values), len(meas_noise_values)), np.nan)
     esprit_loss_matrix = np.full((len(proc_noise_values), len(meas_noise_values)), np.nan)
-    
-    # Fill the matrices
+
     for i, meas_noise in enumerate(meas_noise_values):
         for j, proc_noise in enumerate(proc_noise_values):
             result = scenario_results[meas_noise][proc_noise]
-            
-            # Extract DNN loss
-            dnn_loss = None
-            if isinstance(result, dict) and 'evaluation_results' in result:
-                dnn_loss = result['evaluation_results'].get('dnn_test_loss')
-            
-            if dnn_loss is not None:
-                dnn_loss_matrix[j, i] = dnn_loss
-            
-            # Extract EKF loss
-            ekf_loss = None
-            if isinstance(result, dict) and 'evaluation_results' in result:
-                ekf_loss = result['evaluation_results'].get('ekf_test_loss')
-            
-            if ekf_loss is not None:
-                ekf_loss_matrix[j, i] = ekf_loss
-            
-            # Extract ESPRIT loss for comparison
-            esprit_loss = None
-            if isinstance(result, dict) and 'evaluation_results' in result:
-                classic_losses = result['evaluation_results'].get('classic_methods_test_losses', {})
-                if 'ESPRIT' in classic_losses:
-                    esprit_loss = classic_losses['ESPRIT']
-            
-            if esprit_loss is not None:
-                esprit_loss_matrix[j, i] = esprit_loss
-    
-    # Create the figure with subplots
-    fig, axes = plt.subplots(1, 3, figsize=(24, 6))
-    
-    # Plot DNN loss heatmap
-    ax1 = axes[0]
-    im1 = ax1.imshow(dnn_loss_matrix, cmap='viridis', aspect='auto', origin='lower')
-    ax1.set_xlabel('Measurement Noise Std Dev')
-    ax1.set_ylabel('Process Noise Std Dev')
-    ax1.set_title('DNN Loss vs. Kalman Filter Noise Parameters')
-    ax1.set_xticks(range(len(meas_noise_values)))
-    ax1.set_xticklabels([f'{v:.3f}' for v in meas_noise_values], rotation=45)
-    ax1.set_yticks(range(len(proc_noise_values)))
-    ax1.set_yticklabels([f'{v:.3f}' for v in proc_noise_values])
-    
-    # Add colorbar for DNN loss
-    cbar1 = plt.colorbar(im1, ax=ax1)
-    cbar1.set_label('DNN Loss')
-    
-    # Add text annotations for DNN loss values
-    for i in range(len(meas_noise_values)):
-        for j in range(len(proc_noise_values)):
-            if not np.isnan(dnn_loss_matrix[j, i]):
-                text = ax1.text(i, j, f'{dnn_loss_matrix[j, i]:.3f}',
-                               ha="center", va="center", color="white", fontsize=24)
-    
-    # Plot EKF loss heatmap
-    ax2 = axes[1]
-    im2 = ax2.imshow(ekf_loss_matrix, cmap='inferno', aspect='auto', origin='lower')
-    ax2.set_xlabel('Measurement Noise Std Dev')
-    ax2.set_ylabel('Process Noise Std Dev')
-    ax2.set_title('EKF Loss vs. Kalman Filter Noise Parameters')
-    ax2.set_xticks(range(len(meas_noise_values)))
-    ax2.set_xticklabels([f'{v:.3f}' for v in meas_noise_values], rotation=45)
-    ax2.set_yticks(range(len(proc_noise_values)))
-    ax2.set_yticklabels([f'{v:.3f}' for v in proc_noise_values])
-    
-    # Add colorbar for EKF loss
-    cbar2 = plt.colorbar(im2, ax=ax2)
-    cbar2.set_label('EKF Loss')
-    
-    # Add text annotations for EKF loss values
-    for i in range(len(meas_noise_values)):
-        for j in range(len(proc_noise_values)):
-            if not np.isnan(ekf_loss_matrix[j, i]):
-                text = ax2.text(i, j, f'{ekf_loss_matrix[j, i]:.3f}',
-                               ha="center", va="center", color="white", fontsize=24)
-    
-    # Plot ESPRIT loss heatmap (if available)
-    ax3 = axes[2]
-    im3 = ax3.imshow(esprit_loss_matrix, cmap='plasma', aspect='auto', origin='lower')
-    ax3.set_xlabel('Measurement Noise Std Dev')
-    ax3.set_ylabel('Process Noise Std Dev')
-    ax3.set_title('ESPRIT Loss vs. Kalman Filter Noise Parameters')
-    ax3.set_xticks(range(len(meas_noise_values)))
-    ax3.set_xticklabels([f'{v:.3f}' for v in meas_noise_values], rotation=45)
-    ax3.set_yticks(range(len(proc_noise_values)))
-    ax3.set_yticklabels([f'{v:.3f}' for v in proc_noise_values])
-    
-    # Add colorbar for ESPRIT loss
-    cbar3 = plt.colorbar(im3, ax=ax3)
-    cbar3.set_label('ESPRIT Loss')
-    
-    # Add text annotations for ESPRIT loss values
-    for i in range(len(meas_noise_values)):
-        for j in range(len(proc_noise_values)):
-            if not np.isnan(esprit_loss_matrix[j, i]):
-                text = ax3.text(i, j, f'{esprit_loss_matrix[j, i]:.3f}',
-                               ha="center", va="center", color="white", fontsize=24)
-    
-    plt.tight_layout()
-    
-    # Save the plot
+            if isinstance(result, dict) and "evaluation_results" in result:
+                ev = result["evaluation_results"]
+                if ev.get("dnn_test_loss") is not None:
+                    dnn_loss_matrix[j, i] = ev["dnn_test_loss"]
+                if ev.get("ekf_test_loss") is not None:
+                    ekf_loss_matrix[j, i] = ev["ekf_test_loss"]
+                classic = ev.get("classic_methods_test_losses", {})
+                if "ESPRIT" in classic:
+                    esprit_loss_matrix[j, i] = classic["ESPRIT"]
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
+    for ax, matrix, title, cmap in (
+        (axes[0], dnn_loss_matrix, "SubspaceNet snapshot", "viridis"),
+        (axes[1], ekf_loss_matrix, "EKF posterior", "inferno"),
+        (axes[2], esprit_loss_matrix, "ESPRIT", "plasma"),
+    ):
+        im = ax.imshow(matrix, cmap=cmap, aspect="auto", origin="lower")
+        style_axes(
+            ax,
+            xlabel="Measurement noise σ",
+            ylabel="Process noise σ",
+            title=f"{title} RMSPE vs KF noise",
+        )
+        ax.set_xticks(range(len(meas_noise_values)))
+        ax.set_xticklabels([f"{v:.3f}" for v in meas_noise_values], rotation=45, ha="right")
+        ax.set_yticks(range(len(proc_noise_values)))
+        ax.set_yticklabels([f"{v:.3f}" for v in proc_noise_values])
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label("RMSPE (rad)")
+        for ii in range(len(meas_noise_values)):
+            for jj in range(len(proc_noise_values)):
+                if not np.isnan(matrix[jj, ii]):
+                    ax.text(
+                        ii, jj, f"{matrix[jj, ii]:.3f}",
+                        ha="center", va="center", color="white", fontsize=8,
+                    )
+    fig.tight_layout()
     plot_path = Path(output_dir) / "kalman_noise_2d_heatmap.png"
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    # Also create individual optimum analysis plot
-    _plot_kalman_noise_optimum_analysis(scenario_results, output_dir, dnn_loss_matrix, 
-                                       ekf_loss_matrix, esprit_loss_matrix, meas_noise_values, proc_noise_values)
-    
+    save_figure(fig, plot_path)
+    _plot_kalman_noise_optimum_analysis(
+        scenario_results, output_dir, dnn_loss_matrix, ekf_loss_matrix,
+        esprit_loss_matrix, meas_noise_values, proc_noise_values,
+    )
     return plot_path
 
 
-def _plot_kalman_noise_optimum_analysis(scenario_results, output_dir, dnn_loss_matrix, 
-                                       ekf_loss_matrix, esprit_loss_matrix, meas_noise_values, proc_noise_values):
-    """
-    Create additional analysis plots for Kalman noise optimization.
-    """
+def _plot_kalman_noise_optimum_analysis(
+    scenario_results, output_dir, dnn_loss_matrix, ekf_loss_matrix,
+    esprit_loss_matrix, meas_noise_values, proc_noise_values,
+):
+    apply_paper_plot_style()
     logger = logging.getLogger("SubspaceNet.plotting")
-    
-    # Find optimal points
-    valid_dnn_mask = ~np.isnan(dnn_loss_matrix)
-    if np.any(valid_dnn_mask):
-        dnn_min_idx = np.unravel_index(np.nanargmin(dnn_loss_matrix), dnn_loss_matrix.shape)
-        optimal_proc_noise_dnn = proc_noise_values[dnn_min_idx[0]]
-        optimal_meas_noise_dnn = meas_noise_values[dnn_min_idx[1]]
-        optimal_dnn_loss = dnn_loss_matrix[dnn_min_idx]
-        
-        logger.info(f"Optimal DNN performance: loss={optimal_dnn_loss:.6f} at meas_noise={optimal_meas_noise_dnn:.3f}, proc_noise={optimal_proc_noise_dnn:.3f}")
-    
-    # Find optimal EKF point
-    valid_ekf_mask = ~np.isnan(ekf_loss_matrix)
-    if np.any(valid_ekf_mask):
-        ekf_min_idx = np.unravel_index(np.nanargmin(ekf_loss_matrix), ekf_loss_matrix.shape)
-        optimal_proc_noise_ekf = proc_noise_values[ekf_min_idx[0]]
-        optimal_meas_noise_ekf = meas_noise_values[ekf_min_idx[1]]
-        optimal_ekf_loss = ekf_loss_matrix[ekf_min_idx]
-        
-        logger.info(f"Optimal EKF performance: loss={optimal_ekf_loss:.6f} at meas_noise={optimal_meas_noise_ekf:.3f}, proc_noise={optimal_proc_noise_ekf:.3f}")
-    
-    valid_esprit_mask = ~np.isnan(esprit_loss_matrix)
-    if np.any(valid_esprit_mask):
-        esprit_min_idx = np.unravel_index(np.nanargmin(esprit_loss_matrix), esprit_loss_matrix.shape)
-        optimal_proc_noise_esprit = proc_noise_values[esprit_min_idx[0]]
-        optimal_meas_noise_esprit = meas_noise_values[esprit_min_idx[1]]
-        optimal_esprit_loss = esprit_loss_matrix[esprit_min_idx]
-        
-        logger.info(f"Optimal ESPRIT performance: loss={optimal_esprit_loss:.6f} at meas_noise={optimal_meas_noise_esprit:.3f}, proc_noise={optimal_proc_noise_esprit:.3f}")
-    
-    # Create summary plot showing loss vs individual parameters
-    fig, axes = plt.subplots(3, 2, figsize=(12, 15))
-    
-    # DNN loss vs measurement noise (averaged over process noise)
-    if np.any(valid_dnn_mask):
-        mean_dnn_vs_meas = np.nanmean(dnn_loss_matrix, axis=0)
-        axes[0, 0].plot(meas_noise_values, mean_dnn_vs_meas, 'bo-')
-        axes[0, 0].set_xlabel('Measurement Noise Std Dev')
-        axes[0, 0].set_ylabel('Mean DNN Loss')
-        axes[0, 0].set_title('DNN Loss vs Measurement Noise (averaged)')
-        axes[0, 0].grid(True)
-    
-    # DNN loss vs process noise (averaged over measurement noise)
-    if np.any(valid_dnn_mask):
-        mean_dnn_vs_proc = np.nanmean(dnn_loss_matrix, axis=1)
-        axes[0, 1].plot(proc_noise_values, mean_dnn_vs_proc, 'ro-')
-        axes[0, 1].set_xlabel('Process Noise Std Dev')
-        axes[0, 1].set_ylabel('Mean DNN Loss')
-        axes[0, 1].set_title('DNN Loss vs Process Noise (averaged)')
-        axes[0, 1].grid(True)
-    
-    # EKF loss vs measurement noise (averaged over process noise)
-    if np.any(valid_ekf_mask):
-        mean_ekf_vs_meas = np.nanmean(ekf_loss_matrix, axis=0)
-        axes[1, 0].plot(meas_noise_values, mean_ekf_vs_meas, 'co-')
-        axes[1, 0].set_xlabel('Measurement Noise Std Dev')
-        axes[1, 0].set_ylabel('Mean EKF Loss')
-        axes[1, 0].set_title('EKF Loss vs Measurement Noise (averaged)')
-        axes[1, 0].grid(True)
-    
-    # EKF loss vs process noise (averaged over measurement noise)
-    if np.any(valid_ekf_mask):
-        mean_ekf_vs_proc = np.nanmean(ekf_loss_matrix, axis=1)
-        axes[1, 1].plot(proc_noise_values, mean_ekf_vs_proc, 'ko-')
-        axes[1, 1].set_xlabel('Process Noise Std Dev')
-        axes[1, 1].set_ylabel('Mean EKF Loss')
-        axes[1, 1].set_title('EKF Loss vs Process Noise (averaged)')
-        axes[1, 1].grid(True)
-    
-    # ESPRIT loss vs measurement noise (averaged over process noise)
-    if np.any(valid_esprit_mask):
-        mean_esprit_vs_meas = np.nanmean(esprit_loss_matrix, axis=0)
-        axes[2, 0].plot(meas_noise_values, mean_esprit_vs_meas, 'go-')
-        axes[2, 0].set_xlabel('Measurement Noise Std Dev')
-        axes[2, 0].set_ylabel('Mean ESPRIT Loss')
-        axes[2, 0].set_title('ESPRIT Loss vs Measurement Noise (averaged)')
-        axes[2, 0].grid(True)
-    
-    # ESPRIT loss vs process noise (averaged over measurement noise)
-    if np.any(valid_esprit_mask):
-        mean_esprit_vs_proc = np.nanmean(esprit_loss_matrix, axis=1)
-        axes[2, 1].plot(proc_noise_values, mean_esprit_vs_proc, 'mo-')
-        axes[2, 1].set_xlabel('Process Noise Std Dev')
-        axes[2, 1].set_ylabel('Mean ESPRIT Loss')
-        axes[2, 1].set_title('ESPRIT Loss vs Process Noise (averaged)')
-        axes[2, 1].grid(True)
-    
-    plt.tight_layout()
-    
-    # Save the analysis plot
-    analysis_plot_path = Path(output_dir) / "kalman_noise_analysis.png"
-    plt.savefig(analysis_plot_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    logger.info(f"Saved Kalman noise analysis plot to {analysis_plot_path}") 
+    fig, axes = plt.subplots(3, 2, figsize=(10, 11))
+    panels = [
+        (dnn_loss_matrix, meas_noise_values, "SubspaceNet", "Measurement noise σ", 0, 0),
+        (dnn_loss_matrix, proc_noise_values, "SubspaceNet", "Process noise σ", 0, 1, True),
+        (ekf_loss_matrix, meas_noise_values, "EKF", "Measurement noise σ", 1, 0),
+        (ekf_loss_matrix, proc_noise_values, "EKF", "Process noise σ", 1, 1, True),
+        (esprit_loss_matrix, meas_noise_values, "ESPRIT", "Measurement noise σ", 2, 0),
+        (esprit_loss_matrix, proc_noise_values, "ESPRIT", "Process noise σ", 2, 1, True),
+    ]
+    for item in panels:
+        matrix, xvals, name, xlabel, row, col = item[:6]
+        axis = 0 if len(item) < 7 else 1
+        valid = ~np.isnan(matrix)
+        if not np.any(valid):
+            continue
+        means = np.nanmean(matrix, axis=axis)
+        ax = axes[row, col]
+        ax.plot(xvals, means, "o-")
+        style_axes(ax, xlabel=xlabel, ylabel="Mean RMSPE (rad)", title=f"{name}: averaged slice")
+    fig.tight_layout()
+    save_figure(fig, Path(output_dir) / "kalman_noise_analysis.png")
+    logger.info("Saved Kalman noise analysis plot")
 
 
 def plot_eval_dnn_ekf_loss_vs_time(dnn_trajectory_results, output_dir):
-    """
-    Plot per-step SubspaceNet-only vs EKF posterior RMSPE vs GT (batch eval trajectories).
-
-    Averages across trajectories when multiple are present.
-    """
-    import matplotlib.pyplot as plt
-    import numpy as np
+    """Plot per-step SubspaceNet-only vs EKF posterior RMSPE vs GT."""
     import os
     import torch
-
     from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
 
+    apply_paper_plot_style()
     logger = logging.getLogger(__name__)
     if not dnn_trajectory_results:
         logger.warning("Skipping eval KF plot: no trajectory results")
@@ -327,24 +169,16 @@ def plot_eval_dnn_ekf_loss_vs_time(dnn_trajectory_results, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rmspe_criterion = RMSPELoss().to(device)
-
-    per_traj_dnn = []
-    per_traj_ekf = []
+    per_traj_dnn, per_traj_ekf = [], []
 
     for traj in dnn_trajectory_results:
-        dnn_steps = []
-        ekf_steps = []
-        model_preds = traj.get("model_predictions", [])
-        kf_preds = traj.get("kf_predictions", [])
-        gt = traj.get("ground_truth", [])
-
-        for t in range(min(len(model_preds), len(kf_preds), len(gt))):
-            pred = model_preds[t]
-            kf = kf_preds[t]
-            truth = gt[t]
-            if pred is None or kf is None or truth is None:
-                continue
-            if len(pred) == 0 or len(kf) == 0 or len(truth) == 0:
+        dnn_steps, ekf_steps = [], []
+        for pred, kf, truth in zip(
+            traj.get("model_predictions", []),
+            traj.get("kf_predictions", []),
+            traj.get("ground_truth", []),
+        ):
+            if pred is None or kf is None or truth is None or len(pred) == 0:
                 continue
             with torch.no_grad():
                 p = torch.tensor(np.asarray(pred), device=device, dtype=torch.float64).unsqueeze(0)
@@ -352,49 +186,32 @@ def plot_eval_dnn_ekf_loss_vs_time(dnn_trajectory_results, output_dir):
                 tr = torch.tensor(np.asarray(truth), device=device, dtype=torch.float64).unsqueeze(0)
                 dnn_steps.append(rmspe_criterion(p, tr).item())
                 ekf_steps.append(rmspe_criterion(k, tr).item())
-
         if dnn_steps:
             per_traj_dnn.append(dnn_steps)
             per_traj_ekf.append(ekf_steps)
 
     if not per_traj_dnn:
-        logger.warning("Skipping eval KF plot: no valid step losses computed")
+        logger.warning("Skipping eval KF plot: no valid step losses")
         return None
 
     max_len = max(len(s) for s in per_traj_dnn)
-    dnn_avg = []
-    ekf_avg = []
-    for step in range(max_len):
-        dnn_vals = [s[step] for s in per_traj_dnn if step < len(s)]
-        ekf_vals = [s[step] for s in per_traj_ekf if step < len(s)]
-        dnn_avg.append(float(np.mean(dnn_vals)))
-        ekf_avg.append(float(np.mean(ekf_vals)))
-
+    dnn_avg = [float(np.mean([s[i] for s in per_traj_dnn if i < len(s)])) for i in range(max_len)]
+    ekf_avg = [float(np.mean([s[i] for s in per_traj_ekf if i < len(s)])) for i in range(max_len)]
     steps = np.arange(max_len)
     gain = np.array(dnn_avg) - np.array(ekf_avg)
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    ax1.plot(steps, dnn_avg, "-s", linewidth=2, markersize=4, label="SubspaceNet-only", color=PLOT_COLORS["dnn"])
+    ax1.plot(steps, ekf_avg, "-o", linewidth=2, markersize=4, label="EKF posterior", color=PLOT_COLORS["ekf"])
+    style_axes(ax1, xlabel="", ylabel="RMSPE vs GT (rad)", title="Batch eval: SubspaceNet vs EKF")
+    ax1.legend(loc="best")
 
-    ax1.plot(steps, dnn_avg, 'b-', linewidth=2, marker='s', markersize=4, label='SubspaceNet-only (pre-EKF)')
-    ax1.plot(steps, ekf_avg, 'r-', linewidth=2, marker='o', markersize=4, label='EKF posterior')
-    ax1.set_ylabel('RMSPE vs GT (rad)', fontsize=18)
-    ax1.set_title('Eval: SubspaceNet-only vs EKF Posterior', fontsize=20, fontweight='bold')
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(fontsize=14)
-
-    ax2.plot(steps, gain, 'g-', linewidth=2, marker='d', markersize=4, label='KF gain (pre-EKF − EKF)')
-    ax2.axhline(y=0.0, color='black', linestyle='-', alpha=0.3, linewidth=1)
-    ax2.set_xlabel('Trajectory step', fontsize=18)
-    ax2.set_ylabel('RMSPE reduction (rad)', fontsize=18)
-    ax2.set_title('EKF Improvement vs SubspaceNet-only', fontsize=20, fontweight='bold')
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(fontsize=14)
-
-    plt.tight_layout()
-    plot_path = os.path.join(output_dir, 'eval_kf_gain_comparison.png')
-    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
+    ax2.plot(steps, gain, "-d", linewidth=2, markersize=4, label="KF gain (pre-EKF − EKF)", color=PLOT_COLORS["gain"])
+    ax2.axhline(0.0, color="black", linestyle="-", alpha=0.35, linewidth=1)
+    style_axes(ax2, xlabel="Trajectory step", ylabel="RMSPE reduction (rad)", title="EKF improvement over SubspaceNet-only")
+    ax2.legend(loc="best")
+    fig.tight_layout()
+    plot_path = os.path.join(output_dir, "eval_kf_gain_comparison.png")
+    save_figure(fig, plot_path)
     logger.info("Eval KF comparison plot saved to: %s", plot_path)
     return plot_path
-
-

@@ -27,7 +27,13 @@ def plot_online_learning_results_structured(output_dir, pretrained_trajectory_re
     import numpy as np
     import os
 
-    from utils.plotting.style import apply_paper_plot_style, save_figure
+    from utils.plotting.style import (
+        MSIE_LABEL,
+        RMSPE_LABEL,
+        WINDOW_XLABEL,
+        apply_paper_plot_style,
+        save_current_figure,
+    )
 
     apply_paper_plot_style()
     logger = logging.getLogger(__name__)
@@ -63,76 +69,58 @@ def plot_online_learning_results_structured(output_dir, pretrained_trajectory_re
     online_training_losses, _, _ = extract_loss_data(online_trajectory_results, "training_reference")
     
     # Plot 1: Main Loss Comparison
-    plt.figure(figsize=(12, 8))
+    fig, (ax_main, ax_msie) = plt.subplots(2, 1, figsize=(10, 8))
     
     # Plot pretrained model main losses
-    plt.subplot(2, 1, 1)
-    plt.plot(pretrained_window_indices, pretrained_main_losses, 'b-', linewidth=2, label='Pretrained Model', marker='o', markersize=4)
-    plt.plot(online_window_indices, online_main_losses, 'r-', linewidth=2, label='Algorithm 1', marker='s', markersize=4)
+    ax_main.plot(pretrained_window_indices, pretrained_main_losses, 'b-', linewidth=2, label='Pretrained Model', marker='o', markersize=4)
+    ax_main.plot(online_window_indices, online_main_losses, 'r-', linewidth=2, label='Algorithm 1', marker='s', markersize=4)
     
     # Add eta change markers to first subplot
     if eta_change_windows:
         for eta_window in eta_change_windows:
             if eta_window >= 1:
-                plt.axvline(x=eta_window, color='red', linestyle='--', alpha=0.3, linewidth=1)
-                plt.text(eta_window, plt.ylim()[0] + (plt.ylim()[1] - plt.ylim()[0]) * 0.1, 'Distribution Change', rotation=90, verticalalignment='bottom', horizontalalignment='center',
-                        color='red', fontsize=14)
+                ax_main.axvline(x=eta_window, color='red', linestyle='--', alpha=0.3, linewidth=1)
     
     # Add training markers to first subplot
     if training_start_window is not None and training_start_window >= 1:
-        plt.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
-        plt.text(training_start_window, plt.ylim()[1] * 0.9, 'Training Start', rotation=90, verticalalignment='top', 
-                color='orange', fontweight='bold', fontsize=24)
+        ax_main.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2, label='Training Start')
     
     if training_end_window is not None and training_end_window >= 1:
-        plt.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
-        plt.text(training_end_window, plt.ylim()[1] * 0.9, 'Training End', rotation=90, verticalalignment='top', 
-                color='purple', fontweight='bold', fontsize=24)
+        ax_main.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2, label='Training End')
     
-    plt.xlabel('Window Index', fontsize=28)
-    plt.ylabel('RMSPE (Supervised)', fontsize=28)
-    plt.title('RMSPE (Supervised) Comparison', fontsize=30, fontweight='bold')
-    plt.legend(fontsize=26)
-    plt.grid(True, alpha=0.3)
-    plt.tick_params(axis='both', which='major', labelsize=24)
+    ax_main.set_xlabel(WINDOW_XLABEL)
+    ax_main.set_ylabel(RMSPE_LABEL)
+    ax_main.set_title('RMSPE (Supervised) Comparison', fontweight='bold')
+    ax_main.legend(loc='best')
+    ax_main.grid(True, alpha=0.3)
     
     # Plot 2: Training Reference Loss Comparison
-    plt.subplot(2, 1, 2)
-    plt.plot(pretrained_window_indices, pretrained_training_losses, 'b-', linewidth=2, label='Pretrained Model', marker='o', markersize=4)
-    plt.plot(online_window_indices, online_training_losses, 'r-', linewidth=2, label='Algorithm 1', marker='s', markersize=4)
+    ax_msie.plot(pretrained_window_indices, pretrained_training_losses, 'b-', linewidth=2, label='Pretrained Model', marker='o', markersize=4)
+    ax_msie.plot(online_window_indices, online_training_losses, 'r-', linewidth=2, label='Algorithm 1', marker='s', markersize=4)
     
     # Add eta change markers to second subplot
     if eta_change_windows:
         for eta_window in eta_change_windows:
             if eta_window >= 1:
-                plt.axvline(x=eta_window, color='red', linestyle='--', alpha=0.3, linewidth=1)
-                plt.text(eta_window, plt.ylim()[0] + (plt.ylim()[1] - plt.ylim()[0]) * 0.1, 'Distribution Change', rotation=90, verticalalignment='bottom', horizontalalignment='center',
-                        color='red', fontsize=14)
+                ax_msie.axvline(x=eta_window, color='red', linestyle='--', alpha=0.3, linewidth=1)
     
     # Add training markers to second subplot
     if training_start_window is not None and training_start_window >= 1:
-        plt.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
-        plt.text(training_start_window, plt.ylim()[1] * 0.9, 'Training Start', rotation=90, verticalalignment='top', 
-                color='orange', fontweight='bold', fontsize=24)
+        ax_msie.axvline(x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2)
     
     if training_end_window is not None and training_end_window >= 1:
-        plt.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
-        plt.text(training_end_window, plt.ylim()[1] * 0.9, 'Training End', rotation=90, verticalalignment='top', 
-                color='purple', fontweight='bold', fontsize=24)
+        ax_msie.axvline(x=training_end_window, color='purple', linestyle='-', alpha=0.7, linewidth=2)
     
-    plt.xlabel('Window Index', fontsize=28)
-    plt.ylabel('MSIE (Unsupervised)', fontsize=28)
-    plt.title('MSIE (Unsupervised) Comparison', fontsize=30, fontweight='bold')
-    plt.legend(fontsize=26)
-    plt.grid(True, alpha=0.3)
-    plt.tick_params(axis='both', which='major', labelsize=24)
+    ax_msie.set_xlabel(WINDOW_XLABEL)
+    ax_msie.set_ylabel(MSIE_LABEL)
+    ax_msie.set_title('MSIE (Unsupervised) Comparison', fontweight='bold')
+    ax_msie.legend(loc='best')
+    ax_msie.grid(True, alpha=0.3)
     
-    plt.tight_layout()
+    fig.tight_layout()
     
-    # Save the plot
     plot_path = os.path.join(output_dir, 'online_learning_structured_comparison.png')
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-    plt.close()
+    save_current_figure(plot_path)
     
     print(f"Structured online learning comparison plot saved to: {plot_path}")
 
@@ -184,7 +172,13 @@ def plot_averaged_online_learning_results(
     import numpy as np
     import os
 
-    from utils.plotting.style import apply_paper_plot_style, save_figure
+    from utils.plotting.style import (
+        apply_paper_plot_style,
+        save_figure,
+        WINDOW_XLABEL,
+        RMSPE_LABEL,
+        MSIE_LABEL,
+    )
 
     apply_paper_plot_style()
     logger = logging.getLogger(__name__)
@@ -274,9 +268,9 @@ def plot_averaged_online_learning_results(
     
     _add_phase_markers(ax1)
     
-    ax1.set_xlabel('Window Index', fontsize=20)
-    ax1.set_ylabel('RMSPE (Supervised)', fontsize=20)
-    ax1.set_title('RMSPE (Supervised)', fontsize=22, fontweight='bold')
+    ax1.set_xlabel(WINDOW_XLABEL, fontsize=13)
+    ax1.set_ylabel(RMSPE_LABEL, fontsize=13)
+    ax1.set_title("Supervised RMSPE (pretrained vs online)", fontsize=14, fontweight="bold")
     ax1.grid(True, alpha=0.3)
     ax1.tick_params(axis='both', which='major', labelsize=16)
     # Set x-axis range dynamically based on available data
@@ -307,9 +301,9 @@ def plot_averaged_online_learning_results(
     
     _add_phase_markers(ax2)
     
-    ax2.set_xlabel('Window Index', fontsize=20)
-    ax2.set_ylabel('MSIE (Unsupervised)', fontsize=20)
-    ax2.set_title('MSIE (Unsupervised)', fontsize=22, fontweight='bold')
+    ax2.set_xlabel(WINDOW_XLABEL, fontsize=13)
+    ax2.set_ylabel(MSIE_LABEL, fontsize=13)
+    ax2.set_title("Unsupervised MSIE (pretrained vs online)", fontsize=14, fontweight="bold")
     ax2.grid(True, alpha=0.3)
     ax2.tick_params(axis='both', which='major', labelsize=16)
     # Set x-axis range dynamically based on available data (same as ax1)
@@ -360,7 +354,14 @@ def plot_averaged_kf_gain_comparison(
     import numpy as np
     import os
 
-    from utils.plotting.style import apply_paper_plot_style
+    from utils.plotting.style import (
+        FIG_DOUBLE,
+        RMSPE_LABEL,
+        WINDOW_XLABEL,
+        apply_paper_plot_style,
+        save_figure,
+        style_axes,
+    )
 
     apply_paper_plot_style()
     logger = logging.getLogger(__name__)
@@ -418,7 +419,7 @@ def plot_averaged_kf_gain_comparison(
                 label='Training End',
             )
 
-    fig = plt.figure(figsize=(14, 10))
+    fig = plt.figure(figsize=FIG_DOUBLE)
 
     ax1 = fig.add_subplot(2, 1, 1)
     ax1.plot(
@@ -439,12 +440,13 @@ def plot_averaged_kf_gain_comparison(
             label='Algorithm 1 EKF posterior', marker='v', markersize=5,
         )
     _add_phase_markers(ax1)
-    ax1.set_xlabel('Window Index', fontsize=20)
-    ax1.set_ylabel('RMSPE vs GT (rad)', fontsize=20)
-    ax1.set_title('SubspaceNet-only vs EKF Posterior (Supervised)', fontsize=22, fontweight='bold')
-    ax1.grid(True, alpha=0.3)
-    ax1.tick_params(axis='both', which='major', labelsize=16)
-    ax1.legend(fontsize=14, loc='best')
+    style_axes(
+        ax1,
+        xlabel=WINDOW_XLABEL,
+        ylabel=f"{RMSPE_LABEL} vs GT (rad)",
+        title="SubspaceNet-only vs EKF posterior (supervised)",
+    )
+    ax1.legend(loc="best")
 
     ax2 = fig.add_subplot(2, 1, 2)
     pretrained_gain = np.array(pretrained_pre_ekf) - np.array(pretrained_ekf)
@@ -460,12 +462,13 @@ def plot_averaged_kf_gain_comparison(
             label='Algorithm 1 KF gain', marker='x', markersize=6,
         )
     _add_phase_markers(ax2)
-    ax2.set_xlabel('Window Index', fontsize=20)
-    ax2.set_ylabel('RMSPE reduction (rad)', fontsize=20)
-    ax2.set_title('EKF Improvement vs SubspaceNet-only (positive = KF helped)', fontsize=22, fontweight='bold')
-    ax2.grid(True, alpha=0.3)
-    ax2.tick_params(axis='both', which='major', labelsize=16)
-    ax2.legend(fontsize=14, loc='best')
+    style_axes(
+        ax2,
+        xlabel=WINDOW_XLABEL,
+        ylabel="RMSPE reduction from EKF (rad)",
+        title="EKF improvement vs SubspaceNet-only (positive = KF helped)",
+    )
+    ax2.legend(loc="best")
 
     all_indices = list(pretrained_indices)
     if online_indices:
@@ -474,10 +477,9 @@ def plot_averaged_kf_gain_comparison(
         ax1.set_xlim(0, max(all_indices) + 1)
         ax2.set_xlim(0, max(all_indices) + 1)
 
-    plt.tight_layout()
-    plot_path = os.path.join(output_dir, 'averaged_kf_gain_comparison.png')
-    fig.savefig(plot_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
+    fig.tight_layout()
+    plot_path = Path(output_dir) / "averaged_kf_gain_comparison.png"
+    save_figure(fig, plot_path)
     return plot_path
 
 
@@ -488,6 +490,9 @@ def plot_training_curves(metrics: dict, output_dir) -> None:
     from datetime import datetime
     from pathlib import Path
 
+    from utils.plotting.style import apply_paper_plot_style, save_figure
+
+    apply_paper_plot_style()
     logger = logging.getLogger(__name__)
     output_dir = Path(output_dir)
     plots_dir = output_dir / metrics.get("plots_subdir", "plots")
@@ -514,32 +519,31 @@ def plot_training_curves(metrics: dict, output_dir) -> None:
         return arr
 
     def _save_epoch_plot(y_series, ylabel, title, filename):
-        plt.figure(figsize=(10, 6))
+        fig, ax = plt.subplots(figsize=(7, 4.5))
         plotted = False
         for values, label in y_series:
             arr = _finite_series(values)
             if arr is None:
                 continue
             x = epochs[: len(arr)]
-            plt.plot(x, arr, label=label, **plot_kwargs)
+            ax.plot(x, arr, label=label, **plot_kwargs)
             plotted = True
         if not plotted:
-            plt.close()
+            plt.close(fig)
             logger.warning("Skipping %s: no finite training metrics to plot", filename)
             return
-        plt.xlabel("Epoch")
-        plt.ylabel(ylabel)
-        plt.title(title)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
         if n_epochs == 1:
-            plt.xlim(0.5, 1.5)
-            plt.xticks([1])
+            ax.set_xlim(0.5, 1.5)
+            ax.set_xticks([1])
         else:
-            plt.xlim(0.5, n_epochs + 0.5)
-            plt.xticks(epochs)
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(plots_dir / filename)
-        plt.close()
+            ax.set_xlim(0.5, n_epochs + 0.5)
+            ax.set_xticks(epochs)
+        ax.legend(loc="best")
+        fig.tight_layout()
+        save_figure(fig, plots_dir / filename)
 
     _save_epoch_plot(
         [(train_losses, "Training Loss"), (valid_losses, "Validation Loss")],
@@ -558,27 +562,18 @@ def plot_training_curves(metrics: dict, output_dir) -> None:
     )
 
     if train_angles_losses and valid_angles_losses:
-        plt.figure(figsize=(10, 6))
-        plt.plot(train_angles_losses, label="Training Angle Loss")
-        plt.plot(valid_angles_losses, label="Validation Angle Loss")
-        plt.xlabel("Epoch")
-        plt.ylabel("Angle Loss")
-        plt.title("Training and Validation Angle Loss")
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(plots_dir / f"angle_loss_curve_{timestamp}.png")
-        plt.close()
-
-        plt.figure(figsize=(10, 6))
-        plt.plot(train_ranges_losses, label="Training Range Loss")
-        plt.plot(valid_ranges_losses, label="Validation Range Loss")
-        plt.xlabel("Epoch")
-        plt.ylabel("Range Loss")
-        plt.title("Training and Validation Range Loss")
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(plots_dir / f"range_loss_curve_{timestamp}.png")
-        plt.close()
+        _save_epoch_plot(
+            [(train_angles_losses, "Training Angle Loss"), (valid_angles_losses, "Validation Angle Loss")],
+            ylabel="Angle Loss",
+            title="Training and Validation Angle Loss",
+            filename=f"angle_loss_curve_{timestamp}.png",
+        )
+        _save_epoch_plot(
+            [(train_ranges_losses, "Training Range Loss"), (valid_ranges_losses, "Validation Range Loss")],
+            ylabel="Range Loss",
+            title="Training and Validation Range Loss",
+            filename=f"range_loss_curve_{timestamp}.png",
+        )
 
     logger.info("Training curves saved under %s", plots_dir)
 
@@ -596,6 +591,7 @@ def plot_glrt_averaged_drift_results(
 
     from simulation.drift import glrt_changepoint_detection, plot_results
     from utils import drift_gates
+    from utils.plotting.style import save_figure
 
     logger = logging.getLogger(__name__)
     glrt_window_offset = drift_warmup_windows
@@ -656,10 +652,8 @@ def plot_glrt_averaged_drift_results(
             fig_glrt.subplots_adjust(top=0.88)
             loss_plot_path = Path(output_dir) / loss_path
             glrt_plot_path = Path(output_dir) / glrt_path
-            fig_loss.savefig(loss_plot_path, dpi=300, bbox_inches="tight")
-            fig_glrt.savefig(glrt_plot_path, dpi=300, bbox_inches="tight")
-            plt.close(fig_loss)
-            plt.close(fig_glrt)
+            save_figure(fig_loss, loss_plot_path)
+            save_figure(fig_glrt, glrt_plot_path)
             logger.info("Saved averaged GLRT %s plots to %s and %s", label, loss_plot_path, glrt_plot_path)
         except Exception as exc:
             logger.warning("Failed to plot averaged GLRT %s results: %s", label, exc)
@@ -776,7 +770,10 @@ def plot_online_learning_results(output_dir, window_losses, window_covariances, 
         import datetime
         from pathlib import Path
         import torch
-        
+
+        from utils.plotting.style import apply_paper_plot_style, save_current_figure
+
+        apply_paper_plot_style()
         logger = logging.getLogger(__name__)
         
         def safe_convert_to_list(data):
@@ -1659,8 +1656,7 @@ def plot_online_learning_results(output_dir, window_losses, window_covariances, 
         # Adjust layout and save
         plt.tight_layout()
         plot_path = plot_dir / f"online_learning_results_{timestamp}.png"
-        plt.savefig(plot_path)
-        plt.close()
+        save_current_figure(plot_path)
         
         # Plot online learning trajectory
         trajectory_plot_path = plot_online_learning_trajectory(window_labels, plot_dir, timestamp)
