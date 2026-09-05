@@ -118,6 +118,10 @@ def build_overrides(request: RunRequest) -> List[str]:
     """Build dot-path overrides from goal and request fields."""
     overrides = list(GOAL_OVERRIDES.get(request.goal, []))
 
+    if request.goal == Goal.ONLINE_LEARNING and not request.model_path and not request.load_model:
+        overrides = [o for o in overrides if o != "simulation.load_model=true"]
+        overrides.append("simulation.load_model=false")
+
     if request.model_path:
         overrides.append(f"simulation.model_path={request.model_path}")
 
@@ -227,4 +231,5 @@ def resolve_run_request(
         retrain_per_sweep=retrain,
         retrain_per_sweep_cli=retrain_cli,
         grid_params=grid_params,
+        load_model=config.simulation.load_model,
     )

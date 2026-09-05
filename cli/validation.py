@@ -9,9 +9,12 @@ logger = logging.getLogger("SubspaceNet.cli")
 def validate(request: RunRequest) -> None:
     """Raise RoutingError if the request violates decision-tree rules."""
     if request.goal in (Goal.EVALUATE, Goal.ONLINE_LEARNING) and not request.model_path:
-        raise RoutingError(
-            f"--model (or simulation.model_path in YAML) is required for goal={request.goal.value}"
-        )
+        if request.goal == Goal.ONLINE_LEARNING and not request.load_model:
+            pass
+        else:
+            raise RoutingError(
+                f"--model (or simulation.model_path in YAML) is required for goal={request.goal.value}"
+            )
 
     if request.goal == Goal.ONLINE_LEARNING and not request.trajectory_enabled:
         raise RoutingError(
@@ -41,7 +44,7 @@ def validate(request: RunRequest) -> None:
         )
 
     if request.sweep == SweepType.ONE_D and request.sweep_axis is None:
-        raise RoutingError("--sweep 1d requires --axis (snr, m, t, eta, trajectory_length)")
+        raise RoutingError("--sweep 1d requires --axis (snr, n, m, t, eta, trajectory_length)")
 
     if request.sweep == SweepType.ONE_D and not request.sweep_values:
         raise RoutingError(

@@ -38,7 +38,8 @@ DEFAULT_ADAPTIVE_LR_SIGMOID = {
 # One formula per panel — together they cover detector + adaptive-LR policy.
 DRIFT_PANEL_FORMULAS = {
     "trigger_window": (
-        r"$w^* = \min\{w : z_w > z_{\mathrm{thr}}\}$"
+        r"$w^* = \arg\max_{\tau}\,\log\mathrm{GLR}(\tau)$"
+        r" \;\text{(offline changepoint on full MSIE series)}"
     ),
     "log_glr": (
         r"$G_w = \max_{\tau}\left[\log L_1(\tau) - \log L_0\right]$"
@@ -316,7 +317,7 @@ def plot_drift_detection_metrics_from_scenario_results(
             "trigger_window",
             "trigger_window_std",
             WINDOW_XLABEL,
-            "GLRT trigger window",
+            "Offline GLRT changepoint",
             "trigger_window",
             PLOT_COLORS["online"],
         ),
@@ -448,8 +449,9 @@ def plot_drift_detection_metrics_from_scenario_results(
     fig.text(
         0.5,
         0.02,
-        "Each point: one scenario η, adaptive learning rate, adaptation-loss GLRT stream "
-        "(same trigger used to start online training)",
+        "Each point: one scenario η. Top-left: offline GLRT argmax changepoint on the full MSIE "
+        "series (peaks near η injection). z-trigger window for live training is in per-run "
+        "glrt_adaptation_z_score_averaged.png.",
         ha="center",
         fontsize=10,
         style="italic",
@@ -488,7 +490,7 @@ def plot_drift_detection_metrics_from_dicts(
     fig, axes = plt.subplots(2, 2, figsize=FIG_DOUBLE, sharex=True)
 
     panels = [
-        (axes[0, 0], averaged_data["window_idx"], WINDOW_XLABEL, "GLRT trigger window", "Mean window index at trigger"),
+        (axes[0, 0], averaged_data["window_idx"], WINDOW_XLABEL, "z-trigger window", "Mean window where z first exceeded threshold"),
         (axes[0, 1], averaged_data["main_log_glr"], "Log-GLR at trigger", "Adaptation-loss log-GLR", "Mean log-GLR when trigger fired"),
         (axes[1, 0], averaged_data["current_glrt_z_score"], "GLRT z-score at trigger", "Standardized exceedance", "Mean z-score when trigger fired"),
         (axes[1, 1], averaged_data["learning_rate_at_detection"], "LR at trigger", "Learning rate used", "Mean LR (all sweep runs — use scenario stub instead)"),

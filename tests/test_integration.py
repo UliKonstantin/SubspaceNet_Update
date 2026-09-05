@@ -18,7 +18,7 @@ sys.path.insert(0, str(WORKSPACE_ROOT))
 sys.path.insert(0, str(WORKSPACE_ROOT / "DCD_MUSIC"))
 
 CONFIGS_DIR = Path(__file__).parent / "configs"
-PRETRAINED_MODEL_PATH = "experiments/results/base_model_random_data_snr_10_SubspaceNet_esprit_N9_M3_SNR10.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_084930.pt"
+PRETRAINED_MODEL_PATH = "experiments/results/basemodels_for_journal_paper/subspacenet/snr_10.0/checkpoints/final_SubspaceNet_20250916_084930.pt"
 
 
 # ---------------------------------------------------------------------------

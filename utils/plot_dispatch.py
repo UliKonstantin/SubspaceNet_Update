@@ -108,7 +108,9 @@ def _handle_evaluate_none(ctx: PlotContext) -> None:
         return
     from utils.plotting import plot_eval_dnn_ekf_loss_vs_time
 
-    plot_eval_dnn_ekf_loss_vs_time(traj_results, ctx.output_dir)
+    plot_eval_dnn_ekf_loss_vs_time(
+        traj_results, ctx.output_dir, model_type=getattr(ctx.sim.config.model, "type", None)
+    )
 
 
 def _handle_evaluate_kalman_2d(ctx: PlotContext) -> None:
@@ -129,6 +131,7 @@ def _handle_online_learning_none(ctx: PlotContext) -> None:
     from utils.plotting import plot_single_online_learning_run
 
     plot_single_online_learning_run(ctx.result, ctx.output_dir, ctx.sim.config)
+    _save_scenario_results_stub(ctx.output_dir, ctx.result)
 
 
 def _handle_online_learning_grid_4d(ctx: PlotContext) -> None:
@@ -137,12 +140,19 @@ def _handle_online_learning_grid_4d(ctx: PlotContext) -> None:
     plot_eta_comparison_4d_grid(ctx.result, ctx.output_dir)
 
 
-def _handle_online_learning_one_d_snr(ctx: PlotContext) -> None:
+def _handle_online_learning_one_d_axis(ctx: PlotContext, axis: str) -> None:
+    """Per-axis 1D OL sweep: aggregate plot, iteration subdir plots, results stub."""
     from utils.plotting import plot_performance_improvement_table, plot_scenario_results
 
-    plot_scenario_results(ctx.result, ctx.output_dir)
-    plot_performance_improvement_table(ctx.result, ctx.output_dir)
-    dispatch_one_d_sweep_iteration_plots(ctx.result, ctx.output_dir, ctx.sim.config, "snr")
+    plot_scenario_results(ctx.result, ctx.output_dir, scenario_type=axis)
+    if axis == "snr":
+        plot_performance_improvement_table(ctx.result, ctx.output_dir)
+    dispatch_one_d_sweep_iteration_plots(ctx.result, ctx.output_dir, ctx.sim.config, axis)
+    _save_scenario_results_stub(ctx.output_dir, ctx.result)
+
+
+def _handle_online_learning_one_d_snr(ctx: PlotContext) -> None:
+    _handle_online_learning_one_d_axis(ctx, "snr")
 
 
 def _handle_online_learning_one_d_eta(ctx: PlotContext) -> None:
@@ -187,10 +197,10 @@ def _maybe_plot_drift_detection_metrics(output_dir: Path) -> None:
 
 def _handle_online_learning_one_d(ctx: PlotContext) -> None:
     axis = ctx.request.sweep_axis.value if ctx.request.sweep_axis else None
-    if axis == "snr":
-        _handle_online_learning_one_d_snr(ctx)
-    elif axis == "eta":
+    if axis == "eta":
         _handle_online_learning_one_d_eta(ctx)
+    elif axis:
+        _handle_online_learning_one_d_axis(ctx, axis)
     _maybe_plot_drift_detection_metrics(ctx.output_dir)
 
 

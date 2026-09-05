@@ -30,11 +30,11 @@ from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
 from DCD_MUSIC.src.signal_creation import Samples
 from utils.utils import save_model_state
 from DCD_MUSIC.src.evaluation import get_model_based_method, evaluate_model_based
-from simulation.kalman_filter.extended import ExtendedKalmanFilter1D
+from simulation.reproducibility import apply_simulation_seed
 
 logger = logging.getLogger(__name__)
 
-# Device setup for evaluation
+from config.sweep_axis import system_model_override_for_axis
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class Simulation:
@@ -75,6 +75,8 @@ class Simulation:
         self.valid_dataloader = None
         self.trained_model = None
         self.results = {}
+
+        apply_simulation_seed(getattr(config.simulation, "seed", None))
         
         logger.info(f"Simulation initialized with output directory: {self.output_dir}")
         logger.info(f"Trajectory mode: {'Enabled' if self.config.trajectory.enabled else 'Disabled'}")
@@ -354,10 +356,15 @@ class Simulation:
             val_split = val_prop / (train_prop + val_prop) if (train_prop + val_prop) > 0 else 0
             
             # Create train and validation dataloaders
-            self.train_dataloader, self.valid_dataloader = dataset.get_dataloaders(
-                batch_size=self.config.training.batch_size,
-                validation_split=val_split
-            )
+            try:
+                self.train_dataloader, self.valid_dataloader = dataset.get_dataloaders(
+                    batch_size=self.config.training.batch_size,
+                    validation_split=val_split,
+                )
+            except TypeError:
+                self.train_dataloader, self.valid_dataloader = dataset.get_dataloaders(
+                    batch_size=self.config.training.batch_size,
+                )
             
             logger.info(f"Created dataloaders: train={len(self.train_dataloader)}, val={len(self.valid_dataloader)}")
             
@@ -531,10 +538,18 @@ class Simulation:
         
         # Train the model
         logger.info(f"Starting model training with {training_config.epochs} epochs")
+        train_kwargs = {}
+        try:
+            import inspect
+
+            if "seed" in inspect.signature(trainer.train).parameters:
+                train_kwargs["seed"] = 42
+        except (TypeError, ValueError):
+            pass
         self.trained_model = trainer.train(
             self.train_dataloader,
             self.valid_dataloader,
-            seed=42  # For reproducibility
+            **train_kwargs,
         )
         
         # Store the trained model back in components
@@ -1230,7 +1245,7 @@ class Simulation:
                         f"online_learning.max_eta={value}"
                     ]
                 else:
-                    overrides = [f"system_model.{scenario_type.lower()}={value}"]
+                    overrides = [system_model_override_for_axis(scenario_type, value)]
                 
                 overrides.append(self._resolve_model_path_override(model_paths, retrain_model, i))
                 
@@ -1319,9 +1334,9 @@ class Simulation:
     def _resolve_model_path_override(self, model_paths, retrain_model: bool, iteration_idx: int) -> str:
         """Resolve which model_path override to use for a sweep iteration."""
         if model_paths:
-            if retrain_model and iteration_idx < len(model_paths):
+            if iteration_idx < len(model_paths):
                 return f"simulation.model_path={model_paths[iteration_idx]}"
-            elif not retrain_model and len(model_paths) > 0:
+            if len(model_paths) > 0:
                 return f"simulation.model_path={model_paths[0]}"
 
         base_path = getattr(self.config.simulation, "model_path", None)

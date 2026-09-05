@@ -23,6 +23,7 @@ class SweepType(str, Enum):
 
 class SweepAxis(str, Enum):
     SNR = "snr"
+    N = "n"
     M = "m"
     T = "t"
     ETA = "eta"
@@ -61,6 +62,7 @@ class RunRequest:
     retrain_per_sweep: bool = False
     retrain_per_sweep_cli: Optional[bool] = None
     grid_params: Optional[Grid4DParams] = None
+    load_model: bool = True
 
     @property
     def is_sweep(self) -> bool:

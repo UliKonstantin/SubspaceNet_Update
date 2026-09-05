@@ -52,11 +52,14 @@ class ModelParamsConfig(BaseModel):
     variant: Literal["small", "big"] = "small"
     norm_layer: bool = False
     batch_norm: bool = False
+    grid_size: Optional[int] = None
+    peak_method: Literal["peaks", "topk"] = "peaks"
+    soft_peak_temperature: float = 0.5
 
 
 class ModelConfig(BaseModel):
     """Model configuration."""
-    type: Literal["SubspaceNet", "DCD-MUSIC"] = "SubspaceNet"
+    type: Literal["SubspaceNet", "DCD-MUSIC", "DeepCNN"] = "SubspaceNet"
     params: ModelParamsConfig = ModelParamsConfig()
 
 
@@ -86,6 +89,7 @@ class SimulationConfig(BaseModel):
     plot_results: bool = True
     save_plots: bool = False
     model_path: Optional[str] = None  # Path to load pretrained model from
+    seed: Optional[int] = Field(default=None, description="Random seed for reproducible OL trajectories (pair SN/CNN runs)")
     subspace_methods: List[str] = Field(default_factory=list, description="List of classic subspace methods to evaluate (e.g., ['1D-MUSIC', 'Root-MUSIC','ESPRIT']).")
 
 
@@ -240,6 +244,11 @@ class OnlineLearningConfig(BaseModel):
         default=None,
         description="Optional cap on rolling log-GLR history length. None = unbounded (default).",
     )
+    drift_recent_tau_k: Optional[int] = Field(
+        default=None,
+        description="If set, z-trigger latches only when argmax τ lies in the last K post-warmup "
+        "MSIE samples (recent-τ gate). None = disabled (z-only trigger).",
+    )
 
     plot_trajectory: bool = Field(
         default=False,
@@ -254,6 +263,8 @@ class OnlineLearningConfig(BaseModel):
             raise ValueError("drift_guard_samples must be >= 0")
         if self.drift_z_threshold <= 0:
             raise ValueError("drift_z_threshold must be > 0")
+        if self.drift_recent_tau_k is not None and self.drift_recent_tau_k < 1:
+            raise ValueError("drift_recent_tau_k must be >= 1 when set")
         from utils.drift_gates import SCOPE_B_BASELINE_MIN_SAMPLES
 
         min_history = SCOPE_B_BASELINE_MIN_SAMPLES + self.drift_guard_samples

@@ -148,6 +148,38 @@ def _filter_series_after_training(window_indices, values, training_end_window):
     return filtered_indices, filtered_values
 
 
+def _add_drift_detection_markers(
+    ax,
+    *,
+    drift_detection_window=None,
+    glrt_changepoint_window_at_detection=None,
+):
+    """
+    Mark drift on window-index time axes.
+
+    w* (drift_detection_window): when z first exceeded threshold (latency).
+    τ* (glrt_changepoint_window_at_detection): argmax log-GLR on prefix at trigger (accuracy).
+    """
+    if drift_detection_window is not None and drift_detection_window >= 0:
+        ax.axvline(
+            x=drift_detection_window,
+            color="crimson",
+            linestyle=":",
+            alpha=0.85,
+            linewidth=1.8,
+            label=rf"z-trigger ($w^*$={drift_detection_window:g})",
+        )
+    if glrt_changepoint_window_at_detection is not None and glrt_changepoint_window_at_detection >= 0:
+        ax.axvline(
+            x=glrt_changepoint_window_at_detection,
+            color="teal",
+            linestyle="-.",
+            alpha=0.85,
+            linewidth=1.8,
+            label=rf"GLRT $\tau^*$ at trigger (w={glrt_changepoint_window_at_detection:g})",
+        )
+
+
 def plot_averaged_online_learning_results(
     output_dir,
     averaged_pretrained_metrics,
@@ -157,8 +189,10 @@ def plot_averaged_online_learning_results(
     training_start_window=None,
     training_end_window=None,
     drift_detection_window=None,
+    glrt_changepoint_window_at_detection=None,
     eta_change_windows=None,
     averaged_supervised_metrics=None,
+    model_type=None,
 ):
     """
     Plot online learning results using directly averaged metrics (no TrajectoryResults conversion).
@@ -237,11 +271,11 @@ def plot_averaged_online_learning_results(
                     label='Distribution Change' if not distribution_labeled else None,
                 )
                 distribution_labeled = True
-        if drift_detection_window is not None and drift_detection_window >= 0:
-            ax.axvline(
-                x=drift_detection_window, color='crimson', linestyle=':', alpha=0.7, linewidth=1.5,
-                label='Drift Detected (GLRT)',
-            )
+        _add_drift_detection_markers(
+            ax,
+            drift_detection_window=drift_detection_window,
+            glrt_changepoint_window_at_detection=glrt_changepoint_window_at_detection,
+        )
         if training_start_window is not None and training_start_window >= 0:
             ax.axvline(
                 x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2,
@@ -326,8 +360,10 @@ def plot_averaged_online_learning_results(
         averaged_online_metrics=averaged_online_metrics,
         training_end_window=training_end_window,
         drift_detection_window=drift_detection_window,
+        glrt_changepoint_window_at_detection=glrt_changepoint_window_at_detection,
         eta_change_windows=distribution_change_windows,
         training_start_window=training_start_window,
+        model_type=model_type,
     )
     
     logger.info(f"Averaged online learning comparison plots saved to: {plot_path_main} and {plot_path_training}")
@@ -343,10 +379,12 @@ def plot_averaged_kf_gain_comparison(
     training_start_window=None,
     training_end_window=None,
     drift_detection_window=None,
+    glrt_changepoint_window_at_detection=None,
     eta_change_windows=None,
+    model_type=None,
 ):
     """
-    Plot SubspaceNet-only vs EKF posterior (both vs GT) and the KF improvement gap.
+    Plot model-only vs EKF posterior (both vs GT) and the KF improvement gap.
 
     Pretrained curves span all windows. Online curves (if provided) appear only after training_end_window.
     """
@@ -359,12 +397,14 @@ def plot_averaged_kf_gain_comparison(
         RMSPE_LABEL,
         WINDOW_XLABEL,
         apply_paper_plot_style,
+        model_display_label,
         save_figure,
         style_axes,
     )
 
     apply_paper_plot_style()
     logger = logging.getLogger(__name__)
+    model_name = model_display_label(model_type)
 
     pretrained_indices = averaged_pretrained_metrics.get("window_indices", [])
     pretrained_pre_ekf = averaged_pretrained_metrics.get("pre_ekf_losses", [])
@@ -403,11 +443,11 @@ def plot_averaged_kf_gain_comparison(
                     label='Distribution Change' if not distribution_labeled else None,
                 )
                 distribution_labeled = True
-        if drift_detection_window is not None and drift_detection_window >= 0:
-            ax.axvline(
-                x=drift_detection_window, color='crimson', linestyle=':', alpha=0.7, linewidth=1.5,
-                label='Drift Detected (GLRT)',
-            )
+        _add_drift_detection_markers(
+            ax,
+            drift_detection_window=drift_detection_window,
+            glrt_changepoint_window_at_detection=glrt_changepoint_window_at_detection,
+        )
         if training_start_window is not None and training_start_window >= 0:
             ax.axvline(
                 x=training_start_window, color='orange', linestyle='-', alpha=0.7, linewidth=2,
@@ -424,7 +464,7 @@ def plot_averaged_kf_gain_comparison(
     ax1 = fig.add_subplot(2, 1, 1)
     ax1.plot(
         pretrained_indices, pretrained_pre_ekf, 'b-', linewidth=3,
-        label='SubspaceNet-only (pre-EKF)', marker='s', markersize=6,
+        label=f'{model_name}-only (pre-EKF)', marker='s', markersize=6,
     )
     ax1.plot(
         pretrained_indices, pretrained_ekf, 'r-', linewidth=3,
@@ -433,7 +473,7 @@ def plot_averaged_kf_gain_comparison(
     if online_indices and online_pre_ekf and online_ekf:
         ax1.plot(
             online_indices, online_pre_ekf, color='cornflowerblue', linewidth=2, linestyle='--',
-            label='Algorithm 1 SubspaceNet-only', marker='^', markersize=5,
+            label=f'Algorithm 1 {model_name}-only', marker='^', markersize=5,
         )
         ax1.plot(
             online_indices, online_ekf, color='salmon', linewidth=2, linestyle='--',
@@ -444,7 +484,7 @@ def plot_averaged_kf_gain_comparison(
         ax1,
         xlabel=WINDOW_XLABEL,
         ylabel=f"{RMSPE_LABEL} vs GT (rad)",
-        title="SubspaceNet-only vs EKF posterior (supervised)",
+        title=f"{model_name}-only vs EKF posterior (supervised)",
     )
     ax1.legend(loc="best")
 
@@ -466,7 +506,7 @@ def plot_averaged_kf_gain_comparison(
         ax2,
         xlabel=WINDOW_XLABEL,
         ylabel="RMSPE reduction from EKF (rad)",
-        title="EKF improvement vs SubspaceNet-only (positive = KF helped)",
+        title=f"EKF improvement vs {model_name}-only (positive = KF helped)",
     )
     ax2.legend(loc="best")
 
@@ -659,6 +699,291 @@ def plot_glrt_averaged_drift_results(
             logger.warning("Failed to plot averaged GLRT %s results: %s", label, exc)
 
 
+def plot_glrt_adaptation_z_score_averaged(
+    glrt_results: dict,
+    output_dir,
+    *,
+    drift_z_threshold: float = 2.5,
+    eta_change_windows=None,
+    drift_detection_window=None,
+    glrt_changepoint_window_at_detection=None,
+    training_start_window=None,
+    time_to_learn: int | None = None,
+) -> None:
+    """Plot streaming GLRT z-score vs window (live drift trigger path)."""
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    from utils.plotting.style import PLOT_COLORS, WINDOW_XLABEL, apply_paper_plot_style, save_figure, style_axes
+
+    logger = logging.getLogger(__name__)
+    adaptation = glrt_results.get("adaptation_loss") if glrt_results else None
+    if not adaptation:
+        return
+
+    z_traj = adaptation.get("z_score_trajectory")
+    if not z_traj or not z_traj.get("windows"):
+        logger.debug("No z-score trajectory data; skipping glrt_adaptation_z_score_averaged plot")
+        return
+
+    windows = z_traj["windows"]
+    avg_z = z_traj["avg_z_scores"]
+    std_z = z_traj.get("std_z_scores") or [0.0] * len(windows)
+    traj_count = z_traj.get("trajectory_count", adaptation.get("trajectory_count", 1))
+
+    apply_paper_plot_style()
+    fig, ax = plt.subplots(figsize=(10, 4))
+    if any(s > 0 for s in std_z):
+        ax.errorbar(
+            windows,
+            avg_z,
+            yerr=std_z,
+            fmt="o-",
+            color=PLOT_COLORS["changepoint"],
+            linewidth=1.8,
+            markersize=5,
+            capsize=3,
+            label=f"Mean z-score ({traj_count} traj)",
+        )
+    else:
+        ax.plot(windows, avg_z, "o-", color=PLOT_COLORS["changepoint"], linewidth=1.8, label="z-score")
+
+    ax.axhline(
+        drift_z_threshold,
+        color=PLOT_COLORS["event"],
+        linestyle="--",
+        linewidth=1.5,
+        label=rf"$z_{{\mathrm{{thr}}}}$={drift_z_threshold:g}",
+    )
+
+    det_window = drift_detection_window
+    if det_window is None and z_traj.get("avg_drift_detection_window") is not None:
+        det_window = z_traj["avg_drift_detection_window"]
+    tau_window = glrt_changepoint_window_at_detection
+    if tau_window is None and z_traj.get("avg_changepoint_window_at_detection") is not None:
+        tau_window = z_traj["avg_changepoint_window_at_detection"]
+    _add_drift_detection_markers(
+        ax,
+        drift_detection_window=det_window,
+        glrt_changepoint_window_at_detection=tau_window,
+    )
+
+    train_window = training_start_window
+    if train_window is None and z_traj.get("avg_training_start_window") is not None:
+        train_window = z_traj["avg_training_start_window"]
+    if train_window is not None:
+        ax.axvline(
+            train_window,
+            color=PLOT_COLORS["adaptive"],
+            linestyle="-.",
+            linewidth=1.5,
+            alpha=0.85,
+            label=f"Training start (w={train_window:g})",
+        )
+
+    if eta_change_windows:
+        labeled = False
+        for w in eta_change_windows:
+            ax.axvline(
+                w,
+                color=PLOT_COLORS["pretrained"],
+                linestyle=":",
+                linewidth=1.5,
+                alpha=0.85,
+                label=r"Distribution change ($\eta$)" if not labeled else None,
+            )
+            labeled = True
+
+    title = f"GLRT adaptation z-score (averaged, n={traj_count})"
+    if time_to_learn is not None and det_window is not None:
+        title += f" — trigger w={det_window:g}, train w={det_window + time_to_learn:g}"
+    style_axes(ax, xlabel=WINDOW_XLABEL, ylabel="z-score", title=title)
+    ax.legend(loc="best", fontsize=9)
+    fig.tight_layout()
+
+    plot_path = Path(output_dir) / "glrt_adaptation_z_score_averaged.png"
+    save_figure(fig, plot_path)
+    logger.info("Saved GLRT z-score trajectory plot to %s", plot_path)
+
+
+def plot_glrt_adaptation_g_vs_baseline(
+    glrt_results: dict,
+    output_dir,
+    *,
+    drift_z_threshold: float = 2.5,
+    eta_change_windows=None,
+    drift_detection_window=None,
+    glrt_changepoint_window_at_detection=None,
+) -> None:
+    """Plot streaming G (max log-GLR), baseline mean, and z-score on shared window axis."""
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    from utils.plotting.style import PLOT_COLORS, WINDOW_XLABEL, apply_paper_plot_style, save_figure, style_axes
+
+    logger = logging.getLogger(__name__)
+    adaptation = glrt_results.get("adaptation_loss") if glrt_results else None
+    if not adaptation:
+        return
+
+    z_traj = adaptation.get("z_score_trajectory")
+    if not z_traj or not z_traj.get("windows"):
+        return
+
+    windows = z_traj["windows"]
+    avg_g = z_traj.get("avg_g_values")
+    avg_baseline = z_traj.get("avg_baseline_means")
+    avg_z = z_traj.get("avg_z_scores")
+    if not avg_g or not avg_baseline or not avg_z:
+        logger.debug("Missing G/baseline series; skipping glrt_adaptation_g_vs_baseline plot")
+        return
+
+    traj_count = z_traj.get("trajectory_count", adaptation.get("trajectory_count", 1))
+    apply_paper_plot_style()
+    fig, ax_g = plt.subplots(figsize=(10, 4.5))
+    ax_z = ax_g.twinx()
+
+    ax_g.plot(windows, avg_g, "o-", color=PLOT_COLORS["glrt"], linewidth=1.8, label=r"$G_w$ (max log-GLR)")
+    ax_g.plot(
+        windows,
+        avg_baseline,
+        "s--",
+        color=PLOT_COLORS["pretrained"],
+        linewidth=1.5,
+        markersize=4,
+        label=r"$\bar{G}_{\mathrm{base}}$ (baseline mean)",
+    )
+    ax_z.plot(windows, avg_z, "^-", color=PLOT_COLORS["changepoint"], linewidth=1.5, markersize=4, label="z-score")
+    ax_z.axhline(
+        drift_z_threshold,
+        color=PLOT_COLORS["event"],
+        linestyle=":",
+        linewidth=1.5,
+        label=rf"$z_{{\mathrm{{thr}}}}$={drift_z_threshold:g}",
+    )
+
+    det_window = drift_detection_window or z_traj.get("avg_drift_detection_window")
+    tau_window = glrt_changepoint_window_at_detection or z_traj.get("avg_changepoint_window_at_detection")
+    _add_drift_detection_markers(
+        ax_g,
+        drift_detection_window=det_window,
+        glrt_changepoint_window_at_detection=tau_window,
+    )
+
+    if eta_change_windows:
+        labeled = False
+        for w in eta_change_windows:
+            ax_g.axvline(
+                w,
+                color=PLOT_COLORS["adaptive"],
+                linestyle=":",
+                linewidth=1.5,
+                alpha=0.85,
+                label=r"Distribution change ($\eta$)" if not labeled else None,
+            )
+            labeled = True
+
+    ax_g.set_xlabel(WINDOW_XLABEL)
+    ax_g.set_ylabel("log-GLR")
+    ax_z.set_ylabel("z-score")
+    ax_g.set_title(
+        f"Streaming GLRT: $G_w$ vs baseline and z (n={traj_count})\n"
+        r"$z_w=(G_w-\bar{G}_{\mathrm{base}})/\sigma_{\mathrm{base}}$; baseline excludes last 3 $G$ samples"
+    )
+
+    lines_g, labels_g = ax_g.get_legend_handles_labels()
+    lines_z, labels_z = ax_z.get_legend_handles_labels()
+    ax_g.legend(lines_g + lines_z, labels_g + labels_z, loc="best", fontsize=8)
+    fig.tight_layout()
+
+    plot_path = Path(output_dir) / "glrt_adaptation_g_vs_baseline.png"
+    save_figure(fig, plot_path)
+    logger.info("Saved GLRT G vs baseline plot to %s", plot_path)
+
+
+def plot_glrt_adaptation_at_detection(
+    glrt_results: dict,
+    output_dir,
+    *,
+    drift_warmup_windows: int,
+    drift_guard_samples: int,
+    eta_change_windows=None,
+) -> None:
+    """Plot GLRT on the MSIE prefix frozen at drift-trigger time (when z first exceeded threshold)."""
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    from simulation.drift import plot_results
+    from utils import drift_gates
+    from utils.plotting.style import PLOT_COLORS, save_figure
+
+    logger = logging.getLogger(__name__)
+    adaptation = glrt_results.get("adaptation_loss") if glrt_results else None
+    if not adaptation:
+        return
+
+    at_det = adaptation.get("at_detection")
+    if not at_det or not at_det.get("avg_losses"):
+        logger.debug("No at-detection GLRT snapshot; skipping glrt_adaptation_at_detection plot")
+        return
+
+    plot_offset = at_det.get("window_index_offset", drift_warmup_windows)
+    gate_milestones = drift_gates.drift_detection_milestones(drift_warmup_windows, drift_guard_samples)
+    eta_markers = eta_change_windows if eta_change_windows else None
+
+    changepoint_pw = at_det["changepoint_post_warmup"]
+    fig_loss, fig_glrt = plot_results(
+        at_det["avg_losses"],
+        changepoint_pw,
+        np.array(at_det["all_log_glr"]),
+        at_det["candidate_points_post_warmup"],
+        window_index_offset=plot_offset,
+        event_windows=eta_markers,
+        gate_milestones=gate_milestones,
+    )
+
+    det_w = at_det.get("avg_detection_window")
+    det_std = at_det.get("std_detection_window", 0.0)
+    z_det = at_det.get("avg_z_at_detection")
+    n_traj = at_det.get("trajectory_count", 1)
+    title_suffix = (
+        f"Prefix at z-trigger (avg w={det_w:.1f} ± {det_std:.1f}, n={n_traj}, "
+        f"avg z@trigger={z_det:.2f})"
+        if det_w is not None and z_det is not None
+        else f"Prefix at z-trigger (n={n_traj})"
+    )
+    fig_loss.suptitle(f"GLRT at drift detection — Loss — {title_suffix}", fontsize=13)
+    fig_glrt.suptitle(f"GLRT at drift detection — Statistics — {title_suffix}", fontsize=13)
+    fig_loss.subplots_adjust(top=0.82)
+    fig_glrt.subplots_adjust(top=0.82)
+
+    if det_w is not None:
+        _add_drift_detection_markers(
+            fig_loss.axes[0],
+            drift_detection_window=det_w,
+            glrt_changepoint_window_at_detection=at_det.get("changepoint_window"),
+        )
+        fig_loss.axes[0].legend(loc="best", fontsize=8)
+        # GLRT statistic panel x-axis is candidate τ, not time — only mark τ* there.
+        tau_w = at_det.get("changepoint_window")
+        if tau_w is not None:
+            fig_glrt.axes[0].axvline(
+                tau_w,
+                color="teal",
+                linestyle="-.",
+                linewidth=1.8,
+                alpha=0.9,
+                label=rf"GLRT $\tau^*$ at trigger (w={tau_w:.0f})",
+            )
+            fig_glrt.axes[0].legend(loc="best", fontsize=8)
+
+    loss_path = Path(output_dir) / "glrt_adaptation_at_detection_loss.png"
+    glrt_path = Path(output_dir) / "glrt_adaptation_at_detection_glrt.png"
+    save_figure(fig_loss, loss_path)
+    save_figure(fig_glrt, glrt_path)
+    logger.info("Saved at-detection GLRT plots to %s and %s", loss_path, glrt_path)
+
+
 def plot_single_online_learning_run(result: dict, output_dir, config) -> None:
     """Dispatch all single-run online learning plots from structured run results."""
     import datetime
@@ -675,6 +1000,11 @@ def plot_single_online_learning_run(result: dict, output_dir, config) -> None:
     training_start_window = ol_results.get("training_start_window")
     training_end_window = ol_results.get("training_end_window")
     drift_detection_window = ol_results.get("drift_detection_window")
+    glrt_changepoint_window_at_detection = ol_results.get("glrt_changepoint_window_at_detection")
+    if glrt_changepoint_window_at_detection is None:
+        at_det = (averaged_data.get("glrt_results") or {}).get("adaptation_loss", {}).get("at_detection")
+        if at_det:
+            glrt_changepoint_window_at_detection = at_det.get("changepoint_window")
     eta_change_windows = ol_results.get("eta_change_windows", [])
     reference_metric_config = ol_results.get("reference_metric_config", "unknown")
     adaptation_loss_config = ol_results.get("adaptation_loss_config", "unknown")
@@ -688,8 +1018,10 @@ def plot_single_online_learning_run(result: dict, output_dir, config) -> None:
         training_start_window=training_start_window,
         training_end_window=training_end_window,
         drift_detection_window=drift_detection_window,
+        glrt_changepoint_window_at_detection=glrt_changepoint_window_at_detection,
         eta_change_windows=eta_change_windows,
         averaged_supervised_metrics=averaged_data.get("averaged_supervised_trajectory"),
+        model_type=getattr(config.model, "type", None),
     )
 
     glrt_results = averaged_data.get("glrt_results") or result.get("glrt_results")
@@ -702,6 +1034,31 @@ def plot_single_online_learning_run(result: dict, output_dir, config) -> None:
             output_dir,
             drift_warmup,
             drift_guard,
+            eta_change_windows=eta_change_windows,
+        )
+        plot_glrt_adaptation_z_score_averaged(
+            glrt_results,
+            output_dir,
+            drift_z_threshold=getattr(online_config, "drift_z_threshold", 2.5),
+            eta_change_windows=eta_change_windows,
+            drift_detection_window=drift_detection_window,
+            glrt_changepoint_window_at_detection=glrt_changepoint_window_at_detection,
+            training_start_window=training_start_window,
+            time_to_learn=getattr(online_config, "time_to_learn", None),
+        )
+        plot_glrt_adaptation_g_vs_baseline(
+            glrt_results,
+            output_dir,
+            drift_z_threshold=getattr(online_config, "drift_z_threshold", 2.5),
+            eta_change_windows=eta_change_windows,
+            drift_detection_window=drift_detection_window,
+            glrt_changepoint_window_at_detection=glrt_changepoint_window_at_detection,
+        )
+        plot_glrt_adaptation_at_detection(
+            glrt_results,
+            output_dir,
+            drift_warmup_windows=drift_warmup,
+            drift_guard_samples=drift_guard,
             eta_change_windows=eta_change_windows,
         )
 

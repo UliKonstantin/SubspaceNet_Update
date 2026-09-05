@@ -55,7 +55,7 @@ axis_option = option(
     "--axis",
     "-s",
     default=None,
-    help="1D sweep axis: snr, m, t, eta, trajectory_length",
+    help="1D sweep axis: snr, n, m, t, eta, trajectory_length",
 )
 
 values_option = option(

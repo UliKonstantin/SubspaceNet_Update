@@ -267,6 +267,7 @@ class OnlineLearning:
         self.drift_z_threshold = getattr(online_config, 'drift_z_threshold', 2.5)
         self.drift_warmup_windows = getattr(online_config, 'drift_warmup_windows', 7)
         self.drift_guard_samples = getattr(online_config, 'drift_guard_samples', 3)
+        self.drift_recent_tau_k = getattr(online_config, 'drift_recent_tau_k', None)
         self.use_adaptive_learning_rate = getattr(online_config, 'use_adaptive_learning_rate', False)
         self.adaptive_lr_min = getattr(online_config, 'adaptive_lr_min', 0.0005)
         self.adaptive_lr_max = getattr(online_config, 'adaptive_lr_max', 0.0356)
@@ -280,11 +281,12 @@ class OnlineLearning:
         )
         logger.info(
             "Drift detection: scope_a_warmup=%s, scope_b_baseline_min=%s, guard_samples=%s, "
-            "z_threshold=%s (first g at window %s, first z at window %s), time_to_learn=%s",
+            "z_threshold=%s, recent_tau_k=%s (first g at window %s, first z at window %s), time_to_learn=%s",
             self.drift_warmup_windows,
             drift_gates.SCOPE_B_BASELINE_MIN_SAMPLES,
             self.drift_guard_samples,
             self.drift_z_threshold,
+            self.drift_recent_tau_k,
             first_g,
             first_z,
             self.time_to_learn,
@@ -377,6 +379,7 @@ class OnlineLearning:
             training_start_window = None
             training_end_window = None
             drift_detection_window = None
+            glrt_changepoint_window_at_detection = None
             eta_change_windows = []
             if all_results and len(all_results) > 0:
                 first_result = all_results[0]["online_learning_results"]
@@ -384,6 +387,7 @@ class OnlineLearning:
                 training_end_window = first_result.get("training_end_window")
                 eta_change_windows = first_result.get("eta_change_windows", [])
                 drift_detection_window = first_result.get("drift_detection_window")
+                glrt_changepoint_window_at_detection = first_result.get("glrt_changepoint_window_at_detection")
             
             logger.info(f"Online learning completed over {dataset_size} trajectories")
             
@@ -398,6 +402,7 @@ class OnlineLearning:
                     "training_end_window": training_end_window,
                     "eta_change_windows": eta_change_windows,
                     "drift_detection_window": drift_detection_window,
+                    "glrt_changepoint_window_at_detection": glrt_changepoint_window_at_detection,
                     "reference_metric_config": reference_metric_config,
                     "adaptation_loss_config": adaptation_loss_config,
                 },
@@ -497,14 +502,8 @@ class OnlineLearning:
             
             # Create dataloader from on-demand dataset
             from torch.utils.data import DataLoader
-            online_learning_dataloader = DataLoader(
-                online_learning_dataset,
-                batch_size=1,  # Process one window at a time
-                shuffle=False,
-                num_workers=0,  # On-demand dataset must use 0 workers
-                drop_last=False
-            )
-            logger.info(f"Created on-demand online learning dataloader for {len(online_learning_dataloader)} windows.")
+            num_ol_windows = len(online_learning_dataset)
+            logger.info(f"Created on-demand online learning dataset for {num_ol_windows} windows.")
             
             # Initialize trajectory results structure
             trajectory_results = TrajectoryResults()
@@ -532,6 +531,12 @@ class OnlineLearning:
             
             # Track drift detection metrics
             drift_detection_dicts = []
+            glrt_z_score_windows: list[int] = []
+            glrt_z_scores: list[float] = []
+            glrt_g_values: list[float] = []
+            glrt_baseline_means: list[float] = []
+            glrt_at_detection: dict | None = None
+            drift_recent_tau_rejection_count = 0
             
             # GLRT drift detection tracking variables
             glrt_adaptation_loss_changepoint_window = None
@@ -553,60 +558,50 @@ class OnlineLearning:
             # Reset tracking variables for drift detection metrics
             self.glrt_z_score_at_detection = None  # Z-score at the moment drift was detected
             self.learning_rate_at_detection = None  # Learning rate calculated at detection time
-            # Note: GLRT history is kept across trajectories for better baseline estimation
-            # Uncomment the line below to reset per trajectory if needed:
-            # self.glrt_history = []
+            # Fresh g-stream baseline per trajectory (shared history inflates z-scores on traj 2+).
+            self.glrt_history = []
             
-            # Process each window of online data
-            for window_idx, (time_series_batch, sources_num_batch, labels_batch) in enumerate(tqdm(online_learning_dataloader, desc="Online Learning")):
-                # --- Dynamic Eta Update Logic ---
+            # Process each window (manual indexing: eta update before fetch)
+            for window_idx in tqdm(range(num_ol_windows), desc="Online Learning"):
                 if online_config.eta_update_interval_windows and online_config.eta_update_interval_windows > 0 and \
                    window_idx > 0 and window_idx % online_config.eta_update_interval_windows == 0:
-                    current_eta = self.system_model.params.eta # Get current eta from the shared SystemModelParams
+                    current_eta = self.system_model.params.eta
                     eta_increment = online_config.eta_increment if online_config.eta_increment is not None else 0.01
                     new_eta = current_eta + eta_increment
-                    
-                    # Apply min/max constraints if specified
+
                     if online_config.max_eta is not None:
                         new_eta = min(new_eta, online_config.max_eta)
                     if online_config.min_eta is not None:
                         new_eta = max(new_eta, online_config.min_eta)
-                    
-                    # Only update if there's an actual change
+
                     if abs(new_eta - current_eta) > 1e-6:
-                        logger.info(f"Online Learning: Dynamically updating eta at window {window_idx}. From {current_eta:.4f} to {new_eta:.4f}")
-                        # Track eta change window
+                        invalidate_from_step = window_idx * stride
+                        logger.info(
+                            "Online Learning: Dynamically updating eta before window %s. "
+                            "From %.4f to %.4f (regenerate steps >= %s)",
+                            window_idx,
+                            current_eta,
+                            new_eta,
+                            invalidate_from_step,
+                        )
                         eta_change_windows.append(window_idx)
-                        # The dataset holds the generator, which updates the shared self.system_model.params.eta
-                        online_learning_dataloader.dataset.update_eta(new_eta)
+                        online_learning_dataset.update_eta(
+                            new_eta,
+                            invalidate_from_step=invalidate_from_step,
+                        )
+                        self.system_model.eta = self.system_model._SystemModel__set_eta()
+                        if new_eta == 0:
+                            self.system_model.location_noise = torch.zeros(self.system_model.params.N)
+                        else:
+                            self.system_model.location_noise = self.system_model.get_distance_noise(True)
                         if self.first_eta_change:
                             self.first_eta_change = False
                             logger.info(f"First eta modification at window {window_idx}")
-                            # Set drift detected on first eta change only
-                    
-                    
-                # --- End Dynamic Eta Update Logic ---
-                
-                # Unpack batch data
-                # The batch data shapes are:
-                # time_series_batch: [1, window_size, N, T] = [1, 10, 8, 200]
-                # sources_num_batch: [10, 1] (not [1, 10] as expected)
-                # labels_batch: [10, 1, 3] (not [1, 10, 3] as expected)
-                
-                # Extract the content properly from the batch
-                time_series_single_window = time_series_batch[0]  # Shape: [window_size, N, T]
-                
-                # Reshape sources_num to be a list of integers
-                sources_num_single_window_list = sources_num_batch[:, 0].tolist() if isinstance(sources_num_batch, torch.Tensor) else [s[0] for s in sources_num_batch]
-                
-                # Reshape labels to be a list of arrays
-                if isinstance(labels_batch, torch.Tensor):
-                    # If labels_batch is a tensor [10, 1, 3]
-                    labels_single_window_list_of_arrays = [arr[0].cpu().numpy() if isinstance(arr, torch.Tensor) else arr[0] for arr in labels_batch]
-                else:
-                    # If labels_batch is a list of tensors or arrays
-                    labels_single_window_list_of_arrays = [arr[0].cpu().numpy() if isinstance(arr, torch.Tensor) else arr[0] for arr in labels_batch]
-                
+
+                time_series_single_window, sources_num_single_window_list, labels_single_window_list_of_arrays = (
+                    online_learning_dataset[window_idx]
+                )
+
                 # Calculate loss on the current window (generated with current eta)
                 window_result = self._evaluate_window(
                     time_series_single_window, 
@@ -690,15 +685,56 @@ class OnlineLearning:
                                 f"(baseline: {baseline_mean:.4f} ± {baseline_std:.4f}, "
                                 f"guard_samples={self.drift_guard_samples})"
                             )
+                            glrt_z_score_windows.append(window_idx)
+                            glrt_z_scores.append(float(current_glrt_z_score))
+                            glrt_g_values.append(float(adapt_log_glr))
+                            glrt_baseline_means.append(float(baseline_mean))
 
-                            if (
+                            z_exceeds = (
                                 current_glrt_z_score is not None
                                 and current_glrt_z_score > self.drift_z_threshold
+                            )
+                            tau_recent = drift_gates.recent_tau_passes(
+                                adapt_changepoint,
+                                len(adaptation_losses),
+                                self.drift_recent_tau_k,
+                            )
+                            if (
+                                z_exceeds
+                                and not tau_recent
+                                and self.glrt_drift_detection_window is None
+                                and not self.drift_detected
+                            ):
+                                drift_recent_tau_rejection_count += 1
+                                min_tau = max(0, len(adaptation_losses) - (self.drift_recent_tau_k or 0))
+                                logger.info(
+                                    f"Drift z-trigger suppressed at window {window_idx}: "
+                                    f"z={current_glrt_z_score:.4f} > {self.drift_z_threshold}, but "
+                                    f"τ={adapt_changepoint} (w={glrt_adaptation_loss_changepoint_window}) "
+                                    f"not in last K={self.drift_recent_tau_k} samples "
+                                    f"(need post-warmup τ >= {min_tau})"
+                                )
+
+                            if (
+                                z_exceeds
+                                and tau_recent
                                 and self.glrt_drift_detection_window is None
                                 and not self.drift_detected
                             ):
                                 self.glrt_drift_detection_window = window_idx
                                 self.glrt_z_score_at_detection = current_glrt_z_score
+                                glrt_at_detection = {
+                                    "window_idx": window_idx,
+                                    "losses": list(adaptation_losses),
+                                    "changepoint_post_warmup": int(adapt_changepoint),
+                                    "changepoint_window": int(glrt_adaptation_loss_changepoint_window),
+                                    "log_glr": float(adapt_log_glr),
+                                    "all_log_glr": [float(v) for v in adapt_all_log_glr],
+                                    "candidate_points_post_warmup": [int(p) for p in adapt_candidate_points],
+                                    "z_score": float(current_glrt_z_score),
+                                    "baseline_mean": float(baseline_mean),
+                                    "baseline_std": float(baseline_std),
+                                }
 
                                 import math
                                 base_lr = getattr(self.config.online_learning, "learning_rate", 1e-3)
@@ -911,7 +947,7 @@ class OnlineLearning:
                     "supervised_model_trajectory_results": supervised_trajectory_results,
                     
                     # Learning metadata
-                    "window_count": len(online_learning_dataloader),
+                    "window_count": num_ol_windows,
                     "window_size": online_config.window_size,
                     "stride": online_config.stride,
                     "learning_start_window": self.learning_start_window,
@@ -925,6 +961,9 @@ class OnlineLearning:
                     # Training and eta change tracking
                     "eta_change_windows": eta_change_windows,
                     "drift_detection_window": self.glrt_drift_detection_window,
+                    "glrt_changepoint_window_at_detection": (
+                        glrt_at_detection.get("changepoint_window") if glrt_at_detection else None
+                    ),
                     "training_start_window": training_start_window,
                     "training_end_window": training_end_window,
                     
@@ -936,6 +975,13 @@ class OnlineLearning:
                     "glrt_reference_metric_likelihood": glrt_reference_metric_likelihood,
                     "glrt_reference_metric_losses": glrt_reference_metric_losses,
                     "glrt_loss_window_offset": self.drift_warmup_windows,
+                    "glrt_z_score_windows": glrt_z_score_windows,
+                    "glrt_z_scores": glrt_z_scores,
+                    "glrt_g_values": glrt_g_values,
+                    "glrt_baseline_means": glrt_baseline_means,
+                    "glrt_at_detection": glrt_at_detection,
+                    "drift_recent_tau_k": self.drift_recent_tau_k,
+                    "drift_recent_tau_rejection_count": drift_recent_tau_rejection_count,
                     # GLRT z-score and learning rate at detection time
                     "glrt_z_score_at_detection": self.glrt_z_score_at_detection if hasattr(self, 'glrt_z_score_at_detection') else None,
                     "learning_rate_at_detection": self.learning_rate_at_detection if hasattr(self, 'learning_rate_at_detection') else None,

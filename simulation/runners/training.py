@@ -722,6 +722,9 @@ class TrajectoryTrainer:
             name: Checkpoint name
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        checkpoint_model_name = getattr(self.model, "checkpoint_name", self.model.__class__.__name__)
+        if name.endswith(self.model.__class__.__name__):
+            name = name.replace(self.model.__class__.__name__, checkpoint_model_name)
         filename = f"{name}_{timestamp}.pt"
         path = self.checkpoint_dir / filename
         

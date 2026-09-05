@@ -37,6 +37,18 @@ MSIE_LABEL = "MSIE (unsupervised)"
 RMSPE_DB_LABEL = "Mean post-learning RMSPE (dB)"
 
 
+def model_display_label(model_type: Optional[str]) -> str:
+    """Human-readable model name for plot labels."""
+    if not model_type:
+        return "Model"
+    normalized = str(model_type).strip().lower().replace("-", "").replace("_", "")
+    if "deepcnn" in normalized:
+        return "DeepCNN"
+    if "subspacenet" in normalized:
+        return "SubspaceNet"
+    return str(model_type)
+
+
 def apply_paper_plot_style() -> None:
     """Default rcParams for publication-quality figures across the plot dispatch pipeline."""
     import matplotlib.pyplot as plt

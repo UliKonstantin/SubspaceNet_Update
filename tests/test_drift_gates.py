@@ -17,6 +17,7 @@ from utils.drift_gates import (
     can_compute_drift_z_score,
     compute_drift_z_score,
     has_enough_losses_for_changepoint_glr,
+    recent_tau_passes,
 )
 
 
@@ -68,3 +69,15 @@ class TestDriftGates:
 
         with pytest.raises(ValueError, match="drift_history_max_size"):
             OnlineLearningConfig(drift_guard_samples=3, drift_history_max_size=5)
+
+    def test_recent_tau_passes(self):
+        assert recent_tau_passes(10, 20, None)
+        assert recent_tau_passes(15, 20, 5)  # min_tau=15
+        assert recent_tau_passes(14, 20, 5) is False
+        assert recent_tau_passes(0, 3, 5)  # short prefix: min_tau=0
+
+    def test_schema_rejects_invalid_recent_tau_k(self):
+        from config.schema import OnlineLearningConfig
+
+        with pytest.raises(ValueError, match="drift_recent_tau_k"):
+            OnlineLearningConfig(drift_recent_tau_k=0)

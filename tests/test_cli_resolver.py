@@ -84,6 +84,16 @@ class TestResolveRunRequest:
         assert req.sweep_values == [0.5, 1.0]
         assert req.model_path is not None
 
+    def test_axis_n_from_cli(self):
+        req = resolve_run_request(
+            str(CONFIGS_DIR / "test_online_learning_single.yaml"),
+            sweep="1d",
+            axis="n",
+            values=[9.0],
+        )
+        assert req.sweep_axis == SweepAxis.N
+        assert req.sweep_values == [9.0]
+
     def test_model_path_from_scenario_config(self):
         req = resolve_run_request(str(CONFIGS_DIR / "test_online_learning_eta_sweep.yaml"))
         assert req.model_path.name.startswith("final_SubspaceNet")

@@ -24,7 +24,7 @@ Steps **3+** that need a loaded model use the **existing paper checkpoint** — 
 Same path as `configs/Used_for_paper/SineAccel_base_model_Online_learning_eta_sweep_config.yaml` (`scenario_config.model_paths[0]`):
 
 ```bash
-export PAPER_MODEL="experiments/results/base_model_random_data_snr_10_SubspaceNet_esprit_N9_M3_SNR10.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_084930.pt"
+export PAPER_MODEL="experiments/results/basemodels_for_journal_paper/subspacenet/snr_10.0/checkpoints/final_SubspaceNet_20250916_084930.pt"
 ```
 
 **Preflight (before Step 3):**

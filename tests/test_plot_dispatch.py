@@ -153,3 +153,24 @@ class TestPlotDispatch:
             dispatch_plots(scenario_results, request, tmp_path, sim)
         mock_iter.assert_called_once_with(scenario_results, tmp_path, sim.config, "eta")
         mock_drift.assert_called_once_with(tmp_path)
+
+    def test_dispatch_n_sweep_calls_per_iteration_plots_and_stub(self, tmp_path):
+        request = RunRequest(
+            goal=Goal.ONLINE_LEARNING,
+            config_path=Path("x.yaml"),
+            sweep=SweepType.ONE_D,
+            sweep_axis=SweepAxis.N,
+            sweep_values=[9.0],
+        )
+        sim = _mock_sim(save_plots=True)
+        scenario_results = {
+            9.0: {"status": "success", "averaged_results": {"averaged_online_trajectory": {}}},
+        }
+        with patch("utils.plotting.plot_scenario_results"), patch(
+            "utils.plot_dispatch.dispatch_one_d_sweep_iteration_plots"
+        ) as mock_iter, patch("utils.plot_dispatch._save_scenario_results_stub") as mock_stub, patch(
+            "simulation.drift.drift_metrics.plot_drift_detection_metrics_in_output_dir"
+        ):
+            dispatch_plots(scenario_results, request, tmp_path, sim)
+        mock_iter.assert_called_once_with(scenario_results, tmp_path, sim.config, "n")
+        mock_stub.assert_called_once_with(tmp_path, scenario_results)

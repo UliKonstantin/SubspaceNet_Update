@@ -785,20 +785,40 @@ class OnlineLearningTrajectoryGenerator:
         self._step_cache: List[Tuple[torch.Tensor, int, np.ndarray]] = []
         logger.info(f"OnlineLearningTrajectoryGenerator initialized. eta={self.system_model_params.eta:.4f}, M={self.current_M}, type={self.trajectory_config.trajectory_type.value}")
 
-    def update_eta(self, new_eta: float):
-        """Updates the eta value in the shared SystemModelParams."""
+    def update_eta(self, new_eta: float, invalidate_from_step: Optional[int] = None):
+        """Updates the eta value in the shared SystemModelParams.
+
+        When ``invalidate_from_step`` is set, drop cached trajectory steps from that
+        index onward so subsequent windows are regenerated under the new calibration.
+        """
         old_eta = self.system_model_params.eta
         self.system_model_params.eta = new_eta
-        
+
         # Also update sv_noise_var to the same value as eta
         self.system_model_params.sv_noise_var = new_eta
-        
+
         # Regenerate distance noise with new eta value
         self.samples_model.eta = self.samples_model._SystemModel__set_eta()
-        #if not getattr(self.system_model_params, 'nominal', True):
         self.samples_model.location_noise = self.samples_model.get_distance_noise(True)
-        
-        logger.info(f"Generator eta updated from {old_eta:.4f} to {self.system_model_params.eta:.4f} with new distance noise pattern.")
+
+        if invalidate_from_step is not None:
+            keep = max(0, int(invalidate_from_step))
+            if keep < len(self._step_cache):
+                self._step_cache = self._step_cache[:keep]
+            self.current_step_in_session = len(self._step_cache)
+            logger.info(
+                "Truncated step cache to %s steps (from %s) for eta %.4f -> %.4f",
+                keep,
+                invalidate_from_step,
+                old_eta,
+                new_eta,
+            )
+
+        logger.info(
+            "Generator eta updated from %.4f to %.4f with new distance noise pattern.",
+            old_eta,
+            self.system_model_params.eta,
+        )
 
     def _generate_next_true_step(self) -> Tuple[np.ndarray, int]:
         """Generates the next set of true angles (and potentially ranges) and the number of sources for this step."""
@@ -963,9 +983,9 @@ class OnlineLearningDataset(Dataset):
         self._generated_windows_count += 1
         return window_data
 
-    def update_eta(self, new_eta: float):
+    def update_eta(self, new_eta: float, invalidate_from_step: Optional[int] = None):
         """Delegates eta update to the underlying generator."""
-        self.generator.update_eta(new_eta)
+        self.generator.update_eta(new_eta, invalidate_from_step=invalidate_from_step)
 
     def get_dataloader(self, batch_size: int, shuffle: bool = True, collate_fn: Optional[Callable] = None) -> DataLoader:
         """

@@ -35,7 +35,7 @@ GOALS (--goal, or inferred from YAML):
 \b
 SWEEPS (--sweep, or inferred from scenario_config):
   none              Single run at config defaults
-  1d                One axis: --axis snr|m|t|eta|trajectory_length
+  1d                One axis: --axis snr|n|m|t|eta|trajectory_length
   2d_kalman         Kalman meas × proc noise grid (evaluate only)
   4d_grid           4D research grid (online_learning only)
 

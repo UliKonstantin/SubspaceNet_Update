@@ -11,6 +11,7 @@ import numpy as np
 
 SCENARIO_AXIS_LABELS = {
     "snr": "SNR (dB)",
+    "n": "Number of antennas (N)",
     "m": "Number of sources (M)",
     "t": "Snapshots (T)",
     "eta": "Steering error η",
@@ -19,6 +20,7 @@ SCENARIO_AXIS_LABELS = {
 
 SCENARIO_PLOT_TITLES = {
     "snr": "DOA tracking error vs SNR",
+    "n": "DOA tracking error vs number of antennas",
     "m": "DOA tracking error vs number of sources",
     "t": "DOA tracking error vs snapshots",
     "eta": "DOA tracking error vs steering error η",
@@ -1011,11 +1013,10 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_typ
             label="Supervised oracle", linewidth=2, markersize=7, color=PLOT_COLORS["supervised"],
         )
 
-    xlabel = SNR_XLABEL if scenario_type.lower() == "snr" else ETA_XLABEL
-    title = (
-        f"Post-learning tracking error vs SNR"
-        if scenario_type.lower() == "snr"
-        else f"Post-learning tracking error vs {ETA_XLABEL}"
+    xlabel = SCENARIO_AXIS_LABELS.get(scenario_type.lower(), SCENARIO_AXIS_LABELS["snr"])
+    title = SCENARIO_PLOT_TITLES.get(
+        scenario_type.lower(),
+        f"Post-learning tracking error vs {xlabel}",
     )
     style_axes(ax, xlabel=xlabel, ylabel=RMSPE_DB_LABEL, title=title)
     ax.legend(loc="best")

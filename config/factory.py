@@ -208,6 +208,28 @@ def create_model(config: Config, system_model: Any) -> Any:
         )
         
         return model
+
+    elif model_type == "DeepCNN":
+        from models.deep_cnn_adapter import DeepCNNDoAAdapter
+
+        N = config.system_model.N
+        if N < 6:
+            raise ValueError(f"DeepCNN requires N >= 6 (conv stack needs N-5 >= 1), got N={N}")
+
+        grid_size = model_params.get("grid_size")
+        if grid_size is None:
+            grid_size = 2 * config.system_model.doa_range + 1
+
+        peak_method = model_params.get("peak_method", "peaks")
+        soft_peak_temperature = model_params.get("soft_peak_temperature", 0.5)
+        DeepCNN = _import_from_dcd_music("src.models_pack.deep_cnn", "DeepCNN")
+        backbone = DeepCNN(N=N, grid_size=grid_size)
+        return DeepCNNDoAAdapter(
+            backbone,
+            grid_size=grid_size,
+            peak_method=peak_method,
+            soft_peak_temperature=soft_peak_temperature,
+        )
         
     elif model_type == "DCD-MUSIC":
         DCDMUSIC = _import_from_dcd_music("src.models_pack.dcd_music", "DCDMUSIC")

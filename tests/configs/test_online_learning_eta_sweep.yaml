@@ -68,7 +68,7 @@ simulation:
 scenario_config:
   type: "eta"
   values: [0.5, 1.0]
-  model_paths: ["experiments/results/base_model_random_data_snr_10_SubspaceNet_esprit_N9_M3_SNR10.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_084930.pt"]
+  model_paths: ["experiments/results/basemodels_for_journal_paper/subspacenet/snr_10.0/checkpoints/final_SubspaceNet_20250916_084930.pt"]
   retrain_model: false
 
 trajectory:

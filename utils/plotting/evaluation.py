@@ -154,14 +154,16 @@ def _plot_kalman_noise_optimum_analysis(
     logger.info("Saved Kalman noise analysis plot")
 
 
-def plot_eval_dnn_ekf_loss_vs_time(dnn_trajectory_results, output_dir):
-    """Plot per-step SubspaceNet-only vs EKF posterior RMSPE vs GT."""
+def plot_eval_dnn_ekf_loss_vs_time(dnn_trajectory_results, output_dir, model_type=None):
+    """Plot per-step model-only vs EKF posterior RMSPE vs GT."""
     import os
     import torch
     from DCD_MUSIC.src.metrics.rmspe_loss import RMSPELoss
+    from utils.plotting.style import model_display_label
 
     apply_paper_plot_style()
     logger = logging.getLogger(__name__)
+    model_name = model_display_label(model_type)
     if not dnn_trajectory_results:
         logger.warning("Skipping eval KF plot: no trajectory results")
         return None
@@ -201,14 +203,14 @@ def plot_eval_dnn_ekf_loss_vs_time(dnn_trajectory_results, output_dir):
     gain = np.array(dnn_avg) - np.array(ekf_avg)
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
-    ax1.plot(steps, dnn_avg, "-s", linewidth=2, markersize=4, label="SubspaceNet-only", color=PLOT_COLORS["dnn"])
+    ax1.plot(steps, dnn_avg, "-s", linewidth=2, markersize=4, label=f"{model_name}-only", color=PLOT_COLORS["dnn"])
     ax1.plot(steps, ekf_avg, "-o", linewidth=2, markersize=4, label="EKF posterior", color=PLOT_COLORS["ekf"])
-    style_axes(ax1, xlabel="", ylabel="RMSPE vs GT (rad)", title="Batch eval: SubspaceNet vs EKF")
+    style_axes(ax1, xlabel="", ylabel="RMSPE vs GT (rad)", title=f"Batch eval: {model_name} vs EKF")
     ax1.legend(loc="best")
 
     ax2.plot(steps, gain, "-d", linewidth=2, markersize=4, label="KF gain (pre-EKF − EKF)", color=PLOT_COLORS["gain"])
     ax2.axhline(0.0, color="black", linestyle="-", alpha=0.35, linewidth=1)
-    style_axes(ax2, xlabel="Trajectory step", ylabel="RMSPE reduction (rad)", title="EKF improvement over SubspaceNet-only")
+    style_axes(ax2, xlabel="Trajectory step", ylabel="RMSPE reduction (rad)", title=f"EKF improvement over {model_name}-only")
     ax2.legend(loc="best")
     fig.tight_layout()
     plot_path = os.path.join(output_dir, "eval_kf_gain_comparison.png")

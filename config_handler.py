@@ -69,9 +69,10 @@ def setup_configuration(
                     params.append(config_obj.model.type)
                 
                 if hasattr(config_obj.model, 'params') and hasattr(config_obj.model.params, 'diff_method'):
-                    diff_method = config_obj.model.params.diff_method
-                    if isinstance(diff_method, str) and diff_method not in base_name:
-                        params.append(diff_method)
+                    if config_obj.model.type in ("SubspaceNet", "DCD-MUSIC"):
+                        diff_method = config_obj.model.params.diff_method
+                        if isinstance(diff_method, str) and diff_method not in base_name:
+                            params.append(diff_method)
             
             # System model parameters
             if hasattr(config_obj, 'system_model'):
@@ -197,14 +198,21 @@ def update_components_for_sweep(
     
     # Map of parameters to components that need to be recreated
     param_to_components = {
-        'eta': ['system_model'],  # eta affects system model and trajectory handler
-        'snr': ['system_model'],  # snr affects system model and trajectory handler
-        'M': ['system_model'],    # M affects system model and trajectory handler
-
+        'eta': ['system_model'],
+        'snr': ['system_model'],
+        'n': ['system_model'],
+        'N': ['system_model'],
+        'm': ['system_model'],
+        'M': ['system_model'],
+        't': ['system_model'],
+        'T': ['system_model'],
     }
-    
-    # Get components that need to be updated for this parameter
-    components_to_update = param_to_components.get(sweep_param.lower(), [])
+
+    sweep_key = sweep_param
+    if sweep_param.lower() in ('n', 'm', 't'):
+        sweep_key = sweep_param.upper()
+
+    components_to_update = param_to_components.get(sweep_key, param_to_components.get(sweep_param.lower(), []))
     
     if not components_to_update:
         logger.info(f"No components need to be updated for {sweep_param}")

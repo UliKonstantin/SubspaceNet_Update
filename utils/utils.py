@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from utils.drift_gates import GLRT_MIN_SEGMENT_SIZE
+from utils.drift_gates import GLRT_MIN_SEGMENT_SIZE, average_z_score_trajectories, average_glrt_at_detection
 
 
 def log_window_summary(
@@ -330,6 +330,12 @@ def _average_glrt_results(results_list: list) -> dict:
         if online_results.get("actual_lr_per_training_window"):
             actual_lrs.extend(online_results["actual_lr_per_training_window"])
 
+    z_score_trajectory = average_z_score_trajectories(results_list)
+    at_detection = average_glrt_at_detection(
+        results_list,
+        window_index_offset=window_index_offset if window_index_offset is not None else 0,
+    )
+
     glrt_results = {}
 
     if adaptation_sequences:
@@ -337,7 +343,7 @@ def _average_glrt_results(results_list: list) -> dict:
         avg_adaptation_losses = [
             np.mean([losses[i] for losses in adaptation_sequences]) for i in range(min_length)
         ]
-        glrt_results["adaptation_loss"] = {
+        adaptation_block = {
             "avg_losses": avg_adaptation_losses,
             "window_index_offset": window_index_offset if window_index_offset is not None else 0,
             "avg_changepoint_window": float(np.mean(adaptation_changepoint_windows)) if adaptation_changepoint_windows else None,
@@ -357,6 +363,11 @@ def _average_glrt_results(results_list: list) -> dict:
             "individual_z_scores": z_scores,
             "individual_learning_rates": learning_rates,
         }
+        if z_score_trajectory is not None:
+            adaptation_block["z_score_trajectory"] = z_score_trajectory
+        if at_detection is not None:
+            adaptation_block["at_detection"] = at_detection
+        glrt_results["adaptation_loss"] = adaptation_block
 
     if reference_metric_sequences:
         min_length = min(len(losses) for losses in reference_metric_sequences)

@@ -1,0 +1,84 @@
+###############################################################################
+# PF-09 — journal paper DeepCNN base-model training (N=9 M=3 SNR=10 default)
+# Override N and/or M via CLI -O for T1/T3 sweep checkpoints.
+# Output dir: experiments/results/basemodels_for_journal_paper/deepcnn/
+#   N9 M3 -> snr_10.0/   |   other N/M -> N{N}_M{M}_SNR10.0/  (use -o or train_journal_deepcnn_checkpoints.sh)
+###############################################################################
+system_model:
+  N: 9
+  M: 3
+  T: 200
+  snr: 10
+  field_type: "far"
+  signal_nature: "non-coherent"
+  signal_type: "narrowband"
+  wavelength: 0.06
+  eta: 0.0
+  bias: 0
+  sv_noise_var: 0.0
+  doa_range: 60
+  doa_resolution: 1
+  max_range_ratio_to_limit: 0.5
+  range_resolution: 1
+
+dataset:
+  samples_size: 1024
+  test_validation_train_split: [0.1, 0.1, 0.8]
+  create_data: true
+  save_dataset: false
+  true_doa_train: null
+  true_range_train: null
+  true_doa_test: null
+  true_range_test: null
+
+model:
+  type: "DeepCNN"
+  params:
+    grid_size: 121
+    peak_method: "peaks"
+
+training:
+  enabled: true
+  epochs: 10
+  batch_size: 256
+  optimizer: "Adam"
+  scheduler: "ReduceLROnPlateau"
+  learning_rate: 0.001
+  weight_decay: 1e-9
+  step_size: 50
+  gamma: 0.5
+  training_objective: "angle"
+  use_wandb: false
+  simulation_name: "basemodels_for_journal_paper/base_model_random_data_snr_10"
+  save_checkpoint: true
+
+simulation:
+  train_model: true
+  evaluate_model: false
+  load_model: false
+  save_model: true
+  plot_results: true
+  save_plots: true
+  model_path: null
+  subspace_methods:
+    - "ESPRIT"
+
+trajectory:
+  enabled: true
+  trajectory_type: "random"
+  trajectory_length: 100
+  save_trajectory: false
+
+kalman_filter:
+  filter_type: "extended"
+  process_noise_std_dev: 0.03
+  measurement_noise_std_dev: 0.03
+  initial_covariance: 0.001
+
+logging:
+  level: "INFO"
+  subspace_net_level: null
+  kalman_filter_level: "WARNING"
+  torch_level: "WARNING"
+  matplotlib_level: "WARNING"
+  log_to_file: false

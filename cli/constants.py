@@ -4,6 +4,7 @@ from cli.types import Goal
 DEFAULT_SWEEP_VALUES = {
     "eta": [0.0, 0.01, 0.05, 0.1, 0.2, 0.3, 0.5],
     "snr": [-10, -5, 0, 5, 10, 15, 20],
+    "n": [6, 9, 18],
     "m": [1, 2, 3, 4, 5],
 }
 

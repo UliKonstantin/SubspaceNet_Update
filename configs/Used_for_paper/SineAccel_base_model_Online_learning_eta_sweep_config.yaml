@@ -98,7 +98,7 @@ kalman_filter:
 scenario_config:
   type: "eta"
   values: [0.4,0.6,0.9,1,1.2,1.5] #, 0.4,0.45,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2]
-  model_paths: ["experiments/results/base_model_random_data_snr_10_SubspaceNet_esprit_N9_M3_SNR10.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_084930.pt"]
+  model_paths: ["experiments/results/basemodels_for_journal_paper/subspacenet/snr_10.0/checkpoints/final_SubspaceNet_20250916_084930.pt"]
   retrain_model: false  # use the same model for all scenarios 
 
 #scenario_config:
@@ -106,31 +106,31 @@ scenario_config:
   #values: [-5,-4,-3,-2,-1,0]
   #values: [-5,0,5,10] #[0,1,2,3,4,5,6,7,8,9,10] #[-5,-4,-3,-2,-1,0,1,2,3,4,5,6,7,8,9,10]
   #model_paths: [
-    #"experiments/results/base_model_random_data_snr_-5_SubspaceNet_esprit_N9_M3_SNR-5.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250908_133942.pt",
-    #"experiments/results/base_model_random_data_snr_-4_SubspaceNet_esprit_N9_M3_SNR-4.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_161440.pt", 
-    #"experiments/results/base_model_random_data_snr_-3_SubspaceNet_esprit_N9_M3_SNR-3.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_163716.pt",
-    #"experiments/results/base_model_random_data_snr_-2_SubspaceNet_esprit_N9_M3_SNR-2.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_171354.pt",
-    #"experiments/results/base_model_random_data_snr_-1_SubspaceNet_esprit_N9_M3_SNR-1.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_190908.pt",
-    #"experiments/results/base_model_random_data_snr_0_SubspaceNet_esprit_N9_M3_SNR0.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_162434.pt",
-    #"experiments/results/base_model_random_data_snr_1_SubspaceNet_esprit_N9_M3_SNR1.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_160710.pt",
-    #"experiments/results/base_model_random_data_snr_2_SubspaceNet_esprit_N9_M3_SNR2.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_154905.pt",
-    #"experiments/results/base_model_random_data_snr_3_SubspaceNet_esprit_N9_M3_SNR3.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_164715.pt",
-    #"experiments/results/base_model_random_data_snr_4_SubspaceNet_esprit_N9_M3_SNR4.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_152855.pt",
-    #"experiments/results/base_model_random_data_snr_5_SubspaceNet_esprit_N9_M3_SNR5.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_112213.pt",
-    #"experiments/results/base_model_random_data_snr_6_SubspaceNet_esprit_N9_M3_SNR6.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_105533.pt",
-    #"experiments/results/base_model_random_data_snr_7_SubspaceNet_esprit_N9_M3_SNR7.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_101356.pt",
-    #"experiments/results/base_model_random_data_snr_8_SubspaceNet_esprit_N9_M3_SNR8.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_095517.pt",
-    #"experiments/results/base_model_random_data_snr_9_SubspaceNet_esprit_N9_M3_SNR9.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_093636.pt",
-    #"experiments/results/base_model_random_data_snr_10_SubspaceNet_esprit_N9_M3_SNR10.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250916_084930.pt"
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_-5.0/checkpoints/final_SubspaceNet_20250908_133942.pt",
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_-4.0/checkpoints/final_SubspaceNet_20250914_161440.pt", 
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_-3.0/checkpoints/final_SubspaceNet_20250914_163716.pt",
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_-2.0/checkpoints/final_SubspaceNet_20250914_171354.pt",
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_-1.0/checkpoints/final_SubspaceNet_20250914_190908.pt",
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_0.0/checkpoints/final_SubspaceNet_20250916_162434.pt",
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_1.0/checkpoints/final_SubspaceNet_20250916_160710.pt",
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_2.0/checkpoints/final_SubspaceNet_20250916_154905.pt",
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_3.0/checkpoints/final_SubspaceNet_20250916_164715.pt",
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_4.0/checkpoints/final_SubspaceNet_20250916_152855.pt",
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_5.0/checkpoints/final_SubspaceNet_20250916_112213.pt",
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_6.0/checkpoints/final_SubspaceNet_20250916_105533.pt",
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_7.0/checkpoints/final_SubspaceNet_20250916_101356.pt",
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_8.0/checkpoints/final_SubspaceNet_20250916_095517.pt",
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_9.0/checkpoints/final_SubspaceNet_20250916_093636.pt",
+    #"experiments/results/basemodels_for_journal_paper/subspacenet/snr_10.0/checkpoints/final_SubspaceNet_20250916_084930.pt"
   #]
   # Model paths for each SNR value (must match values order)
   #model_paths: [
-  #  "experiments/results/base_model_random_data_snr_-5_SubspaceNet_esprit_N9_M3_SNR-5.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250908_133942.pt",
-  #  "experiments/results/base_model_random_data_snr_-4_SubspaceNet_esprit_N9_M3_SNR-4.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_161440.pt", 
-  #  "experiments/results/base_model_random_data_snr_-3_SubspaceNet_esprit_N9_M3_SNR-3.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_163716.pt",
-  #  "experiments/results/base_model_random_data_snr_-2_SubspaceNet_esprit_N9_M3_SNR-2.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_171354.pt",
-  #  "experiments/results/base_model_random_data_snr_-1_SubspaceNet_esprit_N9_M3_SNR-1.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250914_190908.pt",
-  #  "experiments/results/base_model_random_data_snr_0_SubspaceNet_esprit_N9_M3_SNR0.0_Far_ESPRIT/checkpoints/final_SubspaceNet_20250908_145244.pt"
+  #  "experiments/results/basemodels_for_journal_paper/subspacenet/snr_-5.0/checkpoints/final_SubspaceNet_20250908_133942.pt",
+  #  "experiments/results/basemodels_for_journal_paper/subspacenet/snr_-4.0/checkpoints/final_SubspaceNet_20250914_161440.pt", 
+  #  "experiments/results/basemodels_for_journal_paper/subspacenet/snr_-3.0/checkpoints/final_SubspaceNet_20250914_163716.pt",
+  #  "experiments/results/basemodels_for_journal_paper/subspacenet/snr_-2.0/checkpoints/final_SubspaceNet_20250914_171354.pt",
+  #  "experiments/results/basemodels_for_journal_paper/subspacenet/snr_-1.0/checkpoints/final_SubspaceNet_20250914_190908.pt",
+  #  "experiments/results/basemodels_for_journal_paper/subspacenet/snr_0.0/checkpoints/final_SubspaceNet_20250908_145244.pt"
   #]
   #retrain_model: false
 # Enable online learning with appropriate parameters

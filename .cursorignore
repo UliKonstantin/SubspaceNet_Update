@@ -1,0 +1,11 @@
+# Large dataset/output directories — keep Cursor's file watcher and
+# codebase indexer from crawling these (100+ GB, tanks memory).
+data/datasets/
+experiments/results/
+experiments/debug_logs/
+
+# Python virtualenv — not source, no need to index.
+subspacenet_env/
+
+# Scratch/tmp.
+tmp/

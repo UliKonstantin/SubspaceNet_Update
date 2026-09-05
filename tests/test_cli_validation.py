@@ -26,16 +26,24 @@ class TestValidationErrors:
         with pytest.raises(RoutingError, match="--model"):
             validate(req)
 
-    def test_online_learning_requires_model(self):
-        req = _base_request(goal=Goal.ONLINE_LEARNING, trajectory=True)
+    def test_online_learning_requires_model_when_loading(self):
+        req = _base_request(goal=Goal.ONLINE_LEARNING, trajectory_enabled=True, load_model=True)
         with pytest.raises(RoutingError, match="--model"):
             validate(req)
+
+    def test_online_learning_allows_no_model_when_not_loading(self):
+        req = _base_request(
+            goal=Goal.ONLINE_LEARNING,
+            trajectory_enabled=True,
+            load_model=False,
+        )
+        validate(req)
 
     def test_online_learning_requires_trajectory(self):
         req = _base_request(
             goal=Goal.ONLINE_LEARNING,
             model_path=Path("model.pt"),
-            trajectory=False,
+            trajectory_enabled=False,
         )
         with pytest.raises(RoutingError, match="trajectory"):
             validate(req)
@@ -64,7 +72,7 @@ class TestValidationErrors:
             goal=Goal.EVALUATE,
             sweep=SweepType.GRID_4D,
             model_path=Path("model.pt"),
-            trajectory=True,
+            trajectory_enabled=True,
             grid_params=Grid4DParams(),
         )
         with pytest.raises(RoutingError, match="4D grid"):
@@ -74,7 +82,7 @@ class TestValidationErrors:
         req = _base_request(
             goal=Goal.ONLINE_LEARNING,
             model_path=Path("model.pt"),
-            trajectory=True,
+            trajectory_enabled=True,
             sweep=SweepType.ONE_D,
             sweep_axis=SweepAxis.SNR,
             sweep_values=[0, 10],
@@ -119,7 +127,7 @@ class TestValidationPasses:
         req = _base_request(
             goal=Goal.ONLINE_LEARNING,
             model_path=Path("model.pt"),
-            trajectory=True,
+            trajectory_enabled=True,
             sweep=SweepType.GRID_4D,
             grid_params=Grid4DParams(eta_values=[0.01]),
         )
