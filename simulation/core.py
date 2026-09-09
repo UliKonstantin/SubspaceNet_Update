@@ -1135,7 +1135,7 @@ class Simulation:
                         f"online_learning.max_eta={eta_value}",
                         f"online_learning.learning_rate={lr_value}",
                         "online_learning.use_adaptive_learning_rate=false",
-                        self._resolve_model_path_override(model_paths, retrain_model, i)
+                        self._resolve_model_path_override(model_paths, retrain_model, i, eta_value)
                     ]
                     
                     result = self._run_sweep_iteration(
@@ -1173,7 +1173,7 @@ class Simulation:
                         f"online_learning.max_eta={eta_value}",
                         f"online_learning.learning_rate={adaptive_base}",
                         "online_learning.use_adaptive_learning_rate=true",
-                        self._resolve_model_path_override(model_paths, retrain_model, i)
+                        self._resolve_model_path_override(model_paths, retrain_model, i, eta_value)
                     ]
                     
                     result = self._run_sweep_iteration(
@@ -1247,7 +1247,7 @@ class Simulation:
                 else:
                     overrides = [system_model_override_for_axis(scenario_type, value)]
                 
-                overrides.append(self._resolve_model_path_override(model_paths, retrain_model, i))
+                overrides.append(self._resolve_model_path_override(model_paths, retrain_model, i, value))
                 
                 result = self._run_sweep_iteration(
                     overrides, scenario_type, value,
@@ -1331,11 +1331,35 @@ class Simulation:
             json.dump(serializable_dicts, f, indent=2)
         logger.info(f"Saved {len(all_drift_detection_dicts)} drift detection dicts to {json_path}")
 
-    def _resolve_model_path_override(self, model_paths, retrain_model: bool, iteration_idx: int) -> str:
+    def _model_path_index_for_scenario_value(self, scenario_value) -> Optional[int]:
+        """Map a swept scenario value to its index in scenario_config.values."""
+        scenario_cfg = getattr(self.config, "scenario_config", None)
+        if not scenario_cfg or not getattr(scenario_cfg, "values", None):
+            return None
+        for idx, configured_value in enumerate(scenario_cfg.values):
+            if configured_value == scenario_value:
+                return idx
+            try:
+                if float(configured_value) == float(scenario_value):
+                    return idx
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _resolve_model_path_override(
+        self,
+        model_paths,
+        retrain_model: bool,
+        iteration_idx: int,
+        scenario_value=None,
+    ) -> str:
         """Resolve which model_path override to use for a sweep iteration."""
         if model_paths:
-            if iteration_idx < len(model_paths):
-                return f"simulation.model_path={model_paths[iteration_idx]}"
+            path_idx = self._model_path_index_for_scenario_value(scenario_value)
+            if path_idx is None:
+                path_idx = iteration_idx
+            if path_idx < len(model_paths):
+                return f"simulation.model_path={model_paths[path_idx]}"
             if len(model_paths) > 0:
                 return f"simulation.model_path={model_paths[0]}"
 

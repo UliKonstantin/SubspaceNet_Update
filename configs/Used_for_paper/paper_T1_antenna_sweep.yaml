@@ -114,7 +114,7 @@ online_learning:
   adaptive_lr_min: 0.0005
   adaptive_lr_max: 0.02
   adaptive_lr_k_sigmoid: 0.7336
-  adaptive_lr_dG0: 14.5
+  adaptive_lr_dG0: 7.5  # median dG_at_detection ~7 with eta@40/warm18; 14.5 pinned LR to floor
   num_gd_steps: 3
   enable_lr_sweep: false
   eta_update_interval_windows: 40
