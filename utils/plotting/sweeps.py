@@ -850,6 +850,9 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_typ
         RMSPE_DB_LABEL,
         SNR_XLABEL,
         apply_paper_plot_style,
+        label_adapted,
+        label_genie,
+        label_no_adaptation,
         save_current_figure,
         style_axes,
     )
@@ -1001,16 +1004,16 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_typ
     fig, ax = plt.subplots(figsize=(10, 5.5))
     ax.plot(
         scenario_values, online_avg_db_losses, "o-",
-        label="Online (Algorithm 1)", linewidth=2, markersize=7, color=PLOT_COLORS["online"],
+        label=label_adapted(), linewidth=2, markersize=7, color=PLOT_COLORS["online"],
     )
     ax.plot(
         scenario_values, pretrained_avg_db_losses, "s-",
-        label="Pretrained SubspaceNet", linewidth=2, markersize=7, color=PLOT_COLORS["pretrained"],
+        label=label_no_adaptation(), linewidth=2, markersize=7, color=PLOT_COLORS["pretrained"],
     )
     if any(not np.isnan(loss) for loss in supervised_avg_db_losses):
         ax.plot(
             scenario_values, supervised_avg_db_losses, "^-",
-            label="Supervised oracle", linewidth=2, markersize=7, color=PLOT_COLORS["supervised"],
+            label=label_genie(), linewidth=2, markersize=7, color=PLOT_COLORS["supervised"],
         )
 
     xlabel = SCENARIO_AXIS_LABELS.get(scenario_type.lower(), SCENARIO_AXIS_LABELS["snr"])
@@ -1048,6 +1051,129 @@ def plot_scenario_results(scenario_results: dict, output_dir: Path, scenario_typ
     plot_path = output_dir / "scenario_results_comparison.png"
     save_current_figure(plot_path)
     logger.info(f"Saved scenario results plot to {plot_path}")
+
+
+def _adaptation_tracking_improvement_deg(
+    result: dict,
+    *,
+    eval_window_count: int = 15,
+) -> float:
+    """
+    DOA tracking error reduction (degrees): no-adapt minus adapted on the same post-training window band.
+
+    Compares supervised RMSPE on windows (training_end, training_end + eval_window_count] for both arms:
+    positive Δ means adaptation reduced error vs frozen pretrained under the same η regime.
+    """
+    import numpy as np
+
+    result = _unwrap_result_for_lr_sweep(result)
+    if not isinstance(result, dict) or result.get("status") != "success":
+        return float("nan")
+
+    ol = result.get("online_learning_results") or {}
+    training_end = ol.get("training_end_window")
+    if training_end is None:
+        training_end = ol.get("training_start_window")
+    averaged = result.get("averaged_results") or {}
+    pre_traj = averaged.get("averaged_pretrained_trajectory") or {}
+    post_traj = averaged.get("averaged_online_trajectory") or {}
+
+    pre_losses = pre_traj.get("reference_metric_losses") or []
+    pre_indices = pre_traj.get("window_indices") or list(range(len(pre_losses)))
+    post_losses = post_traj.get("reference_metric_losses") or []
+    post_indices = post_traj.get("window_indices") or list(range(len(post_losses)))
+
+    if training_end is None or not pre_losses or not post_losses:
+        return float("nan")
+
+    eval_windows = {
+        idx
+        for idx in post_indices
+        if training_end < idx <= training_end + eval_window_count
+    }
+    if not eval_windows:
+        eval_windows = {idx for idx in post_indices if idx > training_end}
+        eval_windows = set(sorted(eval_windows)[:eval_window_count])
+
+    pre_vals = [loss for loss, idx in zip(pre_losses, pre_indices) if idx in eval_windows]
+    post_vals = [loss for loss, idx in zip(post_losses, post_indices) if idx in eval_windows]
+
+    if not pre_vals or not post_vals:
+        return float("nan")
+
+    pre_mean = float(np.mean(pre_vals))
+    post_mean = float(np.mean(post_vals))
+    return (pre_mean - post_mean) * 180.0 / np.pi
+
+
+def plot_antenna_adaptation_improvement(
+    scenario_results: dict,
+    output_dir: Path,
+    *,
+    scenario_type: str = "n",
+) -> Path | None:
+    """
+    Plot Δ DOA tracking error (pre-adapt − post-adapt) vs number of antennas N.
+
+    Positive values mean adaptation reduced supervised RMSPE vs the pre-adaptation baseline.
+    """
+    import numpy as np
+
+    from utils.plotting.style import (
+        FIG_SINGLE,
+        PLOT_COLORS,
+        apply_paper_plot_style,
+        save_figure,
+        style_axes,
+    )
+
+    if scenario_type.lower() != "n":
+        return None
+
+    apply_paper_plot_style()
+    logger = logging.getLogger(__name__)
+    logger.info("Creating antenna adaptation improvement plot (Δ RMSPE vs N)...")
+
+    scenario_keys = [key for key in scenario_results if scenario_results[key] is not None]
+    n_values = sorted(float(key) for key in scenario_keys)
+    improvements = []
+    valid_n = []
+    for n in n_values:
+        result = None
+        for key in scenario_keys:
+            if abs(float(key) - n) < 1e-10:
+                result = scenario_results[key]
+                break
+        delta_deg = _adaptation_tracking_improvement_deg(result)
+        if np.isnan(delta_deg):
+            logger.warning("N=%s: could not compute adaptation improvement, skipping", n)
+            continue
+        valid_n.append(n)
+        improvements.append(delta_deg)
+        logger.info("N=%s: pre−post adaptation ΔRMSPE = %.3f°", n, delta_deg)
+
+    if not valid_n:
+        logger.warning("No valid N values for adaptation improvement plot")
+        return None
+
+    fig, ax = plt.subplots(figsize=FIG_SINGLE)
+    ax.bar(valid_n, improvements, width=2.2, color=PLOT_COLORS["online"], edgecolor="#333333", alpha=0.88)
+    ax.axhline(0.0, color="#666666", linewidth=0.9, linestyle="-")
+    for x, y in zip(valid_n, improvements):
+        ax.text(x, y + (0.05 if y >= 0 else -0.15), f"{y:.2f}°", ha="center", va="bottom" if y >= 0 else "top", fontsize=9)
+
+    style_axes(
+        ax,
+        xlabel=SCENARIO_AXIS_LABELS["n"],
+        ylabel="Δ supervised RMSPE (pre − post adapt) [deg]",
+        title="DOA tracking error improvement from online adaptation vs N",
+    )
+    ax.set_xticks(valid_n)
+    fig.tight_layout()
+    plot_path = Path(output_dir) / "antenna_adaptation_improvement_vs_n.png"
+    save_figure(fig, plot_path)
+    logger.info("Saved adaptation improvement plot to %s", plot_path)
+    return plot_path
 
 
 def plot_eta_scenario_comparison(scenario_results: dict, output_dir: Path) -> None:

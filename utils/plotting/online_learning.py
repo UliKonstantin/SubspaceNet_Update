@@ -32,11 +32,15 @@ def plot_online_learning_results_structured(output_dir, pretrained_trajectory_re
         RMSPE_LABEL,
         WINDOW_XLABEL,
         apply_paper_plot_style,
+        label_adapted,
+        label_no_adaptation,
         save_current_figure,
     )
 
     apply_paper_plot_style()
     logger = logging.getLogger(__name__)
+    _no_adapt = label_no_adaptation()
+    _adapted = label_adapted()
     os.makedirs(output_dir, exist_ok=True)
     
     # Extract data from structured results
@@ -72,8 +76,8 @@ def plot_online_learning_results_structured(output_dir, pretrained_trajectory_re
     fig, (ax_main, ax_msie) = plt.subplots(2, 1, figsize=(10, 8))
     
     # Plot pretrained model main losses
-    ax_main.plot(pretrained_window_indices, pretrained_main_losses, 'b-', linewidth=2, label='Pretrained Model', marker='o', markersize=4)
-    ax_main.plot(online_window_indices, online_main_losses, 'r-', linewidth=2, label='Algorithm 1', marker='s', markersize=4)
+    ax_main.plot(pretrained_window_indices, pretrained_main_losses, 'b-', linewidth=2, label=_no_adapt, marker='o', markersize=4)
+    ax_main.plot(online_window_indices, online_main_losses, 'r-', linewidth=2, label=_adapted, marker='s', markersize=4)
     
     # Add eta change markers to first subplot
     if eta_change_windows:
@@ -95,8 +99,8 @@ def plot_online_learning_results_structured(output_dir, pretrained_trajectory_re
     ax_main.grid(True, alpha=0.3)
     
     # Plot 2: Training Reference Loss Comparison
-    ax_msie.plot(pretrained_window_indices, pretrained_training_losses, 'b-', linewidth=2, label='Pretrained Model', marker='o', markersize=4)
-    ax_msie.plot(online_window_indices, online_training_losses, 'r-', linewidth=2, label='Algorithm 1', marker='s', markersize=4)
+    ax_msie.plot(pretrained_window_indices, pretrained_training_losses, 'b-', linewidth=2, label=_no_adapt, marker='o', markersize=4)
+    ax_msie.plot(online_window_indices, online_training_losses, 'r-', linewidth=2, label=_adapted, marker='s', markersize=4)
     
     # Add eta change markers to second subplot
     if eta_change_windows:
@@ -208,6 +212,9 @@ def plot_averaged_online_learning_results(
 
     from utils.plotting.style import (
         apply_paper_plot_style,
+        label_adapted,
+        label_genie,
+        label_no_adaptation,
         save_figure,
         WINDOW_XLABEL,
         RMSPE_LABEL,
@@ -216,6 +223,9 @@ def plot_averaged_online_learning_results(
 
     apply_paper_plot_style()
     logger = logging.getLogger(__name__)
+    _no_adapt = label_no_adaptation(model_type)
+    _adapted = label_adapted(model_type)
+    _genie = label_genie()
     logger.info("Creating averaged online learning results plot...")
     
     os.makedirs(output_dir, exist_ok=True)
@@ -292,19 +302,19 @@ def plot_averaged_online_learning_results(
     ax1 = fig1.add_subplot(111)
     if pretrained_main_losses and pretrained_window_indices:
         ax1.plot(pretrained_window_indices, pretrained_main_losses, 'b-', linewidth=3, 
-                label='Pretrained Model', marker='o', markersize=6)
+                label=_no_adapt, marker='o', markersize=6)
     if online_main_losses and online_window_indices:
         ax1.plot(online_window_indices, online_main_losses, 'r-', linewidth=3, 
-                label='Algorithm 1', marker='s', markersize=6)
+                label=_adapted, marker='s', markersize=6)
     if supervised_main_losses and supervised_window_indices:
         ax1.plot(supervised_window_indices, supervised_main_losses, 'g-', linewidth=3, 
-                label='Supervised Trained Model', marker='^', markersize=6)
+                label=_genie, marker='^', markersize=6)
     
     _add_phase_markers(ax1)
     
     ax1.set_xlabel(WINDOW_XLABEL, fontsize=13)
     ax1.set_ylabel(RMSPE_LABEL, fontsize=13)
-    ax1.set_title("Supervised RMSPE (pretrained vs online)", fontsize=14, fontweight="bold")
+    ax1.set_title("Supervised RMSPE (no adaptation vs adapted)", fontsize=14, fontweight="bold")
     ax1.grid(True, alpha=0.3)
     ax1.tick_params(axis='both', which='major', labelsize=16)
     # Set x-axis range dynamically based on available data
@@ -328,16 +338,16 @@ def plot_averaged_online_learning_results(
     ax2 = fig2.add_subplot(111)
     if pretrained_training_losses and pretrained_window_indices:
         ax2.plot(pretrained_window_indices, pretrained_training_losses, 'b-', linewidth=3, 
-                label='Pretrained Model', marker='o', markersize=6)
+                label=_no_adapt, marker='o', markersize=6)
     if online_training_losses and online_window_indices_msie:
         ax2.plot(online_window_indices_msie, online_training_losses, 'r-', linewidth=3, 
-                label='Algorithm 1', marker='s', markersize=6)
+                label=_adapted, marker='s', markersize=6)
     
     _add_phase_markers(ax2)
     
     ax2.set_xlabel(WINDOW_XLABEL, fontsize=13)
     ax2.set_ylabel(MSIE_LABEL, fontsize=13)
-    ax2.set_title("Unsupervised MSIE (pretrained vs online)", fontsize=14, fontweight="bold")
+    ax2.set_title("Unsupervised MSIE (no adaptation vs adapted)", fontsize=14, fontweight="bold")
     ax2.grid(True, alpha=0.3)
     ax2.tick_params(axis='both', which='major', labelsize=16)
     # Set x-axis range dynamically based on available data (same as ax1)
@@ -397,6 +407,8 @@ def plot_averaged_kf_gain_comparison(
         RMSPE_LABEL,
         WINDOW_XLABEL,
         apply_paper_plot_style,
+        label_adapted,
+        label_no_adaptation,
         model_display_label,
         save_figure,
         style_axes,
@@ -405,6 +417,8 @@ def plot_averaged_kf_gain_comparison(
     apply_paper_plot_style()
     logger = logging.getLogger(__name__)
     model_name = model_display_label(model_type)
+    _no_adapt = label_no_adaptation(model_type)
+    _adapted = label_adapted(model_type)
 
     pretrained_indices = averaged_pretrained_metrics.get("window_indices", [])
     pretrained_pre_ekf = averaged_pretrained_metrics.get("pre_ekf_losses", [])
@@ -473,11 +487,11 @@ def plot_averaged_kf_gain_comparison(
     if online_indices and online_pre_ekf and online_ekf:
         ax1.plot(
             online_indices, online_pre_ekf, color='cornflowerblue', linewidth=2, linestyle='--',
-            label=f'Algorithm 1 {model_name}-only', marker='^', markersize=5,
+            label=f'{_adapted} {model_name}-only', marker='^', markersize=5,
         )
         ax1.plot(
             online_indices, online_ekf, color='salmon', linewidth=2, linestyle='--',
-            label='Algorithm 1 EKF posterior', marker='v', markersize=5,
+            label=f'{_adapted} EKF posterior', marker='v', markersize=5,
         )
     _add_phase_markers(ax1)
     style_axes(
@@ -492,14 +506,14 @@ def plot_averaged_kf_gain_comparison(
     pretrained_gain = np.array(pretrained_pre_ekf) - np.array(pretrained_ekf)
     ax2.plot(
         pretrained_indices, pretrained_gain, 'g-', linewidth=3,
-        label='Pretrained KF gain (pre-EKF − EKF)', marker='d', markersize=6,
+        label=f'{_no_adapt} KF gain (pre-EKF − EKF)', marker='d', markersize=6,
     )
     ax2.axhline(y=0.0, color='black', linestyle='-', alpha=0.3, linewidth=1)
     if online_indices and online_pre_ekf and online_ekf:
         online_gain = np.array(online_pre_ekf) - np.array(online_ekf)
         ax2.plot(
             online_indices, online_gain, color='darkgreen', linewidth=2, linestyle='--',
-            label='Algorithm 1 KF gain', marker='x', markersize=6,
+            label=f'{_adapted} KF gain', marker='x', markersize=6,
         )
     _add_phase_markers(ax2)
     style_axes(

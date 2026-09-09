@@ -9,28 +9,37 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from utils.plotting.style import FIG_WIDE, PLOT_COLORS, apply_paper_plot_style, save_figure, style_axes
+from utils.plotting.style import (
+    FIG_WIDE,
+    PLOT_COLORS,
+    apply_paper_plot_style,
+    label_adapted,
+    label_genie,
+    label_no_adaptation,
+    save_figure,
+    style_axes,
+)
 from utils.plotting.sweeps import SCENARIO_AXIS_LABELS
 
 logger = logging.getLogger("SubspaceNet.plotting.benchmark_pair")
 
 BENCHMARK_ARMS = ("no_adapt", "unsupervised_ours", "supervised_genie")
 ARM_LABELS = {
-    "no_adapt": "Pretrained (no adapt)",
-    "unsupervised_ours": "Online adapted",
-    "supervised_genie": "Supervised genie",
+    "no_adapt": label_no_adaptation("SubspaceNet"),
+    "unsupervised_ours": label_adapted("SubspaceNet"),
+    "supervised_genie": label_genie(),
 }
 MODEL_LABELS = {
     "subspacenet": "SubspaceNet",
     "deepcnn": "DeepCNN",
 }
 PRETRAINED_LABELS = {
-    "subspacenet": "SubspaceNet",
-    "deepcnn": "DeepCNN",
+    "subspacenet": label_no_adaptation("SubspaceNet"),
+    "deepcnn": label_no_adaptation("DeepCNN"),
 }
 ONLINE_LABELS = {
-    "subspacenet": "Online adapted SubspaceNet",
-    "deepcnn": "Online adapted DeepCNN",
+    "subspacenet": label_adapted("SubspaceNet"),
+    "deepcnn": label_adapted("DeepCNN"),
 }
 MODEL_MARKERS = {
     "subspacenet": "o",

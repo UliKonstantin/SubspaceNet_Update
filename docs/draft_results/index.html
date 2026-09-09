@@ -137,17 +137,26 @@
     <main>
       <section class="panel active" data-panel="overview">
         <div class="card">
-          <h2>T1 — Antenna count sweep (SubspaceNet) <span class="tag tag-smoke">smoke ds=3</span></h2>
-          <p>Online learning under calibrated-model mismatch (η jump to 0.9 @ w40) while sweeping array size N ∈ {6, 9, 12, 18}. M=3, SNR=10 dB, stride=1, 3 trajectories × 200 windows.</p>
+          <h2>T1 — Antenna count sweep (SubspaceNet) <span class="tag tag-smoke">smoke ds=3 — NOT FINAL</span></h2>
+          <p>Online learning under η jump to 0.9 @ w40, N ∈ {6, 9, 12, 18}. Source run: <code>T1_final_recipe</code> (dG0=7.5, ds=3, all N including N=12).</p>
           <h3>Findings</h3>
           <ul class="compact">
-            <li><strong>N=9</strong>: strongest win — ours 0.029→0.024 vs no_adapt 0.093→0.131 post-η.</li>
-            <li><strong>N=6</strong>: ours 0.076→0.063 vs no_adapt 0.067→0.104.</li>
-            <li><strong>N=18 @ η=0.9</strong>: no_adapt 0.067→0.046 already good; ours slightly worse (0.051→0.049).</li>
-            <li><strong>Genie handoff fix</strong> at drift latch improved supervised genie on all N.</li>
-            <li><strong>Adaptive LR</strong>: dG0=14.5 pinned LR to ~5e-4; retuned dG0=7.5 → LR 0.004–0.02 (verified N=9).</li>
-            <li><strong>DeepCNN</strong> 3-traj N=9: online hurts (0.143→0.164 vs no_adapt 0.039→0.057) — needs fix before paper arm.</li>
+            <li><strong>N=6</strong>: moderate win — ours 0.076→0.063 vs no_adapt 0.067→0.104 (handoff smoke).</li>
+            <li><strong>N=9</strong>: strongest win — ours 0.029→0.024 vs no_adapt 0.093→0.131.</li>
+            <li><strong>N=12</strong>: missing from <code>T1_eta40_handoff_fix</code> (no N12 ckpt at run time). Included in <code>T1_final_recipe</code> rerun.</li>
+            <li><strong>N=18 @ η=0.9</strong>: no_adapt 0.067→0.046; ours flat/worse — EKF self-heal regime.</li>
+            <li><strong>Adaptive LR vs N</strong>: LR is <em>not</em> a function of N directly — see below. N=9 gets lowest dG → LR ~5.5e-4 (near floor) despite needing adaptation most.</li>
           </ul>
+          <h3>Adaptive LR — drift magnitude, not antenna count (but N couples in via loss)</h3>
+          <p>Formula: <code>dG = G_t − baseline_mean</code> on the <strong>unsupervised adaptation-loss</strong> GLRT series, then sigmoid(dG; dG0=7.5) → LR. N is not an input.</p>
+          <p><strong>T1_final_recipe</strong> (3 traj × 4 N), mean dG at z-trigger:</p>
+          <ul class="compact">
+            <li>N=6: dG≈7.7 → LR 1e-3–1.7e-2</li>
+            <li>N=9: dG≈<strong>3.0</strong> → LR <strong>5.5e-4</strong> (floor) — training-N model: η jump produces smaller unsupervised loss changepoint</li>
+            <li>N=12: dG≈6.0 → LR 5e-4–9e-3</li>
+            <li>N=18: dG≈8.9 → LR 1e-3–1.9e-2</li>
+          </ul>
+          <p>So N-dependent LR is a <strong>proxy artifact</strong>: array/model mismatch changes the adaptation-loss GLRT amplitude, not η alone. Fix options: map LR from z-score or reference-metric GLRT; normalize dG by baseline_std; or use η-calibrated drift signal only.</p>
         </div>
       </section>
 
@@ -172,23 +181,45 @@
 
       <section class="panel" data-panel="results">
         <div class="result-block">
-          <img src="../../experiments/results/smoke_runs/journal_paper/T1_eta40_handoff_fix/subspacenet/scenario_results_comparison.png" alt="scenario comparison" />
-          <div class="path-line">experiments/results/smoke_runs/journal_paper/T1_eta40_handoff_fix/subspacenet/scenario_results_comparison.png</div>
+          <img src="assets/T1_final_recipe/scenario_results_comparison.png" alt="scenario comparison" />
+          <div class="path-line">experiments/results/smoke_runs/journal_paper/T1_final_recipe/scenario_results_comparison.png</div>
           <p class="finding">Main comparison: reference-metric loss vs window for no_adapt / ours / genie across N.</p>
         </div>
         <div class="result-block">
-          <img src="../../experiments/results/smoke_runs/journal_paper/T1_eta40_handoff_fix/subspacenet/drift_detection_metrics_vs_eta.png" alt="drift metrics" />
-          <div class="path-line">…/drift_detection_metrics_vs_eta.png</div>
-          <p class="finding">GLRT drift diagnostics; detection ~w37–39 with warm18+guard.</p>
+          <img src="assets/T1_final_recipe/antenna_adaptation_improvement_vs_n.png" alt="adaptation improvement vs N" />
+          <div class="path-line">…/T1_final_recipe/antenna_adaptation_improvement_vs_n.png</div>
+          <p class="finding">Δ supervised RMSPE (no-adapt − adapted) on the same post-training window band. N=9 largest gain (~3.1°); N=18 slightly negative (self-heal).</p>
+        </div>
+        <div class="card"><h2>N = 6</h2></div>
+        <div class="result-block">
+          <img src="assets/T1_final_recipe/n_6.0/averaged_online_learning_comparison_main_loss.png" alt="N6 main" />
+          <div class="path-line">…/T1_final_recipe/n_6.0/averaged_online_learning_comparison_main_loss.png</div>
+          <p class="finding">Undersized array vs training N=9: adaptation helps but margin smaller than N=9. no_adapt degrades post-η; ours recovers partially.</p>
         </div>
         <div class="result-block">
-          <img src="../../experiments/results/smoke_runs/journal_paper/T1_eta40_handoff_fix/subspacenet/n_9.0/averaged_online_learning_comparison_main_loss.png" alt="N9 main" />
-          <div class="path-line">…/n_9.0/averaged_online_learning_comparison_main_loss.png</div>
-          <p class="finding">Training-N detail: sharp drop in ours after adaptation; no_adapt degrades under η mismatch.</p>
+          <img src="assets/T1_final_recipe/n_6.0/glrt_adaptation_z_score_averaged.png" alt="N6 z-score" />
+          <div class="path-line">…/T1_final_recipe/n_6.0/glrt_adaptation_z_score_averaged.png</div>
+          <p class="finding">Drift detection fires ~w37; same warm18 timeline as other N.</p>
         </div>
+
+        <div class="card"><h2>N = 9 (training array)</h2></div>
         <div class="result-block">
-          <img src="../../experiments/results/smoke_runs/journal_paper/T1_eta40_handoff_fix/subspacenet/n_18.0/averaged_online_learning_comparison_main_loss.png" alt="N18 main" />
-          <div class="path-line">…/n_18.0/averaged_online_learning_comparison_main_loss.png</div>
+          <img src="assets/T1_final_recipe/n_9.0/averaged_online_learning_comparison_main_loss.png" alt="N9 main" />
+          <div class="path-line">…/T1_final_recipe/n_9.0/averaged_online_learning_comparison_main_loss.png</div>
+          <p class="finding">Best case: sharp drop in ours after adaptation; no_adapt degrades under η mismatch.</p>
+        </div>
+
+        <div class="card"><h2>N = 12</h2></div>
+        <div class="result-block">
+          <img src="assets/T1_final_recipe/n_12.0/averaged_online_learning_comparison_main_loss.png" alt="N12 main" />
+          <div class="path-line">…/T1_final_recipe/n_12.0/averaged_online_learning_comparison_main_loss.png</div>
+          <p class="finding">New N=12 checkpoint; moderate adaptation benefit (~0.6° Δ on post-training band).</p>
+        </div>
+
+        <div class="card"><h2>N = 18</h2></div>
+        <div class="result-block">
+          <img src="assets/T1_final_recipe/n_18.0/averaged_online_learning_comparison_main_loss.png" alt="N18 main" />
+          <div class="path-line">…/T1_final_recipe/n_18.0/averaged_online_learning_comparison_main_loss.png</div>
           <p class="finding">Large-N self-heal: baseline stays low; adaptation unnecessary at η=0.9.</p>
         </div>
       </section>

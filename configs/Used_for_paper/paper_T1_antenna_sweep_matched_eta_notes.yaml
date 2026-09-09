@@ -1,0 +1,32 @@
+###############################################################################
+# T1 matched-degradation η per N (from scripts/calibrate_T1_eta_per_N.py --quick)
+# Target: ~8° sustained supervised RMSPE increase (w80–120 vs w30–39), no-adapt arm.
+#
+# Findings:
+#   N=9  → η≈1.5 gives Δlate≈7.2°, peak≈12° (ONLY N that hits 8°+ sustained at η≤2)
+#   N=6  → η≈2.0 gives Δlate≈4.3°, peak≈9.2°; need η~2.8 extrapolated for 8° late
+#   N=12 → EKF self-heal: Δlate≈0 even at η=2 (peak ~7° transient only)
+#   N=18 → same; negative Δlate at η=0.9–2 (baseline improves post-η)
+#
+# For fair antenna comparison at 8° stress:
+#   Option 1: Use per-N η below + fixed LR (disable adaptive for T1)
+#   Option 2: Report N=12/18 separately as "low-sensitivity" regime; don't force 8°
+#   Option 3: Use Δearly (w45–55) as matched metric — N=9 η=0.9 already +5.4°
+#
+# Example single-N run (N=9, η=1.5, fixed LR):
+#   python3 main_v2.py run -c configs/Used_for_paper/paper_T1_antenna_sweep.yaml \
+#     --goal online_learning --trajectory --sweep 1d --axis n -v 9 \
+#     -O online_learning.max_eta=1.5 -O online_learning.eta_increment=1.5 \
+#     -O online_learning.use_adaptive_learning_rate=false \
+#     -O online_learning.learning_rate=0.003 \
+#     -o experiments/results/smoke_runs/journal_paper/T1_matched_N9_eta15
+###############################################################################
+recommended_eta_by_n:
+  6:  {eta_increment: 2.0,  max_eta: 2.0,  notes: "peak~9°; late~4° at η=2"}
+  9:  {eta_increment: 1.5,  max_eta: 1.5,  notes: "Δlate~7°, peak~12° — best 8°+ candidate"}
+  12: {eta_increment: 4.0,  max_eta: 4.0,  notes: "peak~8° @η=4; Δlate max~1.9° @η=2 — sustained 8° unreachable"}
+  18: {eta_increment: 3.0,  max_eta: 3.0,  notes: "Δlate max~0.9° @η=3; negative late common — self-heal"}
+
+# Extended grid N=12/18: η=2..5 (see T1_eta_calibration_N12_N18_extended/)
+# N=12 peak≥8° only at η=4 (8.04°); Δlate never exceeds ~1.9°
+# N=18 never reaches 8° peak or sustained Δlate even at η=5

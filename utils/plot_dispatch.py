@@ -141,13 +141,31 @@ def _handle_online_learning_grid_4d(ctx: PlotContext) -> None:
 
 
 def _handle_online_learning_one_d_axis(ctx: PlotContext, axis: str) -> None:
-    """Per-axis 1D OL sweep: aggregate plot, iteration subdir plots, results stub."""
+    """Per-axis 1D OL sweep: iteration subdir plots first, then aggregates."""
     from utils.plotting import plot_performance_improvement_table, plot_scenario_results
 
-    plot_scenario_results(ctx.result, ctx.output_dir, scenario_type=axis)
-    if axis == "snr":
-        plot_performance_improvement_table(ctx.result, ctx.output_dir)
+    # Per-N (or per-SNR) plots are required for the author notebook; run before aggregates.
     dispatch_one_d_sweep_iteration_plots(ctx.result, ctx.output_dir, ctx.sim.config, axis)
+
+    for plot_fn, kwargs in (
+        (plot_scenario_results, {"scenario_type": axis}),
+        (plot_performance_improvement_table, {}) if axis == "snr" else (None, None),
+    ):
+        if plot_fn is None:
+            continue
+        try:
+            plot_fn(ctx.result, ctx.output_dir, **kwargs)
+        except Exception as exc:
+            logger.warning("Aggregate plot %s failed: %s", plot_fn.__name__, exc)
+
+    if axis == "n":
+        from utils.plotting.sweeps import plot_antenna_adaptation_improvement
+
+        try:
+            plot_antenna_adaptation_improvement(ctx.result, ctx.output_dir, scenario_type=axis)
+        except Exception as exc:
+            logger.warning("Antenna adaptation improvement plot failed: %s", exc)
+
     _save_scenario_results_stub(ctx.output_dir, ctx.result)
 
 

@@ -36,6 +36,44 @@ RMSPE_LABEL = "RMSPE (supervised)"
 MSIE_LABEL = "MSIE (unsupervised)"
 RMSPE_DB_LABEL = "Mean post-learning RMSPE (dB)"
 
+LABEL_NO_ADAPTATION_SN = "No adaptation SubspaceNet"
+LABEL_ADAPTED_SN = "Adapted SubspaceNet"
+LABEL_GENIE = "Genie (Supervised)"
+LABEL_NO_ADAPTATION_DCNN = "No adaptation DeepCNN"
+LABEL_ADAPTED_DCNN = "Adapted DeepCNN"
+
+
+def _is_deepcnn(model_type: Optional[str]) -> bool:
+    if not model_type:
+        return False
+    normalized = str(model_type).strip().lower().replace("-", "").replace("_", "")
+    return "deepcnn" in normalized
+
+
+def label_no_adaptation(model_type: Optional[str] = None) -> str:
+    """Legend label for the frozen pretrained (no OL) arm."""
+    return LABEL_NO_ADAPTATION_DCNN if _is_deepcnn(model_type) else LABEL_NO_ADAPTATION_SN
+
+
+def label_adapted(model_type: Optional[str] = None) -> str:
+    """Legend label for the online-adapted model arm."""
+    return LABEL_ADAPTED_DCNN if _is_deepcnn(model_type) else LABEL_ADAPTED_SN
+
+
+def label_genie() -> str:
+    return LABEL_GENIE
+
+
+def benchmark_arm_label(arm: str, model_type: Optional[str] = None) -> str:
+    """Map benchmark JSON arm keys to publication plot labels."""
+    if arm == "no_adapt":
+        return label_no_adaptation(model_type)
+    if arm == "unsupervised_ours":
+        return label_adapted(model_type)
+    if arm == "supervised_genie":
+        return label_genie()
+    return arm
+
 
 def model_display_label(model_type: Optional[str]) -> str:
     """Human-readable model name for plot labels."""
