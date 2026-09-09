@@ -99,9 +99,9 @@
             <tr><th>N</th><th>η @ w40</th><th>pre-EKF early (rad)</th><th>pre peak (rad)</th></tr>
             <tr><td>6</td><td>1.0</td><td>0.29</td><td>0.41</td></tr>
             <tr><td>9</td><td>0.9</td><td>0.44</td><td>0.58</td></tr>
-            <tr><td>12</td><td>3.0</td><td>0.29</td><td>0.36</td></tr>
+            <tr><td>12</td><td>6.0</td><td>0.29</td><td>0.37</td></tr>
           </table>
-          <p class="finding">N=12 needs η=3 to match N=6 pre-EKF (~0.29 rad). N=9 remains highest stress at η=0.9. EKF still shaves pre-EKF → use both panels when reading plots.</p>
+          <p class="finding">N=12 at η=6: pre-EKF early ~0.29 rad (plateau — η=3→6 barely changes SubspaceNet stress). N=9 highest at η=0.9 (~0.40 early). EKF still shaves pre-EKF → read both panels.</p>
 
           <h3>Findings (T1_pre_ekf_eta_smoke)</h3>
           <ul class="compact">
@@ -119,7 +119,7 @@
             <dt>YAML</dt><dd>configs/Used_for_paper/paper_T1_antenna_sweep.yaml</dd>
             <dt>Notes</dt><dd>configs/Used_for_paper/paper_T1_pre_ekf_calibration_notes.yaml</dd>
             <dt>Sweep</dt><dd>N ∈ {6, 9, 12} — per-N checkpoints + per-N η</dd>
-            <dt>η by N</dt><dd>scenario_config.eta_increments: [1.0, 0.9, 3.0]</dd>
+            <dt>η by N</dt><dd>scenario_config.eta_increments: [1.0, 0.9, 6.0]</dd>
             <dt>Drift</dt><dd>position_eta, jump @ w40, warmup=18, stride=1</dd>
             <dt>Fixed</dt><dd>M=3, SNR=10, T=200, EKF Q=0.06 R=0.03</dd>
             <dt>Smoke</dt><dd>dataset_size=3, seed=42</dd>
@@ -160,7 +160,7 @@
           <div class="path-line">…/n_9.0/glrt_adaptation_z_score_averaged.png</div>
         </div>
 
-        <div class="card"><h2>N = 12 (η=3.0)</h2></div>
+        <div class="card"><h2>N = 12 (η=6.0)</h2></div>
         <div class="result-block">
           <img src="assets/T1_pre_ekf_eta_smoke/n_12.0/averaged_online_learning_comparison_main_loss.png" alt="N12 main" />
           <div class="path-line">…/n_12.0/averaged_online_learning_comparison_main_loss.png</div>

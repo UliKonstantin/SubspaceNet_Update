@@ -20,7 +20,7 @@
 recommended_eta_pre_ekf_by_n:
   6:  {eta_increment: 1.0,  max_eta: 1.0,  pre_ekf_early_rad: 0.290, notes: "T1_pre_ekf_eta_smoke verified"}
   9:  {eta_increment: 0.9,  max_eta: 0.9,  pre_ekf_early_rad: 0.435, notes: "training-N reference"}
-  12: {eta_increment: 3.0,  max_eta: 3.0,  pre_ekf_early_rad: 0.292, notes: "T1_pre_ekf_eta_smoke verified"}
+  12: {eta_increment: 6.0,  max_eta: 6.0,  pre_ekf_early_rad: 0.294, notes: "η=3→6 plateau on pre-EKF; active protocol"}
 
 # Wired in paper_T1_antenna_sweep.yaml → scenario_config.eta_increments / max_etas
 
