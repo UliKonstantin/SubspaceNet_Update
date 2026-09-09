@@ -26,6 +26,7 @@ train_variant () {
 
 # T1: N sweep (M=3, SNR=10)
 train_variant "N=6 M=3"  6 3 -O system_model.N=6
+train_variant "N=12 M=3" 12 3 -O system_model.N=12
 train_variant "N=18 M=3" 18 3 -O system_model.N=18
 
 # T3: M sweep (N=9, SNR=10)

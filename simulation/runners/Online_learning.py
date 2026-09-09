@@ -801,10 +801,12 @@ class OnlineLearning:
                     if window_idx >= trigger_window:
                         self.drift_detected = True
                         logger.info(f"Drift detection triggered at window {window_idx} (GLRT detected at window {self.glrt_drift_detection_window} + {time_to_learn} windows delay)")
-                        # Initialize online EKF state with static model's current state
+                        # Seed online + supervised genie EKF tracks from pretrained eval posterior
                         online_last_ekf_predictions = last_ekf_predictions
                         online_last_ekf_covariances = last_ekf_covariances
-                        logger.info(f"Initialized online EKF state with static model's state at window {window_idx}")
+                        supervised_last_ekf_predictions = last_ekf_predictions
+                        supervised_last_ekf_covariances = last_ekf_covariances
+                        logger.info(f"Initialized online and supervised EKF handoff from pretrained track at window {window_idx}")
                 
                 # Update last predictions and covariances for next window
                 last_ekf_predictions = window_result.doa_metrics.ekf_predictions
@@ -931,7 +933,7 @@ class OnlineLearning:
             # Save final model if online training was performed
             if self.online_training_count > 0:
                 model_save_path = save_model_state(
-                    self.trained_model,
+                    self.online_model,
                     self.output_dir,
                     model_type=f"{self.config.model.type}_online_updated"
                 )

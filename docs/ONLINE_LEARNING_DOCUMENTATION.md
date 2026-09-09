@@ -8,7 +8,8 @@
 5. [GLRT Drift Detection](#glrt-drift-detection)
 6. [Adaptive Learning Rate](#adaptive-learning-rate)
 7. [Dynamic Eta Updates](#dynamic-eta-updates)
-8. [Examples](#examples)
+8. [EKF Handoff Across Windows and Arms](#ekf-handoff-across-windows-and-arms)
+9. [Examples](#examples)
 
 ---
 
@@ -578,6 +579,35 @@ online_learning:
 1. **Gradual Calibration Drift**: Simulate slow degradation over time
 2. **Sudden Calibration Change**: Large increment to test quick adaptation
 3. **Eta Sweep Scenarios**: Set `eta_increment = target_value` and `max_eta = target_value` for discrete jumps
+
+---
+
+## EKF Handoff Across Windows and Arms
+
+Cross-window continuity uses **posterior snapshots**, not persistent filter objects. See `utils/ekf_handoff.py` and `_initialize_ekf_state()` in `Online_learning.py`.
+
+### What is transferred between windows
+
+| Carried forward (tensors) | Re-created each window (same config values) |
+|---------------------------|---------------------------------------------|
+| Posterior state **x** | New `ExtendedKalmanFilter1D` instances |
+| Posterior covariance **P** | Measurement noise **R**, process model **Q** |
+| Motion-model time index (`reset_time`) | Default **P0** (overwritten by handoff when handoff exists) |
+
+At step 0 of window `w > 0`, handoff restores `(x, P)` from the overlap step of the previous window’s eval (`ekf_handoff_step_index(stride, prev_window_len)`).
+
+### Pretrained vs latch vs adapt vs post-adapt
+
+1. **Pre-drift (pretrained arm)**: Each window builds new filters; `last_ekf_*` tensors chain the pretrained track.
+2. **Drift latch** (`w = w* + time_to_learn`): `online_last_ekf_*` and `supervised_last_ekf_*` are seeded from the pretrained `last_ekf_*` **before** that window’s pretrained result is written — i.e. the same boundary posterior the pretrained arm uses at step 0 of window `w`.
+3. **During adaptation**: Cross-window continuity is preserved via **post-train eval** outputs → `online_last_ekf_*` / `supervised_last_ekf_*`. There is **no reset** at end of adaptation; post-adapt eval continues the same chain.
+4. **Within one adapt window**: `training_ekf_filters` are rolled during GD then discarded. Logged metrics come from a **separate post-train eval** rollout with updated weights and **window-entry** handoff (not the end state of the training rollout).
+
+### Comparison fairness
+
+- **Pretrained @ window `w` vs online @ window `w`**: Share the **same handoff seed** at the window boundary; they **diverge within** the window (frozen vs adapting network).
+- **Online vs supervised genie**: Must receive the **same latch seed** from the pretrained track (implemented at drift latch).
+- **Do not** reset EKF to ground truth or `P0` between adapt windows unless intentionally ablating continuity.
 
 ---
 

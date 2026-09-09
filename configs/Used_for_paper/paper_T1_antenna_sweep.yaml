@@ -1,8 +1,8 @@
 ###############################################################################
 # PF-06 / PF-05 — T1 antenna sweep (M=3, snr=10 fixed)
 # Thin:  --sweep 1d --axis n -v 9  → smoke_runs/journal_paper/T1
-# Full:  -v 6 -v 9 -v 18           → journal_paper/paper_T1_antenna
-# N=6,18 checkpoints: train via PF-07 (paths below are placeholders until then)
+# Full:  -v 6 -v 9 -v 12 -v 18      → journal_paper/paper_T1_antenna
+# N=6,12,18 checkpoints: train via scripts/train_journal_base_checkpoints.sh (PF-07)
 ###############################################################################
 system_model:
   N: 9
@@ -87,24 +87,26 @@ kalman_filter:
 
 scenario_config:
   type: "n"
-  values: [6, 9, 18]
+  values: [6, 9, 12, 18]
   model_paths:
     - "experiments/results/basemodels_for_journal_paper/subspacenet/N6_M3_SNR10.0/checkpoints/final_SubspaceNet_20260818_173845.pt"
     - "experiments/results/basemodels_for_journal_paper/subspacenet/snr_10.0/checkpoints/final_SubspaceNet_20250916_084930.pt"
+    - "experiments/results/basemodels_for_journal_paper/subspacenet/N12_M3_SNR10.0/checkpoints/final_SubspaceNet_20260909_101914.pt"
     - "experiments/results/basemodels_for_journal_paper/subspacenet/N18_M3_SNR10.0/checkpoints/final_SubspaceNet_20260818_184907.pt"
   retrain_model: false
 
 online_learning:
   enabled: true
   window_size: 5
-  stride: 3
+  stride: 1
   loss_threshold: 0.2
-  max_iterations: 2
+  max_iterations: 2  # legacy/unused; see num_gd_steps + adaptation_window_count
   learning_rate: 0.001
   trajectory_length: 200
-  dataset_size: 1
+  dataset_size: 3
   use_adaptive_learning_rate: true
-  drift_warmup_windows: 10
+  # Drift timeline (stride=1): warmup=18 → first_g@28, first_z@37; eta jump@40; train@w*+2 (~39+)
+  drift_warmup_windows: 18
   drift_guard_samples: 3
   drift_z_threshold: 2.5
   drift_recent_tau_k: 12
@@ -115,7 +117,7 @@ online_learning:
   adaptive_lr_dG0: 14.5
   num_gd_steps: 3
   enable_lr_sweep: false
-  eta_update_interval_windows: 32
+  eta_update_interval_windows: 40
   eta_increment: 0.9
   max_eta: 0.9
   min_eta: 0.0
