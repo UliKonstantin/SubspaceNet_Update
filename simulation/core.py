@@ -1246,6 +1246,14 @@ class Simulation:
                     ]
                 else:
                     overrides = [system_model_override_for_axis(scenario_type, value)]
+
+                eta_inc, max_eta = self._per_scenario_eta_overrides(i)
+                if eta_inc is not None:
+                    overrides.extend([
+                        "online_learning.drift_type=position_eta",
+                        f"online_learning.eta_increment={eta_inc}",
+                        f"online_learning.max_eta={max_eta if max_eta is not None else eta_inc}",
+                    ])
                 
                 overrides.append(self._resolve_model_path_override(model_paths, retrain_model, i, value))
                 
@@ -1330,6 +1338,19 @@ class Simulation:
         with open(json_path, 'w') as f:
             json.dump(serializable_dicts, f, indent=2)
         logger.info(f"Saved {len(all_drift_detection_dicts)} drift detection dicts to {json_path}")
+
+    def _per_scenario_eta_overrides(self, iteration_idx: int) -> tuple:
+        """Return (eta_increment, max_eta) for sweep iteration when configured."""
+        scenario_cfg = getattr(self.config, "scenario_config", None)
+        if not scenario_cfg or not getattr(scenario_cfg, "eta_increments", None):
+            return None, None
+        eta_increments = scenario_cfg.eta_increments
+        if iteration_idx >= len(eta_increments):
+            return None, None
+        eta_inc = eta_increments[iteration_idx]
+        max_etas = getattr(scenario_cfg, "max_etas", None)
+        max_eta = max_etas[iteration_idx] if max_etas else eta_inc
+        return eta_inc, max_eta
 
     def _model_path_index_for_scenario_value(self, scenario_value) -> Optional[int]:
         """Map a swept scenario value to its index in scenario_config.values."""

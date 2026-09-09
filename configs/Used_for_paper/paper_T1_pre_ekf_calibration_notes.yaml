@@ -1,0 +1,32 @@
+###############################################################################
+# T1 pre-EKF stress calibration (ds=1, seed=42, w45-55 vs w30-39 on no_adapt arm)
+#
+# Key insight (T1_final_recipe, position η=0.9):
+#   N=6/9: pre-EKF jumps to ~0.28–0.47 rad → EKF drops ~0.2 → SubspaceNet must learn rest
+#   N=12/18: pre-EKF only ~0.10–0.15 rad → EKF alone sufficient, OL unnecessary
+#
+# Spacing-scale drift (REJECTED for T1):
+#   ε=3%:  pre-EKF Δearly ≈ +0.004 rad (invisible — user observation confirmed)
+#   ε=50%: pre-EKF early ≈ 0.09–0.13 rad ALL N — still << η=0.9 on N=9 (0.47)
+#   SubspaceNet+ESPRIT nearly insensitive to multiplicative spacing vs random position η
+#
+# Position η — pre-EKF early (rad) by N and η jump:
+#   N=9  η=0.9 → 0.467  (reference stress level)
+#   N=6  η=0.9 → 0.283
+#   N=12 η=3  → 0.308   η=6 → 0.323  (can approach N=9 stress)
+#   N=18 η=5  → 0.214   η=10 → 0.202  (CEILING ~0.22 — cannot reach 0.35)
+#
+# Active T1 protocol (N=18 dropped — pre-EKF ceiling ~0.22 even at η=10):
+recommended_eta_pre_ekf_by_n:
+  6:  {eta_increment: 1.0,  max_eta: 1.0,  pre_ekf_early_rad: 0.290, notes: "T1_pre_ekf_eta_smoke verified"}
+  9:  {eta_increment: 0.9,  max_eta: 0.9,  pre_ekf_early_rad: 0.435, notes: "training-N reference"}
+  12: {eta_increment: 3.0,  max_eta: 3.0,  pre_ekf_early_rad: 0.292, notes: "T1_pre_ekf_eta_smoke verified"}
+
+# Wired in paper_T1_antenna_sweep.yaml → scenario_config.eta_increments / max_etas
+
+# Paper implication: characterize stress on PRE-EKF supervised RMSPE; EKF plots are downstream.
+
+calibration_runs:
+  active_smoke: experiments/results/smoke_runs/journal_paper/T1_pre_ekf_eta_smoke/
+  pre_ekf_eta_cal: experiments/results/smoke_runs/journal_paper/T1_pre_ekf_cal/
+  legacy_uniform_eta09: experiments/results/smoke_runs/journal_paper/T1_final_recipe/

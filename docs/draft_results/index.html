@@ -6,127 +6,72 @@
   <title>Journal Paper — Draft Results (Author)</title>
   <style>
     :root {
-      --bg: #0f1117;
-      --surface: #1a1d27;
-      --surface2: #232735;
-      --border: #2e3344;
-      --text: #e8eaef;
-      --muted: #9aa3b2;
-      --accent: #6c9eff;
-      --accent2: #8b5cf6;
-      --ok: #34d399;
-      --warn: #fbbf24;
-      --radius: 12px;
-      --shadow: 0 8px 32px rgba(0,0,0,.35);
+      --bg: #0f1117; --surface: #1a1d27; --surface2: #232735; --border: #2e3344;
+      --text: #e8eaef; --muted: #9aa3b2; --accent: #6c9eff; --accent2: #8b5cf6;
+      --warn: #fbbf24; --radius: 12px; --shadow: 0 8px 32px rgba(0,0,0,.35);
     }
     * { box-sizing: border-box; }
     body {
-      margin: 0;
-      font-family: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+      margin: 0; font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
       background: radial-gradient(1200px 600px at 10% -10%, #1a2240 0%, var(--bg) 55%);
-      color: var(--text);
-      line-height: 1.55;
-      min-height: 100vh;
+      color: var(--text); line-height: 1.55; min-height: 100vh;
     }
     header {
-      padding: 1.5rem 2rem 1rem;
-      border-bottom: 1px solid var(--border);
-      backdrop-filter: blur(8px);
-      position: sticky; top: 0; z-index: 10;
+      padding: 1.5rem 2rem 1rem; border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(8px); position: sticky; top: 0; z-index: 10;
       background: rgba(15,17,23,.85);
     }
     header h1 { margin: 0 0 .25rem; font-size: 1.35rem; font-weight: 650; }
     header p { margin: 0; color: var(--muted); font-size: .92rem; }
     .test-tabs, .sub-tabs {
-      display: flex; gap: .35rem; flex-wrap: wrap;
-      padding: .75rem 2rem;
-      border-bottom: 1px solid var(--border);
-      background: var(--surface);
+      display: flex; gap: .35rem; flex-wrap: wrap; padding: .75rem 2rem;
+      border-bottom: 1px solid var(--border); background: var(--surface);
     }
     .test-tabs button, .sub-tabs button {
-      border: 1px solid var(--border);
-      background: var(--surface2);
-      color: var(--muted);
-      padding: .45rem .9rem;
-      border-radius: 999px;
-      cursor: pointer;
-      font-size: .85rem;
-      transition: .15s ease;
+      border: 1px solid var(--border); background: var(--surface2); color: var(--muted);
+      padding: .45rem .9rem; border-radius: 999px; cursor: pointer; font-size: .85rem;
     }
     .test-tabs button.active {
       background: linear-gradient(135deg, var(--accent), var(--accent2));
       color: #fff; border-color: transparent;
     }
-    .sub-tabs button.active {
-      color: var(--text);
-      border-color: var(--accent);
-      box-shadow: inset 0 0 0 1px rgba(108,158,255,.25);
-    }
-    .sub-tabs button.disabled { opacity: .45; cursor: not-allowed; }
+    .sub-tabs button.active { color: var(--text); border-color: var(--accent); }
     main { padding: 1.5rem 2rem 3rem; max-width: 1100px; }
-    .panel { display: none; animation: fade .25s ease; }
-    .panel.active { display: block; }
-    @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    .panel { display: none; } .panel.active { display: block; }
     .card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 1.25rem 1.35rem;
-      margin-bottom: 1rem;
-      box-shadow: var(--shadow);
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 1.25rem 1.35rem; margin-bottom: 1rem; box-shadow: var(--shadow);
     }
     .card h2 { margin: 0 0 .75rem; font-size: 1.05rem; }
     .card h3 { margin: 1rem 0 .5rem; font-size: .95rem; color: var(--accent); }
     dl { display: grid; grid-template-columns: 220px 1fr; gap: .35rem .75rem; margin: 0; font-size: .9rem; }
     dt { color: var(--muted); }
-    dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; }
+    dd { margin: 0; font-family: ui-monospace, Menlo, monospace; font-size: .85rem; }
     .result-block {
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 1rem;
-      margin-bottom: 1.25rem;
+      background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 1rem; margin-bottom: 1.25rem;
     }
-    .result-block img {
-      width: 100%; height: auto; border-radius: 8px;
-      border: 1px solid var(--border);
-      background: #fff;
-    }
-    .path-line {
-      font-family: ui-monospace, Menlo, monospace;
-      font-size: .78rem;
-      color: var(--muted);
-      word-break: break-all;
-      margin: .5rem 0;
-    }
+    .result-block img { width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--border); background: #fff; }
+    .path-line { font-family: ui-monospace, Menlo, monospace; font-size: .78rem; color: var(--muted); word-break: break-all; margin: .5rem 0; }
     .finding { font-size: .92rem; margin: .5rem 0 0; }
     .tag { display: inline-block; padding: .15rem .55rem; border-radius: 999px; font-size: .72rem; font-weight: 600; }
     .tag-smoke { background: rgba(251,191,36,.15); color: var(--warn); }
     ul.compact { margin: .25rem 0; padding-left: 1.1rem; font-size: .9rem; }
     ul.paths { list-style: none; padding: 0; margin: 0; }
     ul.paths li {
-      padding: .45rem .6rem;
-      border-bottom: 1px solid var(--border);
-      font-family: ui-monospace, Menlo, monospace;
-      font-size: .78rem;
-      word-break: break-all;
+      padding: .45rem .6rem; border-bottom: 1px solid var(--border);
+      font-family: ui-monospace, Menlo, monospace; font-size: .78rem; word-break: break-all;
     }
-    ul.paths li:last-child { border-bottom: none; }
+    table.mini { width: 100%; border-collapse: collapse; font-size: .85rem; margin: .5rem 0; }
+    table.mini th, table.mini td { border: 1px solid var(--border); padding: .35rem .5rem; text-align: left; }
+    table.mini th { color: var(--muted); font-weight: 500; }
     .placeholder { color: var(--muted); font-style: italic; padding: 2rem; text-align: center; }
-    .drift-illustration {
-      width: 100%; max-width: 920px; height: auto;
-      border-radius: 8px; border: 1px solid var(--border);
-      background: #f8fafc; margin: .75rem 0;
-    }
-    .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: .75rem; }
-    @media (max-width: 720px) { .compare-grid { grid-template-columns: 1fr; } }
-    .compare-grid .mini { font-size: .85rem; color: var(--muted); margin: 0; }
   </style>
 </head>
 <body>
   <header>
     <h1>Draft Results Notebook</h1>
-    <p>Author-facing aggregation of finalized journal tests — not for publication. Open from repo root so plot paths resolve.</p>
+    <p>Open <code>docs/draft_results/index.html</code> in a browser (images load from <code>docs/draft_results/assets/</code>).</p>
   </header>
 
   <nav class="test-tabs" id="testTabs">
@@ -145,47 +90,25 @@
     <main>
       <section class="panel active" data-panel="overview">
         <div class="card">
-          <h2>T1 — Antenna count sweep (SubspaceNet) <span class="tag tag-smoke">smoke ds=3 — NOT FINAL</span></h2>
-          <p>Online learning under calibration drift @ w40, N ∈ {6, 9, 12, 18}. <strong>Current protocol:</strong> spacing-scale jump 1.0→1.03 (<code>T1_spacing_scale_smoke</code>). Legacy position-η runs kept under <code>T1_final_recipe</code>.</p>
+          <h2>T1 — Antenna sweep (SubspaceNet) <span class="tag tag-smoke">smoke ds=3</span></h2>
+          <p><strong>Current protocol:</strong> N ∈ {6, 9, 12} only (N=18 dropped). Position-η jump @ w40 with <strong>per-N η tuned on pre-EKF</strong> early stress (w45–55). Run: <code>T1_pre_ekf_eta_smoke</code>.</p>
 
-          <h3>Calibration drift — why spacing scale (Option B)</h3>
-          <img class="drift-illustration" src="assets/spacing_scale_drift.svg" alt="Position eta vs spacing-scale drift" />
-          <div class="compare-grid">
-            <div>
-              <p class="mini"><strong>Position η</strong> — random per-sensor offsets δ<sub>n</sub>∈[−ηλ,+ηλ]. Differential, ~zero-mean → subspace averaging + EKF smoothing made N=12/18 look like “self-heal” (no sustained supervised hit even at η=5).</p>
-            </div>
-            <div>
-              <p class="mini"><strong>Spacing scale ε</strong> — global d′=(1+ε)d on every element. Coherent manifold warp → DOA bias that does <em>not</em> average out with N. Same ε stresses all apertures comparably; snapshots regenerated after w40 for eval, no-adapt, unsupervised, and genie arms.</p>
-            </div>
-          </div>
-          <ul class="compact">
-            <li><code>drift_type: spacing_scale</code>, <code>spacing_scale_increment: 0.03</code>, jump @ w40, η disabled (0).</li>
-            <li>Pipeline: <code>SystemModelParams.spacing_scale</code> → steering positions → snapshot synthesis → SubspaceNet → EKF (all arms share one generator).</li>
-          </ul>
+          <h3>Drift model</h3>
+          <p>Random per-sensor position calibration error (not spacing-scale — rejected: does not move SubspaceNet pre-EKF). Stress is characterized by <strong>pre-EKF supervised RMSPE</strong>: SubspaceNet raw output before EKF smoothing.</p>
+          <table class="mini">
+            <tr><th>N</th><th>η @ w40</th><th>pre-EKF early (rad)</th><th>pre peak (rad)</th></tr>
+            <tr><td>6</td><td>1.0</td><td>0.29</td><td>0.41</td></tr>
+            <tr><td>9</td><td>0.9</td><td>0.44</td><td>0.58</td></tr>
+            <tr><td>12</td><td>3.0</td><td>0.29</td><td>0.36</td></tr>
+          </table>
+          <p class="finding">N=12 needs η=3 to match N=6 pre-EKF (~0.29 rad). N=9 remains highest stress at η=0.9. EKF still shaves pre-EKF → use both panels when reading plots.</p>
 
-          <h3>Findings (legacy position η — T1_final_recipe)</h3>
+          <h3>Findings (T1_pre_ekf_eta_smoke)</h3>
           <ul class="compact">
-            <li><strong>N=9</strong>: strongest win under η=0.9 — largest adaptation margin.</li>
-            <li><strong>N=12/18</strong>: flat/negative Δlate under position η — low-sensitivity regime (motivated spacing-scale switch).</li>
-            <li><strong>Adaptive LR vs N</strong>: LR driven by unsupervised GLRT dG, not N directly — N=9 often pinned to floor.</li>
+            <li>All three N now show meaningful pre-EKF spike post-drift (not the N=12/18 “EKF-only” regime at uniform η=0.9).</li>
+            <li>EKF late supervised (w80–120): N=9 +5.2°, N=6 +3.5°, N=12 +2.4° vs pre — sustained EKF stress on matched protocol.</li>
+            <li>Adaptation should close gap between no-adapt EKF and ours — see Results tab.</li>
           </ul>
-          <h3>Findings (spacing-scale — T1_spacing_scale_smoke)</h3>
-          <ul class="compact" id="spacingScaleFindings">
-            <li><strong>Single jump</strong> 1.0→1.03 @ w40 (<code>max_spacing_scale=1.03</code> blocks repeat @ w80).</li>
-            <li><strong>Early post-drift (w45–55) Δ vs pre:</strong> N=9 +1.1°, N=12 +1.1°, N=18 +0.9°, N=6 flat — large-N matched stress (fixes position-η self-heal).</li>
-            <li><strong>Late (w80–120)</strong> still trends down on no-adapt (trajectory/EKF segment); use early band for matched degradation.</li>
-            <li>Verify: <code>python3 scripts/verify_T1_spacing_scale_smoke.py</code></li>
-          </ul>
-          <h3>Adaptive LR — drift magnitude, not antenna count (but N couples in via loss)</h3>
-          <p>Formula: <code>dG = G_t − baseline_mean</code> on the <strong>unsupervised adaptation-loss</strong> GLRT series, then sigmoid(dG; dG0=7.5) → LR. N is not an input.</p>
-          <p><strong>T1_final_recipe</strong> (3 traj × 4 N), mean dG at z-trigger:</p>
-          <ul class="compact">
-            <li>N=6: dG≈7.7 → LR 1e-3–1.7e-2</li>
-            <li>N=9: dG≈<strong>3.0</strong> → LR <strong>5.5e-4</strong> (floor) — training-N model: η jump produces smaller unsupervised loss changepoint</li>
-            <li>N=12: dG≈6.0 → LR 5e-4–9e-3</li>
-            <li>N=18: dG≈8.9 → LR 1e-3–1.9e-2</li>
-          </ul>
-          <p>So N-dependent LR is a <strong>proxy artifact</strong>: array/model mismatch changes the adaptation-loss GLRT amplitude, not η alone. Fix options: map LR from z-score or reference-metric GLRT; normalize dG by baseline_std; or use η-calibrated drift signal only.</p>
         </div>
       </section>
 
@@ -194,73 +117,57 @@
           <h2>Paper-relevant configuration</h2>
           <dl>
             <dt>YAML</dt><dd>configs/Used_for_paper/paper_T1_antenna_sweep.yaml</dd>
-            <dt>Model</dt><dd>SubspaceNet (small), ESPRIT, τ=8</dd>
-            <dt>Fixed</dt><dd>M=3, SNR=10 dB, T=200, far-field</dd>
-            <dt>Sweep</dt><dd>N ∈ {6, 9, 12, 18} + per-N checkpoints</dd>
-            <dt>Trajectory</dt><dd>sine_accel_nonlinear, L=200, σ=0.06</dd>
-            <dt>EKF</dt><dd>extended, Q=0.06, R=0.03</dd>
-            <dt>Drift</dt><dd>warmup=18, jump@40, time_to_learn=2, stride=1</dd>
-            <dt>Drift model</dt><dd>spacing_scale: 1.0→1.03 (ε=3%); position η disabled</dd>
-            <dt>Legacy η</dt><dd>η@40 (+0.9) — see T1_final_recipe / matched_eta_notes</dd>
-            <dt>Adapt budget</dt><dd>5 windows × 3 GD steps</dd>
-            <dt>Adaptive LR</dt><dd>min=5e-4, max=2e-2, k=0.7336, dG0=7.5</dd>
+            <dt>Notes</dt><dd>configs/Used_for_paper/paper_T1_pre_ekf_calibration_notes.yaml</dd>
+            <dt>Sweep</dt><dd>N ∈ {6, 9, 12} — per-N checkpoints + per-N η</dd>
+            <dt>η by N</dt><dd>scenario_config.eta_increments: [1.0, 0.9, 3.0]</dd>
+            <dt>Drift</dt><dd>position_eta, jump @ w40, warmup=18, stride=1</dd>
+            <dt>Fixed</dt><dd>M=3, SNR=10, T=200, EKF Q=0.06 R=0.03</dd>
             <dt>Smoke</dt><dd>dataset_size=3, seed=42</dd>
-            <dt>Full</dt><dd>dataset_size=20 → experiments/results/journal_paper/paper_T1_antenna</dd>
+            <dt>Verify</dt><dd>python3 scripts/calibrate_T1_pre_ekf_eta.py &lt;benchmark.json&gt;</dd>
           </dl>
         </div>
       </section>
 
       <section class="panel" data-panel="results">
-        <div class="card">
-          <h2>Spacing-scale smoke (current protocol)</h2>
-          <p>Run: <code>experiments/results/smoke_runs/journal_paper/T1_spacing_scale_smoke/</code></p>
+        <div class="card"><h2>T1_pre_ekf_eta_smoke — aggregate</h2></div>
+        <div class="result-block">
+          <img src="assets/T1_pre_ekf_eta_smoke/scenario_results_comparison.png" alt="scenario comparison" />
+          <div class="path-line">experiments/results/smoke_runs/journal_paper/T1_pre_ekf_eta_smoke/scenario_results_comparison.png</div>
+          <p class="finding">EKF supervised reference metric vs window — no_adapt / Adapted SubspaceNet / Genie.</p>
         </div>
-        <div class="result-block" id="spacingScaleScenarioBlock">
-          <p class="placeholder">Plots will appear after smoke run + plot dispatch.</p>
+        <div class="result-block">
+          <img src="assets/T1_pre_ekf_eta_smoke/antenna_adaptation_improvement_vs_n.png" alt="adaptation vs N" />
+          <div class="path-line">…/T1_pre_ekf_eta_smoke/antenna_adaptation_improvement_vs_n.png</div>
         </div>
 
-        <div class="card"><h2>Legacy position-η smoke (T1_final_recipe)</h2></div>
+        <div class="card"><h2>N = 6 (η=1.0)</h2></div>
         <div class="result-block">
-          <img src="assets/T1_final_recipe/scenario_results_comparison.png" alt="scenario comparison" />
-          <div class="path-line">experiments/results/smoke_runs/journal_paper/T1_final_recipe/scenario_results_comparison.png</div>
-          <p class="finding">Main comparison: reference-metric loss vs window for no_adapt / ours / genie across N.</p>
+          <img src="assets/T1_pre_ekf_eta_smoke/n_6.0/averaged_online_learning_comparison_main_loss.png" alt="N6 main" />
+          <div class="path-line">…/n_6.0/averaged_online_learning_comparison_main_loss.png</div>
         </div>
         <div class="result-block">
-          <img src="assets/T1_final_recipe/antenna_adaptation_improvement_vs_n.png" alt="adaptation improvement vs N" />
-          <div class="path-line">…/T1_final_recipe/antenna_adaptation_improvement_vs_n.png</div>
-          <p class="finding">Δ supervised RMSPE (no-adapt − adapted) on the same post-training window band. N=9 largest gain (~3.1°); N=18 slightly negative (self-heal).</p>
-        </div>
-        <div class="card"><h2>N = 6</h2></div>
-        <div class="result-block">
-          <img src="assets/T1_final_recipe/n_6.0/averaged_online_learning_comparison_main_loss.png" alt="N6 main" />
-          <div class="path-line">…/T1_final_recipe/n_6.0/averaged_online_learning_comparison_main_loss.png</div>
-          <p class="finding">Undersized array vs training N=9: adaptation helps but margin smaller than N=9. no_adapt degrades post-η; ours recovers partially.</p>
-        </div>
-        <div class="result-block">
-          <img src="assets/T1_final_recipe/n_6.0/glrt_adaptation_z_score_averaged.png" alt="N6 z-score" />
-          <div class="path-line">…/T1_final_recipe/n_6.0/glrt_adaptation_z_score_averaged.png</div>
-          <p class="finding">Drift detection fires ~w37; same warm18 timeline as other N.</p>
+          <img src="assets/T1_pre_ekf_eta_smoke/n_6.0/glrt_adaptation_z_score_averaged.png" alt="N6 z-score" />
+          <div class="path-line">…/n_6.0/glrt_adaptation_z_score_averaged.png</div>
         </div>
 
-        <div class="card"><h2>N = 9 (training array)</h2></div>
+        <div class="card"><h2>N = 9 (η=0.9, training array)</h2></div>
         <div class="result-block">
-          <img src="assets/T1_final_recipe/n_9.0/averaged_online_learning_comparison_main_loss.png" alt="N9 main" />
-          <div class="path-line">…/T1_final_recipe/n_9.0/averaged_online_learning_comparison_main_loss.png</div>
-          <p class="finding">Best case: sharp drop in ours after adaptation; no_adapt degrades under η mismatch.</p>
+          <img src="assets/T1_pre_ekf_eta_smoke/n_9.0/averaged_online_learning_comparison_main_loss.png" alt="N9 main" />
+          <div class="path-line">…/n_9.0/averaged_online_learning_comparison_main_loss.png</div>
+        </div>
+        <div class="result-block">
+          <img src="assets/T1_pre_ekf_eta_smoke/n_9.0/glrt_adaptation_z_score_averaged.png" alt="N9 z-score" />
+          <div class="path-line">…/n_9.0/glrt_adaptation_z_score_averaged.png</div>
         </div>
 
-        <div class="card"><h2>N = 12</h2></div>
+        <div class="card"><h2>N = 12 (η=3.0)</h2></div>
         <div class="result-block">
-          <img src="assets/T1_final_recipe/n_12.0/averaged_online_learning_comparison_main_loss.png" alt="N12 main" />
-          <div class="path-line">…/T1_final_recipe/n_12.0/averaged_online_learning_comparison_main_loss.png</div>
-          <p class="finding">New N=12 checkpoint; moderate adaptation benefit (~0.6° Δ on post-training band).</p>
+          <img src="assets/T1_pre_ekf_eta_smoke/n_12.0/averaged_online_learning_comparison_main_loss.png" alt="N12 main" />
+          <div class="path-line">…/n_12.0/averaged_online_learning_comparison_main_loss.png</div>
         </div>
-
-        <div class="card"><h2>N = 18</h2></div>
         <div class="result-block">
-          <img src="assets/T1_final_recipe/n_18.0/averaged_online_learning_comparison_main_loss.png" alt="N18 main" />
-          <div class="path-line">…/T1_final_recipe/n_18.0/averaged_online_learning_comparison_main_loss.png</div>
-          <p class="finding">Large-N self-heal: baseline stays low; adaptation unnecessary at η=0.9.</p>
+          <img src="assets/T1_pre_ekf_eta_smoke/n_12.0/glrt_adaptation_z_score_averaged.png" alt="N12 z-score" />
+          <div class="path-line">…/n_12.0/glrt_adaptation_z_score_averaged.png</div>
         </div>
       </section>
 
@@ -281,30 +188,15 @@
   </div>
 
   <script>
-    const SPACING_SMOKE = "experiments/results/smoke_runs/journal_paper/T1_spacing_scale_smoke";
-    const spacingPlots = [
-      { src: "assets/T1_spacing_scale_smoke/scenario_results_comparison.png", path: `${SPACING_SMOKE}/scenario_results_comparison.png`, caption: "Spacing-scale ε=3% @ w40: all N should show post-drift degradation on no-adapt arm." },
-      { src: "assets/T1_spacing_scale_smoke/antenna_adaptation_improvement_vs_n.png", path: `${SPACING_SMOKE}/antenna_adaptation_improvement_vs_n.png`, caption: "Δ supervised RMSPE vs N under matched coherent drift." },
-    ];
-    fetch(spacingPlots[0].src, { method: "HEAD" }).then(r => {
-      if (!r.ok) return;
-      document.getElementById("spacingScaleScenarioBlock").innerHTML = spacingPlots.map(p =>
-        `<img src="${p.src}" alt="" /><div class="path-line">${p.path}</div><p class="finding">${p.caption}</p>`
-      ).join("");
-    }).catch(() => {});
-
     const PATHS = [
+      "docs/draft_results/index.html",
       "configs/Used_for_paper/paper_T1_antenna_sweep.yaml",
-      SPACING_SMOKE + "/subspacenet/benchmark_metrics.json",
-      "configs/Used_for_paper/paper_T1_antenna_sweep_deepcnn.yaml",
-      "experiments/results/smoke_runs/journal_paper/T1_eta40_handoff_fix/subspacenet/benchmark_metrics.json",
-      "experiments/results/smoke_runs/journal_paper/T1_eta40_handoff_fix/subspacenet/drift_detection_dicts.json",
-      "experiments/results/smoke_runs/journal_paper/T1_adaptive_lr_check_v2/drift_detection_dicts.json",
-      "experiments/results/smoke_runs/journal_paper/T1_deepcnn_3traj_v2/benchmark_metrics.json",
-      "experiments/results/journal_paper/paper_T1_antenna/",
+      "configs/Used_for_paper/paper_T1_pre_ekf_calibration_notes.yaml",
+      "experiments/results/smoke_runs/journal_paper/T1_pre_ekf_eta_smoke/benchmark_metrics.json",
+      "experiments/results/smoke_runs/journal_paper/T1_pre_ekf_eta_smoke/",
+      "scripts/calibrate_T1_pre_ekf_eta.py",
     ];
     document.getElementById("t1Paths").innerHTML = PATHS.map(p => `<li>${p}</li>`).join("");
-
     document.getElementById("testTabs").addEventListener("click", e => {
       const btn = e.target.closest("button[data-test]");
       if (!btn) return;
@@ -316,7 +208,7 @@
     document.querySelectorAll(".sub-tabs").forEach(nav => {
       nav.addEventListener("click", e => {
         const btn = e.target.closest("button[data-panel]");
-        if (!btn || btn.classList.contains("disabled")) return;
+        if (!btn) return;
         nav.querySelectorAll("button").forEach(b => b.classList.remove("active"));
         btn.classList.add("active");
         document.getElementById(nav.dataset.test).querySelectorAll(".panel").forEach(p => {

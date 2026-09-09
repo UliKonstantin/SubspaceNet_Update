@@ -337,7 +337,23 @@ class ScenarioConfig(BaseModel):
     type: str = Field(..., description="Type of scenario to run (e.g., 'SNR', 'T', 'M', 'eta').")
     values: List[float] = Field(..., description="List of values to test for this scenario type.")
     model_paths: Optional[List[str]] = Field(default=None, description="List of model paths for each scenario value (must match values order)")
+    eta_increments: Optional[List[float]] = Field(
+        default=None,
+        description="Per-scenario online_learning.eta_increment (same order as values). For T1 N-sweep: position η jump @ w40.",
+    )
+    max_etas: Optional[List[float]] = Field(
+        default=None,
+        description="Per-scenario online_learning.max_eta (same order as values). Defaults to eta_increments when omitted.",
+    )
     retrain_model: bool = Field(default=False, description="Whether to retrain the model for each scenario value.")
+
+    @model_validator(mode="after")
+    def _validate_per_scenario_eta(self):
+        n = len(self.values)
+        for field_name, field_val in (("eta_increments", self.eta_increments), ("max_etas", self.max_etas)):
+            if field_val is not None and len(field_val) != n:
+                raise ValueError(f"scenario_config.{field_name} length ({len(field_val)}) must match values ({n})")
+        return self
 
 
 class LoggingConfig(BaseModel):
