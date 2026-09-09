@@ -783,41 +783,34 @@ class OnlineLearningTrajectoryGenerator:
         self.current_step_in_session = 0
         # Cached trajectory steps for stride-based sliding windows: (obs, M, labels)
         self._step_cache: List[Tuple[torch.Tensor, int, np.ndarray]] = []
-        logger.info(f"OnlineLearningTrajectoryGenerator initialized. eta={self.system_model_params.eta:.4f}, M={self.current_M}, type={self.trajectory_config.trajectory_type.value}")
+        logger.info(
+            "OnlineLearningTrajectoryGenerator initialized. eta=%.4f, spacing_scale=%.4f, M=%s, type=%s",
+            self.system_model_params.eta,
+            getattr(self.system_model_params, "spacing_scale", 1.0),
+            self.current_M,
+            self.trajectory_config.trajectory_type.value,
+        )
 
     def update_eta(self, new_eta: float, invalidate_from_step: Optional[int] = None):
-        """Updates the eta value in the shared SystemModelParams.
+        """Updates position η; delegates to shared calibration drift helper."""
+        from simulation.calibration_drift import apply_position_eta_update
 
-        When ``invalidate_from_step`` is set, drop cached trajectory steps from that
-        index onward so subsequent windows are regenerated under the new calibration.
-        """
-        old_eta = self.system_model_params.eta
-        self.system_model_params.eta = new_eta
+        apply_position_eta_update(
+            self,
+            new_eta,
+            invalidate_from_step=invalidate_from_step,
+        )
 
-        # Also update sv_noise_var to the same value as eta
-        self.system_model_params.sv_noise_var = new_eta
+    def update_spacing_scale(
+        self, new_spacing_scale: float, invalidate_from_step: Optional[int] = None
+    ):
+        """Updates global element spacing scale; invalidates cached trajectory steps."""
+        from simulation.calibration_drift import apply_spacing_scale_update
 
-        # Regenerate distance noise with new eta value
-        self.samples_model.eta = self.samples_model._SystemModel__set_eta()
-        self.samples_model.location_noise = self.samples_model.get_distance_noise(True)
-
-        if invalidate_from_step is not None:
-            keep = max(0, int(invalidate_from_step))
-            if keep < len(self._step_cache):
-                self._step_cache = self._step_cache[:keep]
-            self.current_step_in_session = len(self._step_cache)
-            logger.info(
-                "Truncated step cache to %s steps (from %s) for eta %.4f -> %.4f",
-                keep,
-                invalidate_from_step,
-                old_eta,
-                new_eta,
-            )
-
-        logger.info(
-            "Generator eta updated from %.4f to %.4f with new distance noise pattern.",
-            old_eta,
-            self.system_model_params.eta,
+        apply_spacing_scale_update(
+            self,
+            new_spacing_scale,
+            invalidate_from_step=invalidate_from_step,
         )
 
     def _generate_next_true_step(self) -> Tuple[np.ndarray, int]:
@@ -986,6 +979,12 @@ class OnlineLearningDataset(Dataset):
     def update_eta(self, new_eta: float, invalidate_from_step: Optional[int] = None):
         """Delegates eta update to the underlying generator."""
         self.generator.update_eta(new_eta, invalidate_from_step=invalidate_from_step)
+
+    def update_spacing_scale(
+        self, new_spacing_scale: float, invalidate_from_step: Optional[int] = None
+    ):
+        """Delegates spacing-scale update to the underlying generator."""
+        self.generator.update_spacing_scale(new_spacing_scale, invalidate_from_step=invalidate_from_step)
 
     def get_dataloader(self, batch_size: int, shuffle: bool = True, collate_fn: Optional[Callable] = None) -> DataLoader:
         """

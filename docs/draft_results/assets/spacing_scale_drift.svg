@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 280" role="img" aria-label="Position eta vs spacing-scale drift">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#334155"/>
+    </marker>
+  </defs>
+  <rect width="920" height="280" fill="#f8fafc" rx="12"/>
+  <text x="460" y="28" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="16" font-weight="600" fill="#0f172a">T1 calibration drift models</text>
+
+  <!-- Left: position eta -->
+  <text x="230" y="58" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="14" font-weight="600" fill="#b45309">position · (legacy)</text>
+  <text x="230" y="78" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#64748b">´_n ~ U[·», +·»] per sensor</text>
+  <line x1="80" y1="210" x2="380" y2="210" stroke="#94a3b8" stroke-width="2"/>
+  <circle cx="120" cy="206" r="5" fill="#2563eb"/>
+  <circle cx="170" cy="198" r="5" fill="#2563eb"/>
+  <circle cx="220" cy="214" r="5" fill="#2563eb"/>
+  <circle cx="270" cy="202" r="5" fill="#2563eb"/>
+  <circle cx="320" cy="208" r="5" fill="#2563eb"/>
+  <path d="M120 206 L120 188" stroke="#dc2626" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M170 198 L170 182" stroke="#dc2626" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M220 214 L220 196" stroke="#16a34a" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M270 202 L270 186" stroke="#16a34a" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M320 208 L320 192" stroke="#dc2626" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="230" y="238" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#475569">differential, ~zero-mean ’ averages out at large N</text>
+
+  <!-- Right: spacing scale -->
+  <text x="690" y="58" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="14" font-weight="600" fill="#047857">spacing scale µ (T1 paper)</text>
+  <text x="690" y="78" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#64748b">d' = (1+µ) d on every element</text>
+  <line x1="540" y1="210" x2="840" y2="210" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="540" y1="170" x2="840" y2="152" stroke="#2563eb" stroke-width="2" stroke-dasharray="6 4"/>
+  <circle cx="580" cy="204" r="5" fill="#2563eb"/>
+  <circle cx="630" cy="200" r="5" fill="#2563eb"/>
+  <circle cx="680" cy="196" r="5" fill="#2563eb"/>
+  <circle cx="730" cy="192" r="5" fill="#2563eb"/>
+  <circle cx="780" cy="188" r="5" fill="#2563eb"/>
+  <circle cx="580" cy="164" r="5" fill="#dc2626"/>
+  <circle cx="630" cy="160" r="5" fill="#dc2626"/>
+  <circle cx="680" cy="156" r="5" fill="#dc2626"/>
+  <circle cx="730" cy="152" r="5" fill="#dc2626"/>
+  <circle cx="780" cy="148" r="5" fill="#dc2626"/>
+  <text x="690" y="238" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#475569">coherent manifold warp ’ DOA bias, similar stress across N</text>
+
+  <text x="460" y="268" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#64748b">Jump @ w40: spacing_scale 1.0 ’ 1.03 (µ=3%). Snapshots regenerated; all OL arms share the same data.</text>
+</svg>

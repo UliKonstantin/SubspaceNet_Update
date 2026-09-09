@@ -14,6 +14,7 @@ system_model:
   signal_type: "narrowband"
   wavelength: 0.06
   eta: 0.0
+  spacing_scale: 1.0
   bias: 0
   sv_noise_var: 0.0
   doa_range: 60
@@ -105,7 +106,8 @@ online_learning:
   trajectory_length: 200
   dataset_size: 3
   use_adaptive_learning_rate: true
-  # Drift timeline (stride=1): warmup=18 → first_g@28, first_z@37; eta jump@40; train@w*+2 (~39+)
+  # Drift timeline (stride=1): warmup=18 → first_g@28, first_z@37; calibration jump@40; train@w*+2
+  drift_type: spacing_scale  # global d'=(1+ε)d — N-fair DOA bias vs random position η
   drift_warmup_windows: 18
   drift_guard_samples: 3
   drift_z_threshold: 2.5
@@ -114,12 +116,15 @@ online_learning:
   adaptive_lr_min: 0.0005
   adaptive_lr_max: 0.02
   adaptive_lr_k_sigmoid: 0.7336
-  adaptive_lr_dG0: 7.5  # median dG_at_detection ~7 with eta@40/warm18; 14.5 pinned LR to floor
+  adaptive_lr_dG0: 7.5
   num_gd_steps: 3
   enable_lr_sweep: false
   eta_update_interval_windows: 40
-  eta_increment: 0.9
-  max_eta: 0.9
+  spacing_scale_increment: 0.03  # single jump 1.0 → 1.03 @ w40 (~3% spacing error)
+  max_spacing_scale: 1.03  # clamp blocks repeat @ w80 (interval=40)
+  min_spacing_scale: 1.0
+  eta_increment: 0.0  # disabled when drift_type=spacing_scale
+  max_eta: 0.0
   min_eta: 0.0
   use_nominal: true
   loss_config:

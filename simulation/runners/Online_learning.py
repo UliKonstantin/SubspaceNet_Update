@@ -323,15 +323,13 @@ class OnlineLearning:
             for trajectory_idx in range(dataset_size):
                 logger.info(f"Processing trajectory {trajectory_idx + 1}/{dataset_size}")
                 
-                # Reset eta to initial value for each new trajectory
-                initial_eta = 0
-                logger.info(f"Resetting eta to initial value {initial_eta:.4f} for trajectory {trajectory_idx + 1}")
-                self.system_model.params.eta = initial_eta
-                
-                # Reset the system model's distance noise and eta scaling
-                self.system_model.eta = self.system_model._SystemModel__set_eta()
-                if not getattr(self.system_model.params, 'nominal', True):
-                    self.system_model.location_noise = self.system_model.get_distance_noise(True)
+                from simulation.calibration_drift import reset_calibration
+
+                reset_calibration(self.system_model.params, self.system_model)
+                logger.info(
+                    "Reset calibration for trajectory %s (eta=0, spacing_scale=1.0)",
+                    trajectory_idx + 1,
+                )
                 
                 # Run single trajectory online learning
                 trajectory_result = self._run_single_trajectory_online_learning(trajectory_idx)
@@ -492,10 +490,14 @@ class OnlineLearning:
                 stride=stride
             )
             
-            # Ensure the dataset generator uses the current (reset) eta value
-            current_eta = system_model_params.eta
-            online_learning_dataset.update_eta(current_eta)
-            logger.info(f"Initialized trajectory with eta = {current_eta:.4f}")
+            from simulation.calibration_drift import reset_calibration
+
+            reset_calibration(system_model_params, self.system_model)
+            logger.info(
+                "Initialized trajectory calibration: eta=%.4f, spacing_scale=%.4f",
+                system_model_params.eta,
+                getattr(system_model_params, "spacing_scale", 1.0),
+            )
             self._trajectory_dc_offsets = getattr(
                 online_learning_dataset.generator, "sine_accel_dc_offsets", None
             )
@@ -561,42 +563,90 @@ class OnlineLearning:
             # Fresh g-stream baseline per trajectory (shared history inflates z-scores on traj 2+).
             self.glrt_history = []
             
-            # Process each window (manual indexing: eta update before fetch)
+            drift_type = getattr(online_config, "drift_type", "position_eta")
+
+            # Process each window (manual indexing: calibration drift before fetch)
             for window_idx in tqdm(range(num_ol_windows), desc="Online Learning"):
                 if online_config.eta_update_interval_windows and online_config.eta_update_interval_windows > 0 and \
                    window_idx > 0 and window_idx % online_config.eta_update_interval_windows == 0:
-                    current_eta = self.system_model.params.eta
-                    eta_increment = online_config.eta_increment if online_config.eta_increment is not None else 0.01
-                    new_eta = current_eta + eta_increment
+                    invalidate_from_step = window_idx * stride
+                    drift_applied = False
 
-                    if online_config.max_eta is not None:
-                        new_eta = min(new_eta, online_config.max_eta)
-                    if online_config.min_eta is not None:
-                        new_eta = max(new_eta, online_config.min_eta)
+                    if drift_type == "spacing_scale":
+                        current_scale = float(
+                            getattr(self.system_model.params, "spacing_scale", 1.0) or 1.0
+                        )
+                        scale_inc = (
+                            online_config.spacing_scale_increment
+                            if online_config.spacing_scale_increment is not None
+                            else 0.03
+                        )
+                        new_scale = current_scale + scale_inc
+                        if online_config.max_spacing_scale is not None:
+                            new_scale = min(new_scale, online_config.max_spacing_scale)
+                        if online_config.min_spacing_scale is not None:
+                            new_scale = max(new_scale, online_config.min_spacing_scale)
 
-                    if abs(new_eta - current_eta) > 1e-6:
-                        invalidate_from_step = window_idx * stride
+                        if abs(new_scale - current_scale) > 1e-8:
+                            logger.info(
+                                "Online Learning: spacing-scale drift before window %s. "
+                                "From %.4f to %.4f (regenerate steps >= %s)",
+                                window_idx,
+                                current_scale,
+                                new_scale,
+                                invalidate_from_step,
+                            )
+                            eta_change_windows.append(window_idx)
+                            from simulation.calibration_drift import apply_spacing_scale_update
+
+                            apply_spacing_scale_update(
+                                online_learning_dataset.generator,
+                                new_scale,
+                                invalidate_from_step=invalidate_from_step,
+                                system_model=self.system_model,
+                            )
+                            drift_applied = True
+                    else:
+                        current_eta = self.system_model.params.eta
+                        eta_increment = (
+                            online_config.eta_increment
+                            if online_config.eta_increment is not None
+                            else 0.01
+                        )
+                        new_eta = current_eta + eta_increment
+
+                        if online_config.max_eta is not None:
+                            new_eta = min(new_eta, online_config.max_eta)
+                        if online_config.min_eta is not None:
+                            new_eta = max(new_eta, online_config.min_eta)
+
+                        if abs(new_eta - current_eta) > 1e-6:
+                            logger.info(
+                                "Online Learning: position-eta drift before window %s. "
+                                "From %.4f to %.4f (regenerate steps >= %s)",
+                                window_idx,
+                                current_eta,
+                                new_eta,
+                                invalidate_from_step,
+                            )
+                            eta_change_windows.append(window_idx)
+                            from simulation.calibration_drift import apply_position_eta_update
+
+                            apply_position_eta_update(
+                                online_learning_dataset.generator,
+                                new_eta,
+                                invalidate_from_step=invalidate_from_step,
+                                system_model=self.system_model,
+                            )
+                            drift_applied = True
+
+                    if drift_applied and self.first_eta_change:
+                        self.first_eta_change = False
                         logger.info(
-                            "Online Learning: Dynamically updating eta before window %s. "
-                            "From %.4f to %.4f (regenerate steps >= %s)",
+                            "First calibration drift (%s) at window %s",
+                            drift_type,
                             window_idx,
-                            current_eta,
-                            new_eta,
-                            invalidate_from_step,
                         )
-                        eta_change_windows.append(window_idx)
-                        online_learning_dataset.update_eta(
-                            new_eta,
-                            invalidate_from_step=invalidate_from_step,
-                        )
-                        self.system_model.eta = self.system_model._SystemModel__set_eta()
-                        if new_eta == 0:
-                            self.system_model.location_noise = torch.zeros(self.system_model.params.N)
-                        else:
-                            self.system_model.location_noise = self.system_model.get_distance_noise(True)
-                        if self.first_eta_change:
-                            self.first_eta_change = False
-                            logger.info(f"First eta modification at window {window_idx}")
 
                 time_series_single_window, sources_num_single_window_list, labels_single_window_list_of_arrays = (
                     online_learning_dataset[window_idx]

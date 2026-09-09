@@ -20,6 +20,7 @@ class SystemModelConfig(BaseModel):
     signal_type: Literal["narrowband", "broadband"] = "narrowband"
     wavelength: float = 0.06
     eta: float = 0.0
+    spacing_scale: float = 1.0
     bias: float = 0.0
     sv_noise_var: float = 0.0
     doa_range: int = 60
@@ -198,11 +199,21 @@ class OnlineLearningConfig(BaseModel):
     # This is used to determine the total number of windows that can be formed based on window_size and stride.
     trajectory_length: Optional[int] = Field(default=1000, description="Total number of trajectory steps available for the entire online learning session.")
 
-    # Dynamic Eta Update Parameters
-    eta_update_interval_windows: Optional[int] = Field(default=None, description="Update eta every N windows. If None or 0, eta is not periodically updated by this mechanism. Manual/other triggers for eta change would still be possible.")
-    eta_increment: Optional[float] = Field(default=0.01, description="Amount to increment (if positive) or decrement (if negative) eta by when an update occurs.")
-    max_eta: Optional[float] = Field(default=0.5, description="Maximum allowed value for eta during dynamic updates.")
-    min_eta: Optional[float] = Field(default=0.0, description="Minimum allowed value for eta during dynamic updates.")
+    # Dynamic calibration drift (position η or spacing-scale ε)
+    drift_type: Literal["position_eta", "spacing_scale"] = Field(
+        default="position_eta",
+        description="Calibration drift model at eta_update_interval_windows: random per-sensor position η, or global spacing scale 1+ε.",
+    )
+    eta_update_interval_windows: Optional[int] = Field(default=None, description="Apply calibration drift every N windows. If None or 0, drift is not periodically updated by this mechanism.")
+    eta_increment: Optional[float] = Field(default=0.01, description="Position-η increment when drift_type=position_eta.")
+    max_eta: Optional[float] = Field(default=0.5, description="Maximum allowed eta during dynamic updates.")
+    min_eta: Optional[float] = Field(default=0.0, description="Minimum allowed eta during dynamic updates.")
+    spacing_scale_increment: Optional[float] = Field(
+        default=0.03,
+        description="Spacing-scale increment when drift_type=spacing_scale (e.g. 0.03 → d'=(1.03)d).",
+    )
+    max_spacing_scale: Optional[float] = Field(default=1.1, description="Maximum spacing_scale during dynamic updates.")
+    min_spacing_scale: Optional[float] = Field(default=1.0, description="Minimum spacing_scale during dynamic updates.")
     
     # Calibration error control
     use_nominal: bool = Field(default=True, description="If True (default), nominal array configuration (no calibration errors) is used for sample generation. If False, calibration errors are applied based on eta.")
@@ -292,6 +303,7 @@ class ScenarioSystemModelOverride(BaseModel):
     signal_type: Optional[Literal["narrowband", "broadband"]] = None
     wavelength: Optional[float] = None
     eta: Optional[float] = None
+    spacing_scale: Optional[float] = None
     bias: Optional[float] = None
     sv_noise_var: Optional[float] = None
     doa_range: Optional[int] = None

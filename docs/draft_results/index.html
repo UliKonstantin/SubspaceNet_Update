@@ -113,6 +113,14 @@
     }
     ul.paths li:last-child { border-bottom: none; }
     .placeholder { color: var(--muted); font-style: italic; padding: 2rem; text-align: center; }
+    .drift-illustration {
+      width: 100%; max-width: 920px; height: auto;
+      border-radius: 8px; border: 1px solid var(--border);
+      background: #f8fafc; margin: .75rem 0;
+    }
+    .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: .75rem; }
+    @media (max-width: 720px) { .compare-grid { grid-template-columns: 1fr; } }
+    .compare-grid .mini { font-size: .85rem; color: var(--muted); margin: 0; }
   </style>
 </head>
 <body>
@@ -138,14 +146,35 @@
       <section class="panel active" data-panel="overview">
         <div class="card">
           <h2>T1 — Antenna count sweep (SubspaceNet) <span class="tag tag-smoke">smoke ds=3 — NOT FINAL</span></h2>
-          <p>Online learning under η jump to 0.9 @ w40, N ∈ {6, 9, 12, 18}. Source run: <code>T1_final_recipe</code> (dG0=7.5, ds=3, all N including N=12).</p>
-          <h3>Findings</h3>
+          <p>Online learning under calibration drift @ w40, N ∈ {6, 9, 12, 18}. <strong>Current protocol:</strong> spacing-scale jump 1.0→1.03 (<code>T1_spacing_scale_smoke</code>). Legacy position-η runs kept under <code>T1_final_recipe</code>.</p>
+
+          <h3>Calibration drift — why spacing scale (Option B)</h3>
+          <img class="drift-illustration" src="assets/spacing_scale_drift.svg" alt="Position eta vs spacing-scale drift" />
+          <div class="compare-grid">
+            <div>
+              <p class="mini"><strong>Position η</strong> — random per-sensor offsets δ<sub>n</sub>∈[−ηλ,+ηλ]. Differential, ~zero-mean → subspace averaging + EKF smoothing made N=12/18 look like “self-heal” (no sustained supervised hit even at η=5).</p>
+            </div>
+            <div>
+              <p class="mini"><strong>Spacing scale ε</strong> — global d′=(1+ε)d on every element. Coherent manifold warp → DOA bias that does <em>not</em> average out with N. Same ε stresses all apertures comparably; snapshots regenerated after w40 for eval, no-adapt, unsupervised, and genie arms.</p>
+            </div>
+          </div>
           <ul class="compact">
-            <li><strong>N=6</strong>: moderate win — ours 0.076→0.063 vs no_adapt 0.067→0.104 (handoff smoke).</li>
-            <li><strong>N=9</strong>: strongest win — ours 0.029→0.024 vs no_adapt 0.093→0.131.</li>
-            <li><strong>N=12</strong>: missing from <code>T1_eta40_handoff_fix</code> (no N12 ckpt at run time). Included in <code>T1_final_recipe</code> rerun.</li>
-            <li><strong>N=18 @ η=0.9</strong>: no_adapt 0.067→0.046; ours flat/worse — EKF self-heal regime.</li>
-            <li><strong>Adaptive LR vs N</strong>: LR is <em>not</em> a function of N directly — see below. N=9 gets lowest dG → LR ~5.5e-4 (near floor) despite needing adaptation most.</li>
+            <li><code>drift_type: spacing_scale</code>, <code>spacing_scale_increment: 0.03</code>, jump @ w40, η disabled (0).</li>
+            <li>Pipeline: <code>SystemModelParams.spacing_scale</code> → steering positions → snapshot synthesis → SubspaceNet → EKF (all arms share one generator).</li>
+          </ul>
+
+          <h3>Findings (legacy position η — T1_final_recipe)</h3>
+          <ul class="compact">
+            <li><strong>N=9</strong>: strongest win under η=0.9 — largest adaptation margin.</li>
+            <li><strong>N=12/18</strong>: flat/negative Δlate under position η — low-sensitivity regime (motivated spacing-scale switch).</li>
+            <li><strong>Adaptive LR vs N</strong>: LR driven by unsupervised GLRT dG, not N directly — N=9 often pinned to floor.</li>
+          </ul>
+          <h3>Findings (spacing-scale — T1_spacing_scale_smoke)</h3>
+          <ul class="compact" id="spacingScaleFindings">
+            <li><strong>Single jump</strong> 1.0→1.03 @ w40 (<code>max_spacing_scale=1.03</code> blocks repeat @ w80).</li>
+            <li><strong>Early post-drift (w45–55) Δ vs pre:</strong> N=9 +1.1°, N=12 +1.1°, N=18 +0.9°, N=6 flat — large-N matched stress (fixes position-η self-heal).</li>
+            <li><strong>Late (w80–120)</strong> still trends down on no-adapt (trajectory/EKF segment); use early band for matched degradation.</li>
+            <li>Verify: <code>python3 scripts/verify_T1_spacing_scale_smoke.py</code></li>
           </ul>
           <h3>Adaptive LR — drift magnitude, not antenna count (but N couples in via loss)</h3>
           <p>Formula: <code>dG = G_t − baseline_mean</code> on the <strong>unsupervised adaptation-loss</strong> GLRT series, then sigmoid(dG; dG0=7.5) → LR. N is not an input.</p>
@@ -170,7 +199,9 @@
             <dt>Sweep</dt><dd>N ∈ {6, 9, 12, 18} + per-N checkpoints</dd>
             <dt>Trajectory</dt><dd>sine_accel_nonlinear, L=200, σ=0.06</dd>
             <dt>EKF</dt><dd>extended, Q=0.06, R=0.03</dd>
-            <dt>Drift / η</dt><dd>warmup=18, η@40 (+0.9), time_to_learn=2, stride=1</dd>
+            <dt>Drift</dt><dd>warmup=18, jump@40, time_to_learn=2, stride=1</dd>
+            <dt>Drift model</dt><dd>spacing_scale: 1.0→1.03 (ε=3%); position η disabled</dd>
+            <dt>Legacy η</dt><dd>η@40 (+0.9) — see T1_final_recipe / matched_eta_notes</dd>
             <dt>Adapt budget</dt><dd>5 windows × 3 GD steps</dd>
             <dt>Adaptive LR</dt><dd>min=5e-4, max=2e-2, k=0.7336, dG0=7.5</dd>
             <dt>Smoke</dt><dd>dataset_size=3, seed=42</dd>
@@ -180,6 +211,15 @@
       </section>
 
       <section class="panel" data-panel="results">
+        <div class="card">
+          <h2>Spacing-scale smoke (current protocol)</h2>
+          <p>Run: <code>experiments/results/smoke_runs/journal_paper/T1_spacing_scale_smoke/</code></p>
+        </div>
+        <div class="result-block" id="spacingScaleScenarioBlock">
+          <p class="placeholder">Plots will appear after smoke run + plot dispatch.</p>
+        </div>
+
+        <div class="card"><h2>Legacy position-η smoke (T1_final_recipe)</h2></div>
         <div class="result-block">
           <img src="assets/T1_final_recipe/scenario_results_comparison.png" alt="scenario comparison" />
           <div class="path-line">experiments/results/smoke_runs/journal_paper/T1_final_recipe/scenario_results_comparison.png</div>
@@ -241,8 +281,21 @@
   </div>
 
   <script>
+    const SPACING_SMOKE = "experiments/results/smoke_runs/journal_paper/T1_spacing_scale_smoke";
+    const spacingPlots = [
+      { src: "assets/T1_spacing_scale_smoke/scenario_results_comparison.png", path: `${SPACING_SMOKE}/scenario_results_comparison.png`, caption: "Spacing-scale ε=3% @ w40: all N should show post-drift degradation on no-adapt arm." },
+      { src: "assets/T1_spacing_scale_smoke/antenna_adaptation_improvement_vs_n.png", path: `${SPACING_SMOKE}/antenna_adaptation_improvement_vs_n.png`, caption: "Δ supervised RMSPE vs N under matched coherent drift." },
+    ];
+    fetch(spacingPlots[0].src, { method: "HEAD" }).then(r => {
+      if (!r.ok) return;
+      document.getElementById("spacingScaleScenarioBlock").innerHTML = spacingPlots.map(p =>
+        `<img src="${p.src}" alt="" /><div class="path-line">${p.path}</div><p class="finding">${p.caption}</p>`
+      ).join("");
+    }).catch(() => {});
+
     const PATHS = [
       "configs/Used_for_paper/paper_T1_antenna_sweep.yaml",
+      SPACING_SMOKE + "/subspacenet/benchmark_metrics.json",
       "configs/Used_for_paper/paper_T1_antenna_sweep_deepcnn.yaml",
       "experiments/results/smoke_runs/journal_paper/T1_eta40_handoff_fix/subspacenet/benchmark_metrics.json",
       "experiments/results/smoke_runs/journal_paper/T1_eta40_handoff_fix/subspacenet/drift_detection_dicts.json",
