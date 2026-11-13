@@ -65,9 +65,10 @@ class KalmanFilter1D:
             
         measurement_noise_std = config.kalman_filter.measurement_noise_std_dev
         
-        # Convert standard deviations to variances
-        kf_Q = process_noise_std ** 2
-        kf_R = measurement_noise_std ** 2
+        from simulation.kalman_filter.units import angle_std_deg_to_variance_rad
+
+        kf_Q = angle_std_deg_to_variance_rad(process_noise_std)
+        kf_R = angle_std_deg_to_variance_rad(measurement_noise_std)
         
         # Get initial covariance
         kf_P0 = config.kalman_filter.initial_covariance

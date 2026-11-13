@@ -1,8 +1,8 @@
 ###############################################################################
-# PF-06 / PF-05 — T1 antenna sweep (M=3, snr=10 fixed)
-# N ∈ {6, 9, 12} — per-N position η tuned on pre-EKF early stress (w45–55)
-# Thin:  --sweep 1d --axis n -v 9  → smoke_runs/journal_paper/T1
-# Full:  -v 6 -v 9 -v 12             → journal_paper/paper_T1_antenna
+# T1 — position-η drift only (sv_noise_var stays 0)
+# N ∈ {6, 9, 12}, η by N so post-drift static SN+EKF ≥ 10°
+# R is degrees (0.03°) → rad² inside the EKF
+# Full:  -v 6 -v 9 -v 12  → journal_paper/paper_T1_antenna
 ###############################################################################
 system_model:
   N: 9
@@ -82,16 +82,17 @@ trajectory:
 
 kalman_filter:
   filter_type: "extended"
-  process_noise_std_dev: 0.06
-  measurement_noise_std_dev: 0.03
-  initial_covariance: 0.001
+  process_noise_std_dev: 0.06   # degrees → Q in rad² (sine-accel uses trajectory.sine_accel_noise_std)
+  measurement_noise_std_dev: 0.30  # degrees → R; 0.03 made K≈1 so EKF≈SN. 0.30 keeps pre-drift <0.3° and helps at 3–12° SN.
+  initial_covariance: 0.001     # P0 in rad²
 
 scenario_config:
   type: "n"
   values: [6, 9, 12]
-  # Per-N position η @ w40 — pre-EKF early stress calibration (see paper_T1_pre_ekf_calibration_notes.yaml)
-  eta_increments: [1.0, 0.9, 6.0]
-  max_etas: [1.0, 0.9, 6.0]
+  # Per-N η so post-drift static SN+EKF ≈ 11–12° (±1.5). R=0.30°.
+  # Isolated ds=3 seed=42: N6 2.40→11.13°; N9 1.30→11.58°; N12 6.00→9.88° (ceiling).
+  eta_increments: [2.40, 1.30, 6.00]
+  max_etas: [2.40, 1.30, 6.00]
   model_paths:
     - "experiments/results/basemodels_for_journal_paper/subspacenet/N6_M3_SNR10.0/checkpoints/final_SubspaceNet_20260818_173845.pt"
     - "experiments/results/basemodels_for_journal_paper/subspacenet/snr_10.0/checkpoints/final_SubspaceNet_20250916_084930.pt"
@@ -109,6 +110,7 @@ online_learning:
   dataset_size: 3
   use_adaptive_learning_rate: true
   drift_type: position_eta
+  drift_detector: loss_cusum
   drift_warmup_windows: 18
   drift_guard_samples: 3
   drift_z_threshold: 2.5
@@ -121,8 +123,8 @@ online_learning:
   num_gd_steps: 3
   enable_lr_sweep: false
   eta_update_interval_windows: 40
-  eta_increment: 0.9  # default; overridden per N via scenario_config.eta_increments
-  max_eta: 0.9
+  eta_increment: 1.30
+  max_eta: 1.30
   min_eta: 0.0
   use_nominal: true
   loss_config:

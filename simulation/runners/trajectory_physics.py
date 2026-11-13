@@ -9,6 +9,23 @@ import numpy as np
 from typing import Any, List, Optional, Sequence, Union
 
 
+def seeded_generator() -> np.random.Generator:
+    """Generator seeded off the global numpy RNG so ``simulation.seed`` controls it."""
+    return np.random.default_rng(np.random.randint(0, 2**32 - 1))
+
+
+def fit_per_source(values, num_sources: int) -> np.ndarray:
+    """Scalar or list → length ``num_sources`` (tile / trim). Used when M ≠ 3."""
+    arr = np.atleast_1d(np.asarray(values, dtype=float)).reshape(-1)
+    if arr.size == 0:
+        raise ValueError("per-source parameter is empty")
+    if arr.size == 1:
+        return np.full(int(num_sources), float(arr.item()))
+    if arr.size == int(num_sources):
+        return arr.copy()
+    return np.resize(arr, int(num_sources))
+
+
 def resolve_sine_accel_dc_offsets(
     trajectory_config: Any,
     num_sources: int,
@@ -40,8 +57,40 @@ def resolve_sine_accel_dc_offsets(
     lo, hi = float(offset_range[0]), float(offset_range[1])
     if lo > hi:
         raise ValueError(f"sine_accel_dc_offset_range min ({lo}) must be <= max ({hi})")
-    gen = rng if rng is not None else np.random.default_rng()
-    return gen.uniform(lo, hi, size=num_sources)
+    gen = rng if rng is not None else seeded_generator()
+    min_sep = getattr(trajectory_config, "sine_accel_dc_min_sep_deg", None)
+    if min_sep is None or float(min_sep) <= 0.0:
+        return gen.uniform(lo, hi, size=num_sources)
+    return sample_spaced_in_range(lo, hi, int(num_sources), float(min_sep), gen)
+
+
+def sample_spaced_in_range(
+    lo: float,
+    hi: float,
+    n: int,
+    min_sep: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """n points in [lo, hi] with pairwise gap ≥ min_sep. Extra slack is Dirichlet-spread."""
+    n = int(n)
+    if n <= 0:
+        return np.zeros(0, dtype=float)
+    if n == 1:
+        return rng.uniform(lo, hi, size=1)
+    need = (n - 1) * float(min_sep)
+    span = float(hi) - float(lo)
+    if need > span + 1e-9:
+        raise ValueError(
+            f"cannot place {n} DCs with min_sep={min_sep}° in [{lo}, {hi}] "
+            f"(need {need:.1f}°, have {span:.1f}°)"
+        )
+    slack = span - need
+    pads = rng.dirichlet(np.ones(n + 1)) * slack
+    x = np.empty(n, dtype=float)
+    x[0] = float(lo) + pads[0]
+    for i in range(1, n):
+        x[i] = x[i - 1] + float(min_sep) + pads[i]
+    return x
 
 
 def sine_accel_step(

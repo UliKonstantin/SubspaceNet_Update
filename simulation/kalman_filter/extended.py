@@ -163,17 +163,10 @@ class ExtendedKalmanFilter1D:
             # Use KF process noise instead of trajectory noise
             noise_std = kf_process_noise_std
             
-            # Convert single values to arrays for source-specific parameters
-            if isinstance(omega0, (int, float)):
-                omega0 = [omega0] * config.system_model.M
-            if isinstance(kappa, (int, float)):
-                kappa = [kappa] * config.system_model.M
-            
-            # Ensure arrays have correct length
-            if len(omega0) != config.system_model.M:
-                raise ValueError(f"sine_accel_omega0 array length ({len(omega0)}) must match number of sources ({config.system_model.M})")
-            if len(kappa) != config.system_model.M:
-                raise ValueError(f"sine_accel_kappa array length ({len(kappa)}) must match number of sources ({config.system_model.M})")
+            from simulation.runners.trajectory_physics import fit_per_source
+
+            omega0 = fit_per_source(omega0, config.system_model.M)
+            kappa = fit_per_source(kappa, config.system_model.M)
             
             # Create state model with source-specific parameters and initial time
             dc_arr = resolve_ekf_dc_offsets(config, dc_offsets)
@@ -208,7 +201,9 @@ class ExtendedKalmanFilter1D:
             logger.info(f"Using random-walk model with σ={noise_std}")
         
         # Get measurement noise and initial covariance
-        kf_R = config.kalman_filter.measurement_noise_std_dev ** 2
+        from simulation.kalman_filter.units import angle_std_deg_to_variance_rad
+
+        kf_R = angle_std_deg_to_variance_rad(config.kalman_filter.measurement_noise_std_dev)
         kf_P0 = config.kalman_filter.initial_covariance
         
         return state_model, kf_R, kf_P0

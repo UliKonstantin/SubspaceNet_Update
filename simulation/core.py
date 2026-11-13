@@ -493,7 +493,8 @@ class Simulation:
             gamma=self.config.training.gamma,
             training_objective=self.config.training.training_objective,
             save_checkpoint=getattr(self.config.training, "save_checkpoint", True),
-            checkpoint_path=self.output_dir / "checkpoints"
+            checkpoint_path=self.output_dir / "checkpoints",
+            target_val_rmspe_rad=getattr(self.config.training, "target_val_rmspe_rad", None),
         )
         
         # Create appropriate trainer based on dataset type
@@ -1112,6 +1113,8 @@ class Simulation:
                 enable_lr_sweep = False
         
         for i, value in enumerate(values):
+            # Re-seed every N/SNR/M so η draws don't leak across the sweep.
+            apply_simulation_seed(getattr(self.config.simulation, "seed", None))
             logger.info(f"Running scenario with {scenario_type}={value}")
             
             # Handle LR sweep for eta scenarios
@@ -1239,11 +1242,24 @@ class Simulation:
             else:
                 # Standard scenario execution (no LR sweep)
                 if scenario_type.lower() == "eta":
-                    overrides = [
-                        "system_model.eta=0.0",
-                        f"online_learning.eta_increment={value}",
-                        f"online_learning.max_eta={value}"
-                    ]
+                    overrides = ["system_model.eta=0.0", "system_model.pitch_eta=0.0"]
+                    uses_per_cell_jump = any(
+                        getattr(self.config.scenario_config, field, None)
+                        for field in (
+                            "eta_increments",
+                            "pitch_eta_increments",
+                            "sv_noise_increments",
+                            "spacing_scale_increments",
+                            "boresight_offset_increments",
+                        )
+                    )
+                    if not uses_per_cell_jump:
+                        overrides.extend(
+                            [
+                                f"online_learning.eta_increment={value}",
+                                f"online_learning.max_eta={value}",
+                            ]
+                        )
                 else:
                     overrides = [system_model_override_for_axis(scenario_type, value)]
 
@@ -1253,6 +1269,38 @@ class Simulation:
                         "online_learning.drift_type=position_eta",
                         f"online_learning.eta_increment={eta_inc}",
                         f"online_learning.max_eta={max_eta if max_eta is not None else eta_inc}",
+                    ])
+                sv_inc, max_sv = self._per_scenario_sv_noise_overrides(i)
+                if sv_inc is not None:
+                    overrides.extend([
+                        "online_learning.drift_type=sv_noise_var",
+                        f"online_learning.sv_noise_increment={sv_inc}",
+                        f"online_learning.max_sv_noise_var={max_sv if max_sv is not None else sv_inc}",
+                    ])
+                pitch_inc, max_pitch = self._per_scenario_pitch_eta_overrides(i)
+                if pitch_inc is not None:
+                    if eta_inc is not None:
+                        raise ValueError(
+                            "scenario_config cannot set both eta_increments and pitch_eta_increments"
+                        )
+                    overrides.extend([
+                        "online_learning.drift_type=pitch_eta",
+                        f"online_learning.pitch_eta_increment={pitch_inc}",
+                        f"online_learning.max_pitch_eta={max_pitch if max_pitch is not None else pitch_inc}",
+                    ])
+                scale_inc, max_scale = self._per_scenario_spacing_scale_overrides(i)
+                if scale_inc is not None:
+                    overrides.extend([
+                        "online_learning.drift_type=spacing_scale",
+                        f"online_learning.spacing_scale_increment={scale_inc}",
+                        f"online_learning.max_spacing_scale={max_scale if max_scale is not None else 1.0 + scale_inc}",
+                    ])
+                bore_inc, max_bore = self._per_scenario_boresight_overrides(i)
+                if bore_inc is not None:
+                    overrides.extend([
+                        "online_learning.drift_type=boresight_offset",
+                        f"online_learning.boresight_offset_increment={bore_inc}",
+                        f"online_learning.max_boresight_offset_deg={max_bore if max_bore is not None else bore_inc}",
                     ])
                 
                 overrides.append(self._resolve_model_path_override(model_paths, retrain_model, i, value))
@@ -1283,6 +1331,7 @@ class Simulation:
             self._aggregate_and_save_heatmap_data(scenario_results)
         
         self._save_drift_detection_dicts(all_drift_detection_dicts)
+        self._save_latency_metrics(scenario_results)
         
         return scenario_results
 
@@ -1339,6 +1388,20 @@ class Simulation:
             json.dump(serializable_dicts, f, indent=2)
         logger.info(f"Saved {len(all_drift_detection_dicts)} drift detection dicts to {json_path}")
 
+    def _save_latency_metrics(self, scenario_results: Dict) -> None:
+        """Save T6 latency JSON at the sweep root when records exist."""
+        from simulation.latency_metrics import collect_latency_records
+
+        records = collect_latency_records(scenario_results)
+        if not records:
+            return
+        import json
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / "latency_metrics.json"
+        with open(json_path, "w") as f:
+            json.dump(records, f, indent=2, default=str)
+        logger.info("Saved %s latency records to %s", len(records), json_path)
+
     def _per_scenario_eta_overrides(self, iteration_idx: int) -> tuple:
         """Return (eta_increment, max_eta) for sweep iteration when configured."""
         scenario_cfg = getattr(self.config, "scenario_config", None)
@@ -1351,6 +1414,58 @@ class Simulation:
         max_etas = getattr(scenario_cfg, "max_etas", None)
         max_eta = max_etas[iteration_idx] if max_etas else eta_inc
         return eta_inc, max_eta
+
+    def _per_scenario_sv_noise_overrides(self, iteration_idx: int) -> tuple:
+        """Return (sv_noise_increment, max_sv_noise_var) for sweep iteration when configured."""
+        scenario_cfg = getattr(self.config, "scenario_config", None)
+        if not scenario_cfg or not getattr(scenario_cfg, "sv_noise_increments", None):
+            return None, None
+        increments = scenario_cfg.sv_noise_increments
+        if iteration_idx >= len(increments):
+            return None, None
+        sv_inc = increments[iteration_idx]
+        max_vars = getattr(scenario_cfg, "max_sv_noise_vars", None)
+        max_sv = max_vars[iteration_idx] if max_vars else sv_inc
+        return sv_inc, max_sv
+
+    def _per_scenario_pitch_eta_overrides(self, iteration_idx: int) -> tuple:
+        """Return (pitch_eta_increment, max_pitch_eta) for sweep iteration when configured."""
+        scenario_cfg = getattr(self.config, "scenario_config", None)
+        if not scenario_cfg or not getattr(scenario_cfg, "pitch_eta_increments", None):
+            return None, None
+        increments = scenario_cfg.pitch_eta_increments
+        if iteration_idx >= len(increments):
+            return None, None
+        pitch_inc = increments[iteration_idx]
+        max_vals = getattr(scenario_cfg, "max_pitch_etas", None)
+        max_pitch = max_vals[iteration_idx] if max_vals else pitch_inc
+        return pitch_inc, max_pitch
+
+    def _per_scenario_spacing_scale_overrides(self, iteration_idx: int) -> tuple:
+        """Return (spacing_scale_increment, max_spacing_scale) for a sweep cell."""
+        scenario_cfg = getattr(self.config, "scenario_config", None)
+        if not scenario_cfg or not getattr(scenario_cfg, "spacing_scale_increments", None):
+            return None, None
+        increments = scenario_cfg.spacing_scale_increments
+        if iteration_idx >= len(increments):
+            return None, None
+        scale_inc = increments[iteration_idx]
+        max_vals = getattr(scenario_cfg, "max_spacing_scales", None)
+        max_scale = max_vals[iteration_idx] if max_vals else 1.0 + float(scale_inc)
+        return scale_inc, max_scale
+
+    def _per_scenario_boresight_overrides(self, iteration_idx: int) -> tuple:
+        """Return (boresight_offset_increment, max_boresight_offset_deg) for a sweep cell."""
+        scenario_cfg = getattr(self.config, "scenario_config", None)
+        if not scenario_cfg or not getattr(scenario_cfg, "boresight_offset_increments", None):
+            return None, None
+        increments = scenario_cfg.boresight_offset_increments
+        if iteration_idx >= len(increments):
+            return None, None
+        offset_inc = increments[iteration_idx]
+        max_vals = getattr(scenario_cfg, "max_boresight_offsets", None)
+        max_offset = max_vals[iteration_idx] if max_vals else offset_inc
+        return offset_inc, max_offset
 
     def _model_path_index_for_scenario_value(self, scenario_value) -> Optional[int]:
         """Map a swept scenario value to its index in scenario_config.values."""
@@ -1456,11 +1571,11 @@ class Simulation:
 
         try:
             if result is None:
-                logger.warning("[EXTRACT DEBUG] result is None")
+                logger.debug("post-learning avg loss: result is None")
                 return None
 
             if result.get("status") != "success":
-                logger.warning(f"[EXTRACT DEBUG] result status is not success: {result.get('status')}")
+                logger.debug("post-learning avg loss: status=%s", result.get("status"))
                 return None
 
             online_learning_results = result.get("online_learning_results", {})
@@ -1485,9 +1600,12 @@ class Simulation:
                     training_start_window,
                 )
                 if avg_loss is not None:
-                    logger.info(
-                        f"[EXTRACT DEBUG] avg_loss={avg_loss} from {traj_key} "
-                        f"(n_losses={len(ref_losses)}, training_end={training_end_window})"
+                    logger.debug(
+                        "post-learning avg_loss=%s from %s (n=%s, training_end=%s)",
+                        avg_loss,
+                        traj_key,
+                        len(ref_losses),
+                        training_end_window,
                     )
                     return avg_loss
 
@@ -1515,15 +1633,13 @@ class Simulation:
                         training_start_window,
                     )
                     if avg_loss is not None:
-                        logger.info("[EXTRACT DEBUG] avg_loss=%s from individual trajectory fallback", avg_loss)
+                        logger.debug("post-learning avg_loss=%s from individual trajectory fallback", avg_loss)
                         return avg_loss
 
-            logger.warning("[EXTRACT DEBUG] Could not extract post-learning avg loss")
+            logger.debug("Could not extract post-learning avg loss")
             return None
         except Exception as e:
-            logger.warning(f"[EXTRACT DEBUG] Exception in extract_post_learning_avg_loss_from_result: {e}")
-            import traceback
-            logger.warning(f"[EXTRACT DEBUG] Traceback: {traceback.format_exc()}")
+            logger.debug("extract_post_learning_avg_loss_from_result: %s", e)
             return None
 
     def _create_trajectory_handler(self) -> None:

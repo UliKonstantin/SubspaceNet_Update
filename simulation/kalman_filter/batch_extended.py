@@ -112,10 +112,10 @@ class BatchExtendedKalmanFilter1D:
             omega0 = config.trajectory.sine_accel_omega0
             kappa = config.trajectory.sine_accel_kappa
             noise_std = kf_process_noise_std
-            if isinstance(omega0, (int, float)):
-                omega0 = [omega0] * max_sources
-            if isinstance(kappa, (int, float)):
-                kappa = [kappa] * max_sources
+            from simulation.runners.trajectory_physics import fit_per_source
+
+            omega0 = fit_per_source(omega0, max_sources)
+            kappa = fit_per_source(kappa, max_sources)
             from simulation.kalman_filter.extended import resolve_ekf_dc_offsets
 
             dc_arr = resolve_ekf_dc_offsets(config)
@@ -142,8 +142,9 @@ class BatchExtendedKalmanFilter1D:
             state_model = SineAccelStateModel(0.0, 0.0, noise_std, damping=1.0, angle_params_in_degrees=False)
             logger.info(f"Using batch random walk model with σ={noise_std}")
         
-        # Get measurement noise and initial covariance
-        kf_R = config.kalman_filter.measurement_noise_std_dev ** 2
+        from simulation.kalman_filter.units import angle_std_deg_to_variance_rad
+
+        kf_R = angle_std_deg_to_variance_rad(config.kalman_filter.measurement_noise_std_dev)
         kf_P0 = config.kalman_filter.initial_covariance
         
         logger.info(f"Batch Extended Kalman Filter parameters: R={kf_R}, P0={kf_P0}")

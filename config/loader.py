@@ -106,7 +106,8 @@ def apply_overrides(config: Config, overrides: List[str]) -> Config:
             if value.lower() == 'null' or value.lower() == 'none':
                 current[final_key] = None
             else:
-                current[final_key] = value
+                parsed = yaml.safe_load(value)
+                current[final_key] = parsed if parsed is not None else value
         elif isinstance(current_value, bool):
             current[final_key] = value.lower() == 'true'
         elif isinstance(current_value, int):

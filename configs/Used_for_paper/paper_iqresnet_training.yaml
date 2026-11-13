@@ -1,0 +1,87 @@
+###############################################################################
+# PF-40 — IQ-ResNet regression base-model training (N=9 M=3 SNR=10)
+# Adam 0.001, StepLR ×0.5 / 10 epochs, batch 64, 40 epochs (multi-source).
+# Output: experiments/results/basemodels_for_journal_paper/iqresnet/
+###############################################################################
+system_model:
+  N: 9
+  M: 3
+  T: 200
+  snr: 10
+  field_type: "far"
+  signal_nature: "non-coherent"
+  signal_type: "narrowband"
+  wavelength: 0.06
+  eta: 0.0
+  bias: 0
+  sv_noise_var: 0.0
+  doa_range: 60
+  doa_resolution: 1
+  max_range_ratio_to_limit: 0.5
+  range_resolution: 1
+
+dataset:
+  samples_size: 1024
+  test_validation_train_split: [0.1, 0.1, 0.8]
+  create_data: true
+  save_dataset: false
+  true_doa_train: null
+  true_range_train: null
+  true_doa_test: null
+  true_range_test: null
+
+model:
+  type: "IQResNet"
+  params:
+    train_loss_type: "rmspe"
+    field_type: "Far"
+
+training:
+  enabled: true
+  epochs: 40
+  batch_size: 64
+  optimizer: "Adam"
+  scheduler: "StepLR"
+  learning_rate: 0.001
+  weight_decay: 1e-9
+  step_size: 10
+  gamma: 0.5
+  training_objective: "angle"
+  # 3.2 deg. N=9 best is 1.92° and is not retrained.
+  target_val_rmspe_rad: 0.05585053606381855
+  use_wandb: false
+  simulation_name: "basemodels_for_journal_paper/iqresnet"
+  save_checkpoint: true
+
+simulation:
+  train_model: true
+  evaluate_model: false
+  load_model: false
+  save_model: true
+  plot_results: true
+  save_plots: true
+  seed: 42
+  model_path: null
+  subspace_methods: []
+  simulation_name: "iqresnet_N9_M3_SNR10"
+  output_dir: "experiments/results/basemodels_for_journal_paper/iqresnet"
+
+trajectory:
+  enabled: true
+  trajectory_type: "random"
+  trajectory_length: 100
+  save_trajectory: false
+
+kalman_filter:
+  filter_type: "extended"
+  process_noise_std_dev: 0.03
+  measurement_noise_std_dev: 0.03
+  initial_covariance: 0.001
+
+logging:
+  level: "INFO"
+  subspace_net_level: null
+  kalman_filter_level: "WARNING"
+  torch_level: "WARNING"
+  matplotlib_level: "WARNING"
+  log_to_file: false

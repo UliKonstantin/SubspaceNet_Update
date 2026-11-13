@@ -1,8 +1,8 @@
 ###############################################################################
-# PF-21 / PF-05 — T2 SNR sweep (N=9, M=3 fixed)
-# Thin:  --sweep 1d --axis snr -v 10  → smoke_runs/journal_paper/T2
-# Full:  -v -5 -v -4 ... -v 10        → journal_paper/paper_T2_snr
-# Do not pass --lr-sweep
+# T2 — SNR sweep, position-η P5-matched per SNR (target ~11° before-adapt)
+# N=9 M=3, one jump @ w40, R=0.30°, stride=1, ds=3
+# Low-SNR cells ceiling ~6–9° even at large η (see eta_increments)
+# Full:  --goal online_learning --trajectory -o experiments/results/journal_paper/paper_T2_snr
 ###############################################################################
 system_model:
   N: 9
@@ -69,6 +69,7 @@ simulation:
   subspace_methods: []
   simulation_name: "paper_T2_snr"
   output_dir: "experiments/results/journal_paper/paper_T2_snr"
+  seed: 42
 
 trajectory:
   enabled: true
@@ -82,12 +83,16 @@ trajectory:
 kalman_filter:
   filter_type: "extended"
   process_noise_std_dev: 0.06
-  measurement_noise_std_dev: 0.03
+  measurement_noise_std_dev: 0.30  # degrees → R; match T1 lock
   initial_covariance: 0.001
 
 scenario_config:
   type: "snr"
   values: [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  # Per-SNR η so static SN+EKF before-adapt ≈ 11° when reachable.
+  # ds=1 probes; low-SNR ceiling ~7–9° (η raised, still short of 10°).
+  eta_increments: [4.10, 8.00, 8.10, 3.20, 3.70, 6.80, 7.45, 4.84, 5.06, 6.00, 7.15, 3.30, 5.66, 2.75, 2.90, 1.30]
+  max_etas:      [4.10, 8.00, 8.10, 3.20, 3.70, 6.80, 7.45, 4.84, 5.06, 6.00, 7.15, 3.30, 5.66, 2.75, 2.90, 1.30]
   model_paths:
     - "experiments/results/basemodels_for_journal_paper/subspacenet/snr_-5.0/checkpoints/final_SubspaceNet_20250908_133942.pt"
     - "experiments/results/basemodels_for_journal_paper/subspacenet/snr_-4.0/checkpoints/final_SubspaceNet_20250914_161440.pt"
@@ -110,26 +115,29 @@ scenario_config:
 online_learning:
   enabled: true
   window_size: 5
-  stride: 3
+  stride: 1
   loss_threshold: 0.2
   max_iterations: 2
   learning_rate: 0.001
   trajectory_length: 200
-  dataset_size: 1
+  dataset_size: 3
   use_adaptive_learning_rate: true
-  drift_warmup_windows: 10
+  drift_type: position_eta
+  drift_detector: loss_cusum
+  drift_warmup_windows: 18
   drift_guard_samples: 3
   drift_z_threshold: 2.5
+  drift_recent_tau_k: 12
   adaptation_window_count: 5
   adaptive_lr_min: 0.0005
   adaptive_lr_max: 0.02
   adaptive_lr_k_sigmoid: 0.7336
-  adaptive_lr_dG0: 14.5
+  adaptive_lr_dG0: 7.5
   num_gd_steps: 3
   enable_lr_sweep: false
-  eta_update_interval_windows: 32
-  eta_increment: 0.5
-  max_eta: 1.5
+  eta_update_interval_windows: 40
+  eta_increment: 1.30  # fallback; per-SNR list in scenario_config wins
+  max_eta: 1.30
   min_eta: 0.0
   use_nominal: true
   loss_config:

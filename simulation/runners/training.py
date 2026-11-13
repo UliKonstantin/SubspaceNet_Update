@@ -195,6 +195,17 @@ class TrajectoryTrainer:
                 
                 if self.config.save_checkpoint:
                     self._save_checkpoint(f"best_{self.model.__class__.__name__}")
+
+            target = getattr(self.config, "target_val_rmspe_rad", None)
+            if target is not None and valid_loss <= float(target):
+                logger.info(
+                    "Hit target_val_rmspe_rad=%.4f (valid=%.4f rad, %.2f deg) at epoch %s — stopping",
+                    float(target),
+                    valid_loss,
+                    valid_loss * 180.0 / np.pi,
+                    epoch + 1,
+                )
+                break
         
         # Training complete
         training_time = time.time() - start_time

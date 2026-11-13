@@ -74,7 +74,7 @@ trajectory:
 kalman_filter:
   filter_type: "extended"
   process_noise_std_dev: 0.06
-  measurement_noise_std_dev: 0.03
+  measurement_noise_std_dev: 0.30
   initial_covariance: 0.001
 
 scenario_config:
@@ -90,13 +90,15 @@ scenario_config:
 online_learning:
   enabled: true
   window_size: 5
-  stride: 3
+  stride: 1
   loss_threshold: 0.2
   max_iterations: 2
   learning_rate: 0.001
   trajectory_length: 200
   dataset_size: 1
   use_adaptive_learning_rate: true
+  drift_type: position_eta
+  drift_detector: loss_cusum
   drift_warmup_windows: 10
   drift_guard_samples: 3
   drift_z_threshold: 2.5

@@ -30,6 +30,8 @@ from utils.ekf_handoff import (
     ekf_next_predict_time_index,
 )
 from simulation.drift import glrt_changepoint_detection
+from simulation.drift.loss_cusum import LossCusumDetector
+from simulation.latency_metrics import compute_latency_record, pair_step_detections, step_drift_is_due
 from utils import drift_gates
 
 
@@ -71,10 +73,47 @@ def _compute_loss_from_type(
         return rmspe_criterion(ekf_preds, true_angles) / window_size
     if loss_type == "supervised_rmape":
         return rmape_criterion(ekf_preds, true_angles) / window_size
+    if loss_type in ("unsupervised_grid_bce", "supervised_grid_bce"):
+        raise RuntimeError(
+            f"{loss_type} must be computed via grid_bce_window_loss_from_steps "
+            "(requires spectrum_pred_tensor in step results)."
+        )
     raise RuntimeError(
         f"Unknown loss type: {loss_type}. Must be one of: "
-        "multimoment, unsupervised_rmspe, unsupervised_rmape, supervised_rmspe, supervised_rmape"
+        "multimoment, unsupervised_rmspe, unsupervised_rmape, supervised_rmspe, supervised_rmape, "
+        "unsupervised_grid_bce, supervised_grid_bce"
     )
+
+
+_GRID_BCE_LOSSES = ("unsupervised_grid_bce", "supervised_grid_bce")
+
+
+def _adaptation_loss_is_grid_bce(loss_config) -> bool:
+    return (
+        loss_config is not None
+        and getattr(loss_config, "adaptation_loss", None) in _GRID_BCE_LOSSES
+    )
+
+
+def _grid_bce_teacher(loss_config) -> str:
+    if loss_config is not None and getattr(loss_config, "adaptation_loss", None) == "supervised_grid_bce":
+        return "gt"
+    return "ekf"
+
+
+def apply_deepcnn_default_losses(config) -> None:
+    """DeepCNN uses grid BCE for OL + genie unless the yaml already picked another loss."""
+    if getattr(getattr(config, "model", None), "type", None) != "DeepCNN":
+        return
+    lc = getattr(getattr(config, "online_learning", None), "loss_config", None)
+    if lc is None:
+        return
+    if getattr(lc, "adaptation_loss", None) == "unsupervised_rmspe":
+        lc.adaptation_loss = "unsupervised_grid_bce"
+        logger.info("DeepCNN default: adaptation_loss → unsupervised_grid_bce")
+    if getattr(lc, "supervised_offline_loss", None) == "supervised_rmspe":
+        lc.supervised_offline_loss = "supervised_grid_bce"
+        logger.info("DeepCNN default: supervised_offline_loss → supervised_grid_bce")
 
 
 @dataclass
@@ -240,6 +279,7 @@ class OnlineLearning:
             results: Results dictionary to store outputs
         """
         self.config = config
+        apply_deepcnn_default_losses(self.config)
         self.system_model = system_model
         self.trained_model = trained_model
         self.output_dir = output_dir
@@ -247,6 +287,14 @@ class OnlineLearning:
         # Dual model online learning state variables
         self.drift_detected = False
         self.learning_done = False
+        self._adapt_cycles_completed = 0
+        self._cusum_pending_rearm = False
+        self._cusum_on_adapted = False
+        self._cycle_logged_done = False
+        self._cusum_fire_windows = []
+        self._cusum_tau_stars = []
+        self._training_end_windows = []
+        self._cusum_min_fire_window = None
         self.online_model = None
         self.online_training_count = 0
         self.first_eta_change = True  # Track if this is the first eta change
@@ -268,6 +316,8 @@ class OnlineLearning:
         self.drift_warmup_windows = getattr(online_config, 'drift_warmup_windows', 7)
         self.drift_guard_samples = getattr(online_config, 'drift_guard_samples', 3)
         self.drift_recent_tau_k = getattr(online_config, 'drift_recent_tau_k', None)
+        self.drift_detector = getattr(online_config, "drift_detector", "glrt_z")
+        self._loss_cusum: Optional[LossCusumDetector] = None
         self.use_adaptive_learning_rate = getattr(online_config, 'use_adaptive_learning_rate', False)
         self.adaptive_lr_min = getattr(online_config, 'adaptive_lr_min', 0.0005)
         self.adaptive_lr_max = getattr(online_config, 'adaptive_lr_max', 0.0356)
@@ -280,8 +330,9 @@ class OnlineLearning:
             self.drift_warmup_windows, self.drift_guard_samples
         )
         logger.info(
-            "Drift detection: scope_a_warmup=%s, scope_b_baseline_min=%s, guard_samples=%s, "
+            "Drift detection: detector=%s, scope_a_warmup=%s, scope_b_baseline_min=%s, guard_samples=%s, "
             "z_threshold=%s, recent_tau_k=%s (first g at window %s, first z at window %s), time_to_learn=%s",
+            self.drift_detector,
             self.drift_warmup_windows,
             drift_gates.SCOPE_B_BASELINE_MIN_SAMPLES,
             self.drift_guard_samples,
@@ -291,6 +342,187 @@ class OnlineLearning:
             first_z,
             self.time_to_learn,
         )
+        if self.drift_detector == "loss_cusum":
+            logger.info(
+                "loss_cusum: settle=%s hump_confirm=%s ref=%s kappa=%s h=%s abs_thresh=%s fallback=%s",
+                online_config.cusum_ekf_settle_windows,
+                online_config.cusum_hump_confirm_windows,
+                online_config.cusum_ref_windows,
+                online_config.cusum_kappa,
+                online_config.cusum_h,
+                online_config.cusum_loss_threshold,
+                online_config.cusum_settle_fallback_window,
+            )
+
+    def _active_drift_value(self) -> float:
+        """Logged drift series: η, sv_noise_var, or spacing_scale depending on drift_type."""
+        drift_type = getattr(self.config.online_learning, "drift_type", "position_eta")
+        params = self.system_model.params
+        if drift_type == "sv_noise_var":
+            return float(getattr(params, "sv_noise_var", 0.0) or 0.0)
+        if drift_type == "spacing_scale":
+            return float(getattr(params, "spacing_scale", 1.0) or 1.0)
+        if drift_type == "pitch_eta":
+            return float(getattr(params, "pitch_eta", 0.0) or 0.0)
+        if drift_type == "boresight_offset":
+            return float(getattr(params, "boresight_offset_deg", 0.0) or 0.0)
+        return float(params.eta)
+
+    def _make_loss_cusum_detector(self) -> LossCusumDetector:
+        ol = self.config.online_learning
+        return LossCusumDetector(
+            settle_consecutive=int(ol.cusum_ekf_settle_windows),
+            hump_confirm_windows=int(ol.cusum_hump_confirm_windows),
+            ref_windows=int(ol.cusum_ref_windows),
+            kappa=float(ol.cusum_kappa),
+            h=float(ol.cusum_h),
+            loss_threshold=float(ol.cusum_loss_threshold),
+            settle_fallback_window=int(ol.cusum_settle_fallback_window),
+        )
+
+    def _step_loss_cusum(
+        self,
+        window_idx: int,
+        window_result,
+        trajectory_results,
+        glrt_at_detection,
+        drift_detection_dicts: list,
+    ):
+        """CUSUM + absolute threshold on unsupervised adaptation_loss. GLRT only after fire."""
+        if self._loss_cusum is None:
+            self._loss_cusum = self._make_loss_cusum_detector()
+        lm = window_result.loss_metrics
+        status = self._loss_cusum.step(
+            window_idx,
+            float(lm.adaptation_loss),
+            float(lm.reference_metric_loss),
+            float(lm.pre_ekf_loss),
+        )
+        if status["just_settled"]:
+            logger.info(
+                "loss_cusum settled at window %s (consecutive unsupervised L below abs threshold after EKF setup)",
+                window_idx,
+            )
+        if status["just_froze"]:
+            logger.info(
+                "loss_cusum froze μ0=%.5f σ0=%.5f at window %s (n_ref=%s)",
+                status["mu0"],
+                status["sigma0"],
+                window_idx,
+                self._loss_cusum.ref_windows,
+            )
+        if not (
+            status["fired"]
+            and self.glrt_drift_detection_window is None
+            and not self.drift_detected
+        ):
+            return glrt_at_detection
+        max_cycles = int(getattr(self.config.online_learning, "max_adapt_cycles", 1) or 1)
+        if self._adapt_cycles_completed >= max_cycles:
+            return glrt_at_detection
+        min_fire = getattr(self, "_cusum_min_fire_window", None)
+        if min_fire is not None and int(window_idx) < int(min_fire):
+            return glrt_at_detection
+
+        self.glrt_drift_detection_window = window_idx
+        self._cusum_fire_windows.append(int(window_idx))
+        sigma = max(float(status["sigma0"] or 0.0), 1e-12)
+        mu0 = float(status["mu0"] or 0.0)
+        L = float(status["L"])
+        dG_at_detection = (L - mu0) / sigma
+        self.glrt_z_score_at_detection = dG_at_detection
+
+        import math
+        base_lr = getattr(self.config.online_learning, "learning_rate", 1e-3)
+        if self.use_adaptive_learning_rate:
+            log_lr_min = math.log10(self.adaptive_lr_min)
+            log_lr_max = math.log10(self.adaptive_lr_max)
+            log_lr = log_lr_min + (log_lr_max - log_lr_min) / (
+                1.0 + math.exp(-self.adaptive_lr_k_sigmoid * (dG_at_detection - self.adaptive_lr_dG0))
+            )
+            self.learning_rate_at_detection = 10 ** log_lr
+        else:
+            self.learning_rate_at_detection = base_lr
+
+        if self._cusum_on_adapted and self._loss_cusum is not None:
+            offset = int(self._loss_cusum.settled_window or 0)
+            adaptation_losses = [
+                v for w, v in zip(self._loss_cusum.L_windows, self._loss_cusum.L_values)
+                if int(w) >= offset
+            ]
+        else:
+            adaptation_losses = [wr.loss_metrics.adaptation_loss for wr in trajectory_results.window_results]
+            offset = int(self._loss_cusum.settled_window or 0)
+            adaptation_losses = adaptation_losses[offset:]
+        min_segment_size = drift_gates.glrt_min_segment_size()
+        if drift_gates.has_enough_losses_for_changepoint_glr(len(adaptation_losses), min_segment_size):
+            tau_rel, log_glr, all_log_glr, candidate_points = glrt_changepoint_detection(
+                adaptation_losses, min_segment_size=min_segment_size
+            )
+            changepoint_window = int(tau_rel) + offset
+            all_log_glr_list = [float(v) for v in all_log_glr]
+            candidate_abs = [int(p) + offset for p in candidate_points]
+            log_glr_f = float(log_glr)
+        else:
+            changepoint_window = window_idx
+            all_log_glr_list = []
+            candidate_abs = []
+            log_glr_f = float(status["S"])
+
+        self._cusum_tau_stars.append(int(changepoint_window))
+        glrt_at_detection = {
+            "window_idx": window_idx,
+            "detector": "loss_cusum",
+            "losses": list(adaptation_losses),
+            "changepoint_post_warmup": int(changepoint_window),
+            "changepoint_window": int(changepoint_window),
+            "log_glr": log_glr_f,
+            "all_log_glr": all_log_glr_list,
+            "candidate_points_post_warmup": candidate_abs,
+            "z_score": float(dG_at_detection),
+            "baseline_mean": mu0,
+            "baseline_std": sigma,
+            "L": L,
+            "S": float(status["S"]),
+            "mu0": mu0,
+            "sigma0": sigma,
+            "settled_window": self._loss_cusum.settled_window,
+        }
+        time_to_learn = self.time_to_learn if self.time_to_learn is not None else 0
+        trigger_window = window_idx + time_to_learn
+        logger.info(
+            "loss_cusum fired at window %s (L=%.4f S=%.4f μ0=%.5f σ0=%.5f abs_ok=%s). "
+            "GLRT τ*=%s. Training starts at window %s. LR=%.6f",
+            window_idx,
+            L,
+            status["S"],
+            mu0,
+            sigma,
+            status["abs_ok"],
+            changepoint_window,
+            trigger_window,
+            self.learning_rate_at_detection,
+        )
+        drift_detection_dicts.append({
+            "eta": self.system_model.params.eta,
+            "scenario_eta": getattr(
+                self.config.online_learning, "max_eta", self.system_model.params.eta
+            ),
+            "window_idx": window_idx,
+            "baseline_mean": mu0,
+            "adaptation_log_glr": log_glr_f,
+            "main_log_glr": log_glr_f,
+            "baseline_std": sigma,
+            "current_glrt_z_score": dG_at_detection,
+            "learning_rate_at_detection": self.learning_rate_at_detection,
+            "dG_at_detection": dG_at_detection,
+            "use_adaptive_learning_rate": self.use_adaptive_learning_rate,
+            "adaptive_lr_dG0": self.adaptive_lr_dG0 if self.use_adaptive_learning_rate else None,
+            "detector": "loss_cusum",
+            "cusum_S": float(status["S"]),
+            "cusum_L": L,
+        })
+        return glrt_at_detection
     
     def run_online_learning(self) -> Dict[str, Any]:
         """
@@ -318,6 +550,7 @@ class OnlineLearning:
             
             all_results = []
             all_drift_detection_dicts = []
+            all_latency_records = []
             
             # Run online learning for each trajectory
             for trajectory_idx in range(dataset_size):
@@ -343,6 +576,9 @@ class OnlineLearning:
                 # Collect drift detection dicts from this trajectory
                 if "online_learning_results" in trajectory_result and "drift_detection_dicts" in trajectory_result["online_learning_results"]:
                     all_drift_detection_dicts.extend(trajectory_result["online_learning_results"]["drift_detection_dicts"])
+                rec = (trajectory_result.get("online_learning_results") or {}).get("latency_record")
+                if rec:
+                    all_latency_records.append(rec)
             
             if not all_results:
                 logger.error("No successful trajectory results")
@@ -403,8 +639,16 @@ class OnlineLearning:
                     "glrt_changepoint_window_at_detection": glrt_changepoint_window_at_detection,
                     "reference_metric_config": reference_metric_config,
                     "adaptation_loss_config": adaptation_loss_config,
+                    "latency_record": (first_result.get("latency_record") if all_results else None),
+                    "spectrum_snaps": (first_result.get("spectrum_snaps") if all_results else []),
                 },
-                "drift_detection_dicts": all_drift_detection_dicts
+                "drift_detection_dicts": all_drift_detection_dicts,
+                "latency_records": all_latency_records,
+                "spectrum_snaps": (
+                    first_result.get("spectrum_snaps")
+                    if all_results
+                    else []
+                ),
             }
             
             # Add averaged results if available
@@ -455,7 +699,10 @@ class OnlineLearning:
             # Initialize supervised model as copy of trained model
             self.supervised_trained_model = create_model(self.config, self.system_model)
             self.supervised_trained_model.load_state_dict(self.trained_model.state_dict())
-            self.supervised_trained_model.train()
+            if hasattr(self.supervised_trained_model, "set_online_adaptation_mode"):
+                self.supervised_trained_model.set_online_adaptation_mode(False)
+            else:
+                self.supervised_trained_model.eval()
             
             # Reset dual model state for new trajectory
             self.drift_detected = False
@@ -464,12 +711,30 @@ class OnlineLearning:
             self.first_eta_change = True
             self.adaptive_lr_fixed = None  # Fixed LR from first training window (adaptive mode)
             self.actual_lr_per_training_window = []  # Track actual LR used per window for heatmap
+            self._adapt_cycles_completed = 0
+            self._cusum_pending_rearm = False
+            self._cusum_on_adapted = False
+            self._cycle_logged_done = False
+            self._cusum_fire_windows = []
+            self._cusum_tau_stars = []
+            self._training_end_windows = []
+            self._cusum_min_fire_window = None
+            self._spectrum_snaps = []
+            self._spectrum_best_score = {
+                "pre": float("-inf"),
+                "post_jump": float("-inf"),
+                "post_adapt": float("-inf"),
+            }
+            self._t7_music = None
+            self._t7_hold_logged = False
             # Reset online optimizer to start fresh for new trajectory
             if hasattr(self, 'online_optimizer'):
                 delattr(self, 'online_optimizer')
             # Reset supervised optimizer to start fresh for new trajectory
             if hasattr(self, 'supervised_optimizer'):
                 delattr(self, 'supervised_optimizer')
+            if self.drift_detector == "loss_cusum":
+                self._loss_cusum = self._make_loss_cusum_detector()
             logger.info("Reset dual model state for new trajectory")
             
             # Get online learning parameters
@@ -492,7 +757,11 @@ class OnlineLearning:
             
             from simulation.calibration_drift import reset_calibration
 
-            reset_calibration(system_model_params, self.system_model)
+            reset_calibration(
+                system_model_params,
+                self.system_model,
+                online_learning_dataset.generator.samples_model,
+            )
             logger.info(
                 "Initialized trajectory calibration: eta=%.4f, spacing_scale=%.4f",
                 system_model_params.eta,
@@ -555,6 +824,8 @@ class OnlineLearning:
             current_glrt_z_score = None  # Z-score normalized GLRT for adaptive learning rate
             current_glrt_baseline_mean = None  # Baseline mean of GLRT history for adaptive learning rate (persists across windows)
             
+            t_window: Dict[int, float] = {}
+
             # Reset GLRT drift detection window for new trajectory
             self.glrt_drift_detection_window = None
             # Reset tracking variables for drift detection metrics
@@ -564,11 +835,64 @@ class OnlineLearning:
             self.glrt_history = []
             
             drift_type = getattr(online_config, "drift_type", "position_eta")
+            drift_profile = getattr(online_config, "drift_profile", "step") or "step"
 
             # Process each window (manual indexing: calibration drift before fetch)
             for window_idx in tqdm(range(num_ol_windows), desc="Online Learning"):
-                if online_config.eta_update_interval_windows and online_config.eta_update_interval_windows > 0 and \
-                   window_idx > 0 and window_idx % online_config.eta_update_interval_windows == 0:
+                t_window[window_idx] = time.perf_counter()
+                gradual_eta = None
+                if drift_profile == "gradual":
+                    if drift_type != "position_eta":
+                        raise ValueError(
+                            "drift_profile=gradual only supports drift_type=position_eta"
+                        )
+                    ramp = getattr(online_config, "gradual_ramp_windows", None)
+                    start = online_config.eta_update_interval_windows
+                    target = online_config.max_eta
+                    if not ramp or not start or target is None:
+                        raise ValueError(
+                            "gradual drift needs eta_update_interval_windows, "
+                            "gradual_ramp_windows, and max_eta"
+                        )
+                    from simulation.calibration_drift import gradual_eta_at_window
+
+                    gradual_eta = gradual_eta_at_window(
+                        window_idx,
+                        start_window=int(start),
+                        ramp_windows=int(ramp),
+                        target_eta=float(target),
+                    )
+
+                if gradual_eta is not None:
+                    invalidate_from_step = window_idx * stride
+                    current_eta = float(self.system_model.params.eta)
+                    if abs(gradual_eta - current_eta) > 1e-6:
+                        logger.info(
+                            "Online Learning: gradual position-eta before window %s. "
+                            "From %.4f to %.4f (regenerate steps >= %s)",
+                            window_idx,
+                            current_eta,
+                            gradual_eta,
+                            invalidate_from_step,
+                        )
+                        eta_change_windows.append(window_idx)
+                        from simulation.calibration_drift import apply_position_eta_update
+
+                        apply_position_eta_update(
+                            online_learning_dataset.generator,
+                            gradual_eta,
+                            invalidate_from_step=invalidate_from_step,
+                            system_model=self.system_model,
+                            reuse_direction=True,
+                        )
+                        if self.first_eta_change:
+                            self.first_eta_change = False
+                            logger.info(
+                                "First calibration drift (%s, gradual) at window %s",
+                                drift_type,
+                                window_idx,
+                            )
+                elif step_drift_is_due(window_idx, trajectory_idx, online_config, drift_profile):
                     invalidate_from_step = window_idx * stride
                     drift_applied = False
 
@@ -606,6 +930,108 @@ class OnlineLearning:
                                 system_model=self.system_model,
                             )
                             drift_applied = True
+                    elif drift_type == "sv_noise_var":
+                        current_sv = float(
+                            getattr(self.system_model.params, "sv_noise_var", 0.0) or 0.0
+                        )
+                        sv_inc = (
+                            online_config.sv_noise_increment
+                            if online_config.sv_noise_increment is not None
+                            else 0.0
+                        )
+                        new_sv = current_sv + sv_inc
+                        if online_config.max_sv_noise_var is not None:
+                            new_sv = min(new_sv, online_config.max_sv_noise_var)
+                        if online_config.min_sv_noise_var is not None:
+                            new_sv = max(new_sv, online_config.min_sv_noise_var)
+
+                        if abs(new_sv - current_sv) > 1e-8:
+                            logger.info(
+                                "Online Learning: sv_noise_var drift before window %s. "
+                                "From %.4f to %.4f (regenerate steps >= %s)",
+                                window_idx,
+                                current_sv,
+                                new_sv,
+                                invalidate_from_step,
+                            )
+                            eta_change_windows.append(window_idx)
+                            from simulation.calibration_drift import apply_sv_noise_update
+
+                            apply_sv_noise_update(
+                                online_learning_dataset.generator,
+                                new_sv,
+                                invalidate_from_step=invalidate_from_step,
+                                system_model=self.system_model,
+                            )
+                            drift_applied = True
+                    elif drift_type == "pitch_eta":
+                        current_pitch = float(
+                            getattr(self.system_model.params, "pitch_eta", 0.0) or 0.0
+                        )
+                        pitch_inc = (
+                            online_config.pitch_eta_increment
+                            if online_config.pitch_eta_increment is not None
+                            else 0.0
+                        )
+                        new_pitch = current_pitch + pitch_inc
+                        if online_config.max_pitch_eta is not None:
+                            new_pitch = min(new_pitch, online_config.max_pitch_eta)
+                        if online_config.min_pitch_eta is not None:
+                            new_pitch = max(new_pitch, online_config.min_pitch_eta)
+
+                        if abs(new_pitch - current_pitch) > 1e-8:
+                            logger.info(
+                                "Online Learning: pitch-eta drift before window %s. "
+                                "From %.4f to %.4f (regenerate steps >= %s)",
+                                window_idx,
+                                current_pitch,
+                                new_pitch,
+                                invalidate_from_step,
+                            )
+                            eta_change_windows.append(window_idx)
+                            from simulation.calibration_drift import apply_pitch_eta_update
+
+                            apply_pitch_eta_update(
+                                online_learning_dataset.generator,
+                                new_pitch,
+                                invalidate_from_step=invalidate_from_step,
+                                system_model=self.system_model,
+                            )
+                            drift_applied = True
+                    elif drift_type == "boresight_offset":
+                        current_offset = float(
+                            getattr(self.system_model.params, "boresight_offset_deg", 0.0) or 0.0
+                        )
+                        offset_inc = (
+                            online_config.boresight_offset_increment
+                            if online_config.boresight_offset_increment is not None
+                            else 0.0
+                        )
+                        new_offset = current_offset + offset_inc
+                        if online_config.max_boresight_offset_deg is not None:
+                            new_offset = min(new_offset, online_config.max_boresight_offset_deg)
+                        if online_config.min_boresight_offset_deg is not None:
+                            new_offset = max(new_offset, online_config.min_boresight_offset_deg)
+
+                        if abs(new_offset - current_offset) > 1e-8:
+                            logger.info(
+                                "Online Learning: boresight offset before window %s. "
+                                "From %.4f deg to %.4f deg (regenerate steps >= %s)",
+                                window_idx,
+                                current_offset,
+                                new_offset,
+                                invalidate_from_step,
+                            )
+                            eta_change_windows.append(window_idx)
+                            from simulation.calibration_drift import apply_boresight_offset_update
+
+                            apply_boresight_offset_update(
+                                online_learning_dataset.generator,
+                                new_offset,
+                                invalidate_from_step=invalidate_from_step,
+                                system_model=self.system_model,
+                            )
+                            drift_applied = True
                     else:
                         current_eta = self.system_model.params.eta
                         eta_increment = (
@@ -637,6 +1063,9 @@ class OnlineLearning:
                                 new_eta,
                                 invalidate_from_step=invalidate_from_step,
                                 system_model=self.system_model,
+                                reuse_direction=bool(
+                                    getattr(online_config, "eta_reuse_direction", False)
+                                ),
                             )
                             drift_applied = True
 
@@ -665,10 +1094,11 @@ class OnlineLearning:
                 )
                
                 # Add window result to trajectory results
-                trajectory_results.add_window_result(window_idx, window_result, self.system_model.params.eta, labels_single_window_list_of_arrays)
+                trajectory_results.add_window_result(window_idx, window_result, self._active_drift_value(), labels_single_window_list_of_arrays)
                 
-                # --- GLRT drift detection (adaptation_loss = MSIE trigger stream) ---
-                if window_idx >= self.drift_warmup_windows:
+                # --- Drift detection (CUSUM on unsupervised L, or GLRT z-score) ---
+                # loss_cusum is stepped after dual-model eval so re-arm can use adapted L.
+                if self.drift_detector != "loss_cusum" and window_idx >= self.drift_warmup_windows:
                     min_segment_size = drift_gates.glrt_min_segment_size()
                     post_warmup_results = trajectory_results.window_results[
                         self.drift_warmup_windows :
@@ -851,12 +1281,12 @@ class OnlineLearning:
                     if window_idx >= trigger_window:
                         self.drift_detected = True
                         logger.info(f"Drift detection triggered at window {window_idx} (GLRT detected at window {self.glrt_drift_detection_window} + {time_to_learn} windows delay)")
-                        # Seed online + supervised genie EKF tracks from pretrained eval posterior
-                        online_last_ekf_predictions = last_ekf_predictions
-                        online_last_ekf_covariances = last_ekf_covariances
-                        supervised_last_ekf_predictions = last_ekf_predictions
-                        supervised_last_ekf_covariances = last_ekf_covariances
-                        logger.info(f"Initialized online and supervised EKF handoff from pretrained track at window {window_idx}")
+                        if self._adapt_cycles_completed == 0:
+                            online_last_ekf_predictions = last_ekf_predictions
+                            online_last_ekf_covariances = last_ekf_covariances
+                            supervised_last_ekf_predictions = last_ekf_predictions
+                            supervised_last_ekf_covariances = last_ekf_covariances
+                            logger.info(f"Initialized online and supervised EKF handoff from pretrained track at window {window_idx}")
                 
                 # Update last predictions and covariances for next window
                 last_ekf_predictions = window_result.doa_metrics.ekf_predictions
@@ -872,8 +1302,67 @@ class OnlineLearning:
                 trained_ekf_loss = window_result.loss_metrics.reference_metric_loss
                 
                 # Dual model processing logic
-                if self.drift_detected:
-                    if self.learning_done:
+                if (
+                    self.drift_detector == "loss_cusum"
+                    and self._cusum_pending_rearm
+                    and not (self.drift_detected and not self.learning_done)
+                ):
+                    if self._loss_cusum is None:
+                        self._loss_cusum = self._make_loss_cusum_detector()
+                    self._loss_cusum.rearm()
+                    self._cusum_pending_rearm = False
+                    self._cusum_on_adapted = True
+                    self.glrt_drift_detection_window = None
+                    self.drift_detected = False
+                    self.learning_done = False
+                    self._cycle_logged_done = False
+                    self.online_training_count = 0
+                    self.adaptive_lr_fixed = None
+                    self.learning_rate_at_detection = None
+                    steps = getattr(self.config.online_learning, "eta_step_windows", None) or []
+                    nxt = next((int(w) for w in steps if int(w) > int(window_idx)), None)
+                    self._cusum_min_fire_window = nxt
+                    logger.info(
+                        "loss_cusum re-armed at window %s after adapt cycle %s (next fire >= %s)",
+                        window_idx,
+                        self._adapt_cycles_completed,
+                        nxt,
+                    )
+                is_learning = self.drift_detected and not self.learning_done
+                if (
+                    getattr(online_config, "dump_music_spectrum", False)
+                    and getattr(online_config, "spectrum_hold_adapt", True)
+                    and eta_change_windows
+                ):
+                    has_post_jump = any(s.get("role") == "post_jump" for s in self._spectrum_snaps)
+                    if not has_post_jump:
+                        if is_learning and not getattr(self, "_t7_hold_logged", False):
+                            self._t7_hold_logged = True
+                            logger.info(
+                                "T7: holding adapt until a post-jump frame with Δmin≥%.1f°",
+                                float(getattr(online_config, "spectrum_min_sep_deg", 10.0) or 10.0),
+                            )
+                        is_learning = False
+                    elif not self.learning_done:
+                        if not self.drift_detected:
+                            self.drift_detected = True
+                            if self._adapt_cycles_completed == 0:
+                                online_last_ekf_predictions = last_ekf_predictions
+                                online_last_ekf_covariances = last_ekf_covariances
+                                supervised_last_ekf_predictions = last_ekf_predictions
+                                supervised_last_ekf_covariances = last_ekf_covariances
+                            logger.info(
+                                "T7: starting adapt at window %s after legal post-jump snap",
+                                window_idx,
+                            )
+                        is_learning = True
+                watch_adapted = (not is_learning) and (
+                    self.learning_done
+                    or self._cusum_on_adapted
+                    or self._adapt_cycles_completed > 0
+                )
+                online_window_result = None
+                if watch_adapted:
                         # Online model finished training, evaluate it normally
                         online_window_result, online_last_ekf_predictions, online_last_ekf_covariances = self._evaluate_and_record(
                             self.online_model, online_trajectory_results,
@@ -900,7 +1389,7 @@ class OnlineLearning:
                             trajectory_idx, window_idx, supervised_last_ekf_predictions, supervised_last_ekf_covariances,
                             model_label="Supervised trained model"
                         )
-                    else:
+                elif is_learning:
                         # Online model still learning/adapting
                         logger.info(f"Training online model for window {window_idx}")
                         
@@ -923,7 +1412,7 @@ class OnlineLearning:
                         )
                         
                         # Add training result to online trajectory results
-                        online_trajectory_results.add_window_result(window_idx, training_result, self.system_model.params.eta, labels_single_window_list_of_arrays)
+                        online_trajectory_results.add_window_result(window_idx, training_result, self._active_drift_value(), labels_single_window_list_of_arrays)
                         
                         logger.info(f"Online training - Window {window_idx}: Reference Metric = {training_result.loss_metrics.reference_metric_loss:.6f} ({training_result.loss_metrics.reference_metric_config}), Cov = {training_result.window_metrics.avg_covariance:.6f}, Pre-EKF Loss = {training_result.loss_metrics.pre_ekf_loss:.6f}")
                         
@@ -940,9 +1429,23 @@ class OnlineLearning:
                         )
                         
                         # Check if training just ended (learning_done became True)
-                        if self.learning_done and training_end_window is None:
+                        if self.learning_done and not self._cycle_logged_done:
+                            self._cycle_logged_done = True
                             training_end_window = window_idx
-                            logger.info(f"Training ended at window {window_idx}")
+                            self._training_end_windows.append(window_idx)
+                            self._adapt_cycles_completed += 1
+                            max_cycles = int(getattr(online_config, "max_adapt_cycles", 1) or 1)
+                            steps = getattr(online_config, "eta_step_windows", None) or []
+                            nxt = next((int(w) for w in steps if int(w) > int(window_idx)), None)
+                            if self._adapt_cycles_completed < max_cycles and (not steps or nxt is not None):
+                                self._cusum_pending_rearm = True
+                            logger.info(
+                                "Training ended at window %s (adapt cycle %s/%s, rearm=%s)",
+                                window_idx,
+                                self._adapt_cycles_completed,
+                                max_cycles,
+                                self._cusum_pending_rearm,
+                            )
                         
                         # Update online EKF state for next window
                         # training_result.doa_metrics.ekf_predictions is already in tensor format
@@ -972,14 +1475,78 @@ class OnlineLearning:
                         )
                         
                         # Add supervised training result to supervised trajectory results
-                        supervised_trajectory_results.add_window_result(window_idx, supervised_training_result, self.system_model.params.eta, labels_single_window_list_of_arrays)
+                        supervised_trajectory_results.add_window_result(window_idx, supervised_training_result, self._active_drift_value(), labels_single_window_list_of_arrays)
                         
                         logger.info(f"Supervised training - Window {window_idx}: Reference Metric = {supervised_training_result.loss_metrics.reference_metric_loss:.6f} ({supervised_training_result.loss_metrics.reference_metric_config}), Cov = {supervised_training_result.window_metrics.avg_covariance:.6f}, Pre-EKF Loss = {supervised_training_result.loss_metrics.pre_ekf_loss:.6f}")
                         
                         # Update supervised EKF state for next window
                         supervised_last_ekf_predictions = supervised_training_result.doa_metrics.ekf_predictions
                         supervised_last_ekf_covariances = supervised_training_result.step_metrics.covariances
-            
+
+                if self.drift_detector == "loss_cusum" and not is_learning:
+                    cusum_src = online_window_result if self._cusum_on_adapted and online_window_result is not None else window_result
+                    glrt_at_detection = self._step_loss_cusum(
+                        window_idx,
+                        cusum_src,
+                        trajectory_results,
+                        glrt_at_detection,
+                        drift_detection_dicts,
+                    )
+
+                if getattr(online_config, "dump_music_spectrum", False):
+                    self._maybe_record_music_spectrum(
+                        window_idx,
+                        time_series_single_window,
+                        sources_num_single_window_list,
+                        labels_single_window_list_of_arrays,
+                        eta_change_windows,
+                        is_learning=is_learning,
+                    )
+
+            w_true = eta_change_windows[0] if eta_change_windows else None
+            w_star = (
+                self._cusum_fire_windows[0]
+                if self._cusum_fire_windows
+                else self.glrt_drift_detection_window
+            )
+            tau_star = (
+                self._cusum_tau_stars[0]
+                if self._cusum_tau_stars
+                else (glrt_at_detection.get("changepoint_window") if glrt_at_detection else None)
+            )
+            w_done = training_end_window
+            latency_record = compute_latency_record(
+                w_true=w_true,
+                w_star=w_star,
+                tau_star=tau_star,
+                w_done=w_done,
+                t_true=t_window.get(w_true) if w_true is not None else None,
+                t_star=t_window.get(w_star) if w_star is not None else None,
+                t_done=t_window.get(w_done) if w_done is not None else None,
+            )
+            paired = pair_step_detections(eta_change_windows, list(self._cusum_fire_windows))
+            latency_record["cycles"] = []
+            for i, p in enumerate(paired):
+                done_i = self._training_end_windows[i] if i < len(self._training_end_windows) else None
+                tau_i = self._cusum_tau_stars[i] if i < len(self._cusum_tau_stars) else None
+                latency_record["cycles"].append(
+                    compute_latency_record(
+                        w_true=p["w_true"],
+                        w_star=p["w_star"],
+                        tau_star=tau_i,
+                        w_done=done_i,
+                        t_true=t_window.get(p["w_true"]) if p["w_true"] is not None else None,
+                        t_star=t_window.get(p["w_star"]) if p["w_star"] is not None else None,
+                        t_done=t_window.get(done_i) if done_i is not None else None,
+                    )
+                )
+            latency_record["eta_change_windows"] = list(eta_change_windows)
+            latency_record["fire_windows"] = list(self._cusum_fire_windows)
+            latency_record["z_windows"] = list(glrt_z_score_windows)
+            latency_record["z_scores"] = list(glrt_z_scores)
+            if self._loss_cusum is not None:
+                latency_record.update(self._loss_cusum.series())
+
             # Save final model if online training was performed
             if self.online_training_count > 0:
                 model_save_path = save_model_state(
@@ -1032,6 +1599,7 @@ class OnlineLearning:
                     "glrt_g_values": glrt_g_values,
                     "glrt_baseline_means": glrt_baseline_means,
                     "glrt_at_detection": glrt_at_detection,
+                    "drift_detector": self.drift_detector,
                     "drift_recent_tau_k": self.drift_recent_tau_k,
                     "drift_recent_tau_rejection_count": drift_recent_tau_rejection_count,
                     # GLRT z-score and learning rate at detection time
@@ -1039,13 +1607,133 @@ class OnlineLearning:
                     "learning_rate_at_detection": self.learning_rate_at_detection if hasattr(self, 'learning_rate_at_detection') else None,
                     # Actual per-window LR used during training (for heatmap - matches what optimizer used)
                     "actual_lr_per_training_window": list(self.actual_lr_per_training_window) if hasattr(self, 'actual_lr_per_training_window') and self.actual_lr_per_training_window else [],
-                    "drift_detection_dicts": drift_detection_dicts
-                }
+                    "drift_detection_dicts": drift_detection_dicts,
+                    "latency_record": latency_record,
+                    "spectrum_snaps": list(getattr(self, "_spectrum_snaps", [])),
+                },
+                "spectrum_snaps": list(getattr(self, "_spectrum_snaps", [])),
             }
             
         except Exception as e:
             logger.exception(f"Error during online learning: {e}")
             return {"status": "error", "message": str(e), "exception": type(e).__name__}
+
+    def _maybe_record_music_spectrum(
+        self,
+        window_idx: int,
+        time_series,
+        sources_num,
+        labels,
+        eta_change_windows,
+        is_learning: bool = False,
+    ) -> None:
+        """T7: MUSIC P(θ) on frozen vs unsupervised Rz.
+
+        Keep the frame that best shows recovery: frozen peaks off GT, adapted peaks
+        on GT. min_sep is only a resolvability gate. Skip any phase that never clears it.
+        """
+        from utils.plotting.spectrum import (
+            labels_to_deg,
+            min_pairwise_sep_deg,
+            spectrum_from_models,
+            spectrum_recovery_score,
+        )
+
+        n_src = int(sources_num[0]) if sources_num else int(self.system_model.params.M)
+        gt = labels_to_deg(labels[0] if labels else [], n_src)
+        sep = min_pairwise_sep_deg(gt)
+        pre_lo = int(getattr(self.config.online_learning, "spectrum_pre_window", 0) or 0)
+        first_eta = eta_change_windows[0] if eta_change_windows else None
+        taken = {s.get("role") for s in self._spectrum_snaps}
+
+        if first_eta is None or window_idx < first_eta:
+            if window_idx < pre_lo:
+                return
+            role = "pre"
+        elif self.learning_done:
+            post_lo = int(getattr(self.config.online_learning, "spectrum_post_adapt_window", 0) or 0)
+            if window_idx < post_lo:
+                return
+            role = "post_adapt"
+        elif not is_learning:
+            role = "post_jump"
+        else:
+            return
+
+        # First legal post-jump frame is the one we want (then adapt starts).
+        if role == "post_jump" and "post_jump" in taken:
+            return
+
+        min_sep = float(getattr(self.config.online_learning, "spectrum_min_sep_deg", 10.0) or 0.0)
+        if sep + 1e-12 < min_sep:
+            return
+
+        # MUSIC grid construction draws from the steering-vector perturbation, so the
+        # snapshot would otherwise shift the noise stream and change the trajectory.
+        np_state = np.random.get_state()
+        torch_state = torch.get_rng_state()
+        try:
+            if self._t7_music is None:
+                from utils.plotting.spectrum import _ensure_dcd_on_path
+
+                _ensure_dcd_on_path()
+                from src.methods_pack.music import MUSIC
+
+                self._t7_music = MUSIC(self.system_model, estimation_parameter="angle")
+            spec = spectrum_from_models(
+                time_series,
+                self.trained_model,
+                self.online_model,
+                self.system_model,
+                n_src,
+                music=self._t7_music,
+            )
+        except Exception:
+            logger.exception("T7 MUSIC snap failed at window %s (%s)", window_idx, role)
+            return
+        finally:
+            np.random.set_state(np_state)
+            torch.set_rng_state(torch_state)
+
+        score, frozen_err, online_err = spectrum_recovery_score(
+            spec["theta_deg"],
+            spec["frozen_power"],
+            spec["unsupervised_power"],
+            gt,
+            role=role,
+        )
+        best = self._spectrum_best_score.get(role, float("-inf"))
+        if not (score > best):
+            return
+
+        snap = {
+            "role": role,
+            "window_idx": int(window_idx),
+            "n_sources": n_src,
+            "n_snapshots": int(getattr(self.system_model.params, "T", 0) or 0),
+            "snr": float(getattr(self.system_model.params, "snr", float("nan"))),
+            "min_sep_deg": float(sep),
+            "gt_deg": gt.tolist(),
+            "theta_deg": spec["theta_deg"].tolist(),
+            "frozen_power": spec["frozen_power"].tolist(),
+            "unsupervised_power": spec["unsupervised_power"].tolist(),
+            "recovery_score": float(score),
+            "frozen_peak_rmspe": float(frozen_err),
+            "unsupervised_peak_rmspe": float(online_err),
+        }
+        self._spectrum_snaps = [s for s in self._spectrum_snaps if s.get("role") != role]
+        self._spectrum_snaps.append(snap)
+        self._spectrum_best_score[role] = float(score)
+        logger.info(
+            "T7 MUSIC snap %s at window %s (M=%s, Δmin=%.2f°, frozen=%.1f° adapted=%.1f° score=%.1f)",
+            role,
+            window_idx,
+            n_src,
+            sep,
+            frozen_err,
+            online_err,
+            score,
+        )
 
     def _online_training_window(self, window_time_series, window_sources_num, window_labels, trajectory_idx: int = 0, window_idx: int = 0, 
                                is_first_window: bool = True, last_ekf_predictions: Optional[torch.Tensor] = None, 
@@ -1132,11 +1820,24 @@ class OnlineLearning:
         if training_model is self.online_model and hasattr(self, 'actual_lr_per_training_window'):
             self.actual_lr_per_training_window.append(adaptive_lr)
         
+        # Freeze / unfreeze before Adam so IQ residual-head OL does not put
+        # 1.76M backbone weights in the param group.
+        if hasattr(training_model, "set_online_adaptation_mode"):
+            training_model.set_online_adaptation_mode(True)
+        else:
+            training_model.train()
+        trainable = [p for p in training_model.parameters() if p.requires_grad]
+        if not trainable:
+            trainable = list(training_model.parameters())
+        logger.info(
+            f"Online training: Adam on {sum(p.numel() for p in trainable):,} trainable params"
+        )
+
         # Set up optimizer for training with adaptive learning rate
         if training_model is self.online_model:
             # Use online optimizer for online model
             if not hasattr(self, 'online_optimizer'):
-                self.online_optimizer = optim.Adam(self.online_model.parameters(), lr=adaptive_lr)
+                self.online_optimizer = optim.Adam(trainable, lr=adaptive_lr)
             else:
                 # Update learning rate for existing optimizer
                 for param_group in self.online_optimizer.param_groups:
@@ -1145,7 +1846,7 @@ class OnlineLearning:
         elif training_model is self.supervised_trained_model:
             # Use supervised optimizer for supervised model
             if not hasattr(self, 'supervised_optimizer'):
-                self.supervised_optimizer = optim.Adam(self.supervised_trained_model.parameters(), lr=adaptive_lr)
+                self.supervised_optimizer = optim.Adam(trainable, lr=adaptive_lr)
             else:
                 # Update learning rate for existing optimizer
                 for param_group in self.supervised_optimizer.param_groups:
@@ -1153,7 +1854,7 @@ class OnlineLearning:
             optimizer = self.supervised_optimizer
         else:
             # Fallback: create a temporary optimizer
-            optimizer = optim.Adam(training_model.parameters(), lr=adaptive_lr)
+            optimizer = optim.Adam(trainable, lr=adaptive_lr)
         
         # Initialize Extended Kalman Filters (eval + shared filter objects for training)
         max_sources = self.config.system_model.M
@@ -1165,7 +1866,6 @@ class OnlineLearning:
         logger.info(f"Online training: Initialized {max_sources} EKF instances for window (eta={current_eta:.4f})")
         
         # Training phase: Run gradient descent steps per window
-        training_model.train()  # Set to training mode
         total_training_loss = 0.0
         num_training_steps = 0
         
@@ -1206,10 +1906,26 @@ class OnlineLearning:
                     true_angles_this_step = labels_per_step_list[step][:num_sources_this_step]
                     
                     if not is_near_field:
-                        # Forward pass with gradients + shape normalization + permutation alignment
-                        angles_pred_tensor, true_angles_tensor = self._forward_and_align(
-                            training_model, step_data_tensor, num_sources_this_step, true_angles_this_step, require_grad=True
-                        )
+                        use_grid_bce = _adaptation_loss_is_grid_bce(loss_config)
+                        spectrum_tensor = None
+                        if use_grid_bce:
+                            spectrum_tensor, angles_pred_tensor, true_angles_tensor = (
+                                self._forward_spectrum_and_align(
+                                    training_model,
+                                    step_data_tensor,
+                                    num_sources_this_step,
+                                    true_angles_this_step,
+                                    require_grad=True,
+                                )
+                            )
+                        else:
+                            angles_pred_tensor, true_angles_tensor = self._forward_and_align(
+                                training_model,
+                                step_data_tensor,
+                                num_sources_this_step,
+                                true_angles_this_step,
+                                require_grad=True,
+                            )
                         
                         # ============ EKF Processing for Training ============
                         self._initialize_ekf_state(
@@ -1229,14 +1945,17 @@ class OnlineLearning:
                         kalman_gain_times_innovation_list = []  # Collect K*y for training
                         y_s_inv_y_list = []  # Collect y*S^-1*y for training
                         step_Innovation_Covariance_list = []  # Collect Innovation Covariance for training
+                        num_pred_sources = angles_pred_tensor.shape[-1]
+                        handoff_reuse = getattr(self, "_handoff_reuse_step0", False) and step == 0
                         for i in range(num_sources_this_step):
-                            if i < len(training_ekf_filters) and i < angles_pred_tensor.size(2):
+                            if i < len(training_ekf_filters) and i < num_pred_sources:
                                 ekf_filter = training_ekf_filters[i]
                                 
-                                # Use tensor measurement to preserve gradients (shape: [batch, seq, sources])
-                                tensor_measurement = angles_pred_tensor[0, 0, i]
+                                # Match eval path: [1, M] (DeepCNN/SubspaceNet) not [B, seq, M]
+                                tensor_measurement = self._source_measurement(angles_pred_tensor, i)
                                 
-                                if getattr(self, "_handoff_reuse_step0", False) and step == 0:
+                                if handoff_reuse:
+                                    # Posterior reused — EKF state is detached; grad flows via pre-EKF + innovation terms
                                     updated_state = ekf_filter.x
                                     innovation = tensor_measurement - updated_state
                                     kalman_gain = ekf_filter.P / (ekf_filter.P + ekf_filter.R)
@@ -1249,23 +1968,27 @@ class OnlineLearning:
                                         true_state=true_angles_this_step[i],
                                     )
                                 
-                                # Verify tensors maintain gradients - fail hard if not
                                 if not isinstance(updated_state, torch.Tensor):
-                                    raise RuntimeError(f"EKF updated_state is not a tensor: {type(updated_state)}. EKF must return tensors for gradient computation.")
-                                if not updated_state.requires_grad:
-                                    raise RuntimeError(f"EKF updated_state tensor does not require gradients. This breaks the computation graph.")
-                                
-                                # Verify kalman_gain_times_innovation maintains gradients
+                                    raise RuntimeError(
+                                        f"EKF updated_state is not a tensor: {type(updated_state)}"
+                                    )
+                                if not handoff_reuse and not updated_state.requires_grad:
+                                    raise RuntimeError(
+                                        "EKF updated_state tensor does not require gradients. "
+                                        "This breaks the computation graph."
+                                    )
                                 if not isinstance(kalman_gain_times_innovation, torch.Tensor):
-                                    raise RuntimeError(f"EKF kalman_gain_times_innovation is not a tensor: {type(kalman_gain_times_innovation)}. EKF must return tensors for gradient computation.")
-                                if not kalman_gain_times_innovation.requires_grad:
-                                    raise RuntimeError(f"EKF kalman_gain_times_innovation tensor does not require gradients. This breaks the computation graph.")
-                                
-                                # Verify y_s_inv_y maintains gradients
+                                    raise RuntimeError(
+                                        f"EKF kalman_gain_times_innovation is not a tensor: {type(kalman_gain_times_innovation)}"
+                                    )
+                                if not handoff_reuse and not kalman_gain_times_innovation.requires_grad:
+                                    raise RuntimeError(
+                                        "EKF kalman_gain_times_innovation tensor does not require gradients."
+                                    )
                                 if not isinstance(y_s_inv_y, torch.Tensor):
-                                    raise RuntimeError(f"EKF y_s_inv_y is not a tensor: {type(y_s_inv_y)}. EKF must return tensors for gradient computation.")
-                                if not y_s_inv_y.requires_grad:
-                                    raise RuntimeError(f"EKF y_s_inv_y tensor does not require gradients. This breaks the computation graph.")
+                                    raise RuntimeError(f"EKF y_s_inv_y is not a tensor: {type(y_s_inv_y)}")
+                                if not handoff_reuse and not y_s_inv_y.requires_grad:
+                                    raise RuntimeError("EKF y_s_inv_y tensor does not require gradients.")
                                 
                                 # Ensure updated_state is a scalar tensor for consistent stacking
                                 if updated_state.dim() > 0:
@@ -1281,8 +2004,10 @@ class OnlineLearning:
                                 # No fallback - fail hard if EKF not available or index out of bounds
                                 if i >= len(training_ekf_filters):
                                     raise RuntimeError(f"EKF filter index {i} out of bounds. Expected {len(training_ekf_filters)} training EKF filters but got {num_sources_this_step} sources.")
-                                if i >= angles_pred_tensor.size(2):
-                                    raise RuntimeError(f"Source index {i} out of bounds for tensor shape {angles_pred_tensor.shape}. Cannot access source {i} from {angles_pred_tensor.size(2)} sources.")
+                                if i >= num_pred_sources:
+                                    raise RuntimeError(
+                                        f"Source index {i} out of bounds for tensor shape {angles_pred_tensor.shape}."
+                                    )
                                 raise RuntimeError(f"EKF filter {i} not available but should be. This indicates a serious configuration error.")
                         
                         # Create EKF predictions tensor
@@ -1300,7 +2025,10 @@ class OnlineLearning:
                             'num_sources': num_sources_this_step,
                             'Innovation_Covariance_tensor': step_Innovation_Covariance_tensor  # Tensor for window-level loss calculation
                         }
-                        
+                        if spectrum_tensor is not None:
+                            step_result['spectrum_pred_tensor'] = spectrum_tensor
+                            step_result['ekf_covariances_tensor'] = ekf_covariances_tensor
+
                         # Store step result for window-level loss calculation
                         window_step_results.append(step_result)
                         step_count += 1
@@ -1458,7 +2186,7 @@ class OnlineLearning:
             last_ekf_covariances=last_ekf_covariances,
             model=model
         )
-        trajectory_results.add_window_result(window_idx, window_result, self.system_model.params.eta, labels)
+        trajectory_results.add_window_result(window_idx, window_result, self._active_drift_value(), labels)
         logger.info(f"{model_label} - Window {window_idx}: Reference Metric = {window_result.loss_metrics.reference_metric_loss:.6f} ({window_result.loss_metrics.reference_metric_config}), Cov = {window_result.window_metrics.avg_covariance:.6f}")
         return window_result, window_result.doa_metrics.ekf_predictions, window_result.step_metrics.covariances
 
@@ -1530,6 +2258,56 @@ class OnlineLearning:
         angles_pred_tensor = angles_pred_tensor[:, model_perm]
 
         return angles_pred_tensor, true_angles_tensor
+
+    def _forward_spectrum_and_align(
+        self,
+        model,
+        step_data_tensor,
+        num_sources: int,
+        true_angles,
+        require_grad: bool = False,
+    ):
+        """
+        Single CNN forward → spectrum + peak-decoded angles (DeepCNN grid-BCE path).
+
+        Returns:
+            spectrum [1, grid_size], angles_pred [1, num_sources], true_angles [1, num_sources]
+        """
+        import math
+
+        from models.deep_cnn_adapter import snapshots_to_covariance_channels
+
+        if not hasattr(model, "cnn") or not hasattr(model, "_spectrum_to_angles_deg"):
+            raise RuntimeError("unsupervised_grid_bce requires DeepCNNDoAAdapter")
+
+        if require_grad:
+            cov = snapshots_to_covariance_channels(step_data_tensor)
+            spectrum = model.cnn(cov)
+        else:
+            with torch.no_grad():
+                cov = snapshots_to_covariance_channels(step_data_tensor)
+                spectrum = model.cnn(cov)
+
+        angles_deg = model._spectrum_to_angles_deg(spectrum, num_sources)
+        angles_rad = angles_deg * (math.pi / 180.0)
+        angles_pred_tensor = angles_rad.view(angles_rad.shape[0], -1)[:, :num_sources]
+        true_angles_tensor = torch.tensor(true_angles, device=device, dtype=angles_pred_tensor.dtype).unsqueeze(0)
+
+        angles_pred_np = angles_pred_tensor.detach().cpu().numpy().flatten()[:num_sources]
+        model_perm = self._get_optimal_permutation(angles_pred_np, true_angles)
+        angles_pred_tensor = angles_pred_tensor[:, model_perm]
+
+        return spectrum, angles_pred_tensor, true_angles_tensor
+
+    @staticmethod
+    def _source_measurement(angles_pred_tensor: torch.Tensor, source_idx: int) -> torch.Tensor:
+        """Scalar DOA measurement for one source; works for [B, M] and [B, 1, M] layouts."""
+        flat = angles_pred_tensor.reshape(angles_pred_tensor.shape[0], -1)
+        if source_idx >= flat.shape[1]:
+            raise IndexError(
+                f"Source index {source_idx} out of bounds for angles shape {tuple(angles_pred_tensor.shape)}"
+            )
+        return flat[0, source_idx]
 
     def _initialize_ekf_filters(self, max_sources: int, window_idx: int = 0, step_idx: int = 0) -> List[ExtendedKalmanFilter1D]:
         """
@@ -1675,10 +2453,27 @@ class OnlineLearning:
                     else:
                         logger.info("Model and trained model dont have the same weights - online model is properly initialized")
 
-                    # Forward pass + shape normalization + permutation alignment
-                    pre_ekf_angles_pred, true_angles_tensor = self._forward_and_align(
-                        model, step_data_tensor, num_sources_this_step, true_angles_this_step, require_grad=False
-                    )
+                    eval_loss_config = getattr(self.config.online_learning, "loss_config", None)
+                    use_grid_bce = _adaptation_loss_is_grid_bce(eval_loss_config)
+                    spectrum_tensor = None
+                    if use_grid_bce:
+                        spectrum_tensor, pre_ekf_angles_pred, true_angles_tensor = (
+                            self._forward_spectrum_and_align(
+                                model,
+                                step_data_tensor,
+                                num_sources_this_step,
+                                true_angles_this_step,
+                                require_grad=False,
+                            )
+                        )
+                    else:
+                        pre_ekf_angles_pred, true_angles_tensor = self._forward_and_align(
+                            model,
+                            step_data_tensor,
+                            num_sources_this_step,
+                            true_angles_this_step,
+                            require_grad=False,
+                        )
                 
                     # EKF update for each source - use tensor directly
                     step_predictions = []
@@ -1690,7 +2485,7 @@ class OnlineLearning:
                     step_Innovation_Covariance = []
                     
                     for i in range(num_sources_this_step):
-                        measurement = pre_ekf_angles_pred.flatten()[i]
+                        measurement = self._source_measurement(pre_ekf_angles_pred, i)
 
                         if getattr(self, "_handoff_reuse_step0", False) and step == 0:
                             # Posterior already at this trajectory step — do not re-predict/update.
@@ -1733,7 +2528,12 @@ class OnlineLearning:
                         'num_sources': num_sources_this_step,
                         'step_Innovation_Covariance': step_Innovation_Covariance  # List of tensors
                     }
-                    
+                    if spectrum_tensor is not None:
+                        step_results['spectrum_pred_tensor'] = spectrum_tensor
+                        step_results['ekf_covariances_tensor'] = torch.tensor(
+                            step_covariances, device=device, dtype=torch.float32
+                        ).unsqueeze(0)
+
                     return True, step_results
                 else:
                     # Near-field case - not supported
@@ -1824,7 +2624,12 @@ class OnlineLearning:
             
             # Calculate ALL losses at window level
             loss_metrics = self._calculate_all_losses(
-                window_pre_ekf_preds, window_ekf_preds, window_true_angles, all_innovation_covariances, loss_config
+                window_pre_ekf_preds,
+                window_ekf_preds,
+                window_true_angles,
+                all_innovation_covariances,
+                loss_config,
+                step_results_list=step_results_list,
             )
             
             avg_covariance = total_covariance / total_cov_points if total_cov_points > 0 else float('nan')
@@ -2084,7 +2889,8 @@ class OnlineLearning:
         return tensor
 
     def _calculate_all_losses(self, pre_ekf_preds: torch.Tensor, ekf_preds: torch.Tensor, 
-                            true_angles: torch.Tensor, innovation_covariances: list = None, loss_config=None) -> 'LossMetrics':
+                            true_angles: torch.Tensor, innovation_covariances: list = None, loss_config=None,
+                            step_results_list: Optional[List[Dict]] = None) -> 'LossMetrics':
         """
         Calculate all losses at window level.
         
@@ -2129,10 +2935,27 @@ class OnlineLearning:
         reference_metric_loss_db = 20 * math.log10(max(reference_metric_loss_value, 1e-12))
 
         adaptation_loss_config = loss_config.adaptation_loss
-        adaptation_loss = _compute_loss_from_type(
-            adaptation_loss_config, ekf_preds, pre_ekf_preds, true_angles,
-            window_size, rmspe_criterion, rmape_criterion, loss_config,
-        )
+        if _adaptation_loss_is_grid_bce(loss_config):
+            from models.grid_distillation import grid_bce_window_loss_from_steps
+
+            grid_size = int(getattr(self.config.model.params, "grid_size", 121))
+            valid_steps = [s for s in (step_results_list or []) if s.get("success")]
+            adaptation_loss_tensor = grid_bce_window_loss_from_steps(
+                valid_steps,
+                grid_size=grid_size,
+                mode=loss_config.grid_target,
+                sigma_bins=loss_config.grid_sigma_bins,
+                pos_weight=loss_config.grid_bce_pos_weight,
+                stop_grad_ekf=loss_config.stop_grad_ekf_target,
+                teacher=_grid_bce_teacher(loss_config),
+            )
+            adaptation_loss = adaptation_loss_tensor.item() if hasattr(adaptation_loss_tensor, "item") else adaptation_loss_tensor
+        else:
+            adaptation_loss = _compute_loss_from_type(
+                adaptation_loss_config, ekf_preds, pre_ekf_preds, true_angles,
+                window_size, rmspe_criterion, rmape_criterion, loss_config,
+            )
+            adaptation_loss = adaptation_loss.item() if hasattr(adaptation_loss, "item") else adaptation_loss
 
         pre_ekf_loss = rmspe_criterion(pre_ekf_preds, true_angles) / window_size
         ekf_gain_rmape = rmape_criterion(ekf_preds, pre_ekf_preds) / window_size
@@ -2141,7 +2964,7 @@ class OnlineLearning:
             reference_metric_loss=reference_metric_loss_value,
             reference_metric_loss_db=reference_metric_loss_db,
             reference_metric_config=reference_metric_config,
-            adaptation_loss=adaptation_loss.item() if hasattr(adaptation_loss, "item") else adaptation_loss,
+            adaptation_loss=adaptation_loss,
             adaptation_loss_config=adaptation_loss_config,
             pre_ekf_loss=pre_ekf_loss.item() if hasattr(pre_ekf_loss, "item") else pre_ekf_loss,
             ekf_gain_rmape=ekf_gain_rmape.item() if hasattr(ekf_gain_rmape, "item") else ekf_gain_rmape,
@@ -2190,6 +3013,21 @@ class OnlineLearning:
         window_true_angles = self._fix_tensor_shape_for_loss(window_true_angles)
         
         window_size = window_pre_ekf_preds.shape[0]
+
+        if loss_config is not None and _adaptation_loss_is_grid_bce(loss_config):
+            from models.grid_distillation import grid_bce_window_loss_from_steps
+
+            grid_size = int(getattr(self.config.model.params, "grid_size", 121))
+            valid_steps = [s for s in step_results_list if s.get("success")]
+            return grid_bce_window_loss_from_steps(
+                valid_steps,
+                grid_size=grid_size,
+                mode=loss_config.grid_target,
+                sigma_bins=loss_config.grid_sigma_bins,
+                pos_weight=loss_config.grid_bce_pos_weight,
+                stop_grad_ekf=loss_config.stop_grad_ekf_target,
+                teacher=_grid_bce_teacher(loss_config),
+            )
 
         if loss_config is not None and hasattr(loss_config, "adaptation_loss"):
             loss_type = loss_config.adaptation_loss

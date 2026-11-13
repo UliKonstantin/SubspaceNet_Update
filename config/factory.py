@@ -68,10 +68,8 @@ def _create_system_model_params(config: Config) -> Any:
     
     # Set parameters from configuration
     for key, value in config_dict.items():
-        if key == 'eta':
-            logger.info(f"FACTORY DEBUG: eta being set in SystemModelParams: {value}")
-        if key == 'snr':
-            logger.info(f"FACTORY DEBUG: snr being set in SystemModelParams: {value}")
+        if key in ("eta", "snr"):
+            logger.debug("SystemModelParams.%s=%s", key, value)
         system_model_params.set_parameter(key, value)
     
     # IMPORTANT: If sweep values are defined in evaluation config, they should be
@@ -229,6 +227,17 @@ def create_model(config: Config, system_model: Any) -> Any:
             grid_size=grid_size,
             peak_method=peak_method,
             soft_peak_temperature=soft_peak_temperature,
+        )
+
+    elif model_type == "IQResNet":
+        from models.iq_resnet import IQResNet
+
+        return IQResNet(
+            n_sensors=config.system_model.N,
+            n_sources=config.system_model.M,
+            doa_range_deg=float(config.system_model.doa_range),
+            n_snapshots=config.system_model.T,
+            variant=str(model_params.get("variant") or "small"),
         )
         
     elif model_type == "DCD-MUSIC":

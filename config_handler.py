@@ -234,6 +234,10 @@ def update_components_for_sweep(
             if 'model' in components:
                 from config.factory import create_model
                 updated_components['model'] = create_model(config, updated_components['system_model'])
+            # Trajectory handler keeps the previous system_model.params. A copied
+            # handler makes every SNR/N/M cell train on the parent cell's data.
+            updated_components.pop('trajectory_handler', None)
+            updated_components.pop('samples_model', None)
             
     
     return updated_components 

@@ -172,4 +172,4 @@ def test_t6_mixed_yaml_loads():
     ol = cfg.online_learning
     assert ol.drift_true_windows == [None, 40, 55, 80, 120]
     assert cfg.system_model.N == 9
-    assert ol.drift_detector == "glrt_z"
+    assert ol.drift_detector == "loss_cusum"

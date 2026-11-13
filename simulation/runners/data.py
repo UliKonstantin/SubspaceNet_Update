@@ -122,14 +122,14 @@ class TrajectoryDataHandler:
             sources_per_trajectory = [self.system_model_params.M] * samples_size
         
         # Get angle limits
-        doa_range = self.system_model_params.doa_range
-        angle_min = -doa_range/2
-        angle_max = doa_range/2
-        
-        logger.info(f"Generating trajectories with angle range: [{angle_min}, {angle_max}]")
-        
-        # Get parameters from config
+        doa_range = float(self.system_model_params.doa_range)
         cfg = self.config if self.config else None
+        min_sep = getattr(cfg.trajectory, "sine_accel_dc_min_sep_deg", None) if cfg else None
+        use_full_fov = min_sep is not None
+        angle_min = -doa_range if use_full_fov else -doa_range / 2
+        angle_max = doa_range if use_full_fov else doa_range / 2
+
+        logger.info(f"Generating trajectories with angle range: [{angle_min}, {angle_max}]")
         
         # Get random walk step size from config if we're using random walk
         random_walk_std_dev = 1.0  # Default value
@@ -196,7 +196,11 @@ class TrajectoryDataHandler:
             
             # Generate angle trajectories based on selected type
             if trajectory_type == TrajectoryType.SINE_ACCEL_NONLINEAR:
-                from simulation.runners.trajectory_physics import sine_accel_step, resolve_sine_accel_dc_offsets
+                from simulation.runners.trajectory_physics import (
+                    fit_per_source,
+                    resolve_sine_accel_dc_offsets,
+                    sine_accel_step,
+                )
 
                 dc_offsets_i = resolve_sine_accel_dc_offsets(cfg.trajectory, num_sources) if cfg else None
 
@@ -204,8 +208,8 @@ class TrajectoryDataHandler:
                     np.random.uniform(-30, 30, size=num_sources)
                 )
 
-                omega0_arr = np.atleast_1d(np.broadcast_to(np.array(sa_omega0, dtype=float), num_sources))
-                kappa_arr = np.atleast_1d(np.broadcast_to(np.array(sa_kappa, dtype=float), num_sources))
+                omega0_arr = fit_per_source(sa_omega0, num_sources)
+                kappa_arr = fit_per_source(sa_kappa, num_sources)
 
                 for t in range(1, trajectory_length):
                     theta_prev = angle_trajectories[i, t-1, :num_sources].numpy()
@@ -231,15 +235,19 @@ class TrajectoryDataHandler:
                     )
                     
             elif trajectory_type == TrajectoryType.RANDOM:
-                # Completely random angles at each step
+                from simulation.runners.trajectory_physics import (
+                    sample_spaced_in_range,
+                    seeded_generator,
+                )
+
+                rng = seeded_generator()
+                sep = float(min_sep) if use_full_fov else 0.0
                 for t in range(trajectory_length):
-                    angle_trajectories[i, t, :num_sources] = torch.FloatTensor(
-                        np.random.uniform(
-                            angle_min, 
-                            angle_max, 
-                            size=num_sources
-                        )
-                    )
+                    if sep > 0.0:
+                        angs = sample_spaced_in_range(angle_min, angle_max, num_sources, sep, rng)
+                    else:
+                        angs = np.random.uniform(angle_min, angle_max, size=num_sources)
+                    angle_trajectories[i, t, :num_sources] = torch.from_numpy(angs).float()
                     
             elif trajectory_type == TrajectoryType.RANDOM_WALK:
                 from simulation.runners.trajectory_physics import random_walk_step
@@ -747,33 +755,46 @@ class OnlineLearningTrajectoryGenerator:
             self.current_M = num_sources
             self.M_is_variable = False
 
-        self.angle_min = -self.system_model_params.doa_range / 2
-        self.angle_max = self.system_model_params.doa_range / 2
-        
-        # State for the true underlying trajectory
-        angles = (torch.rand(self.current_M) * 60 - 30).numpy()  # Uniform in [-30, 30]
-        angles = sorted(angles)
-        
-        # Check if minimum 7° separation exists, otherwise push edges away from middle
-        if self.current_M > 1:
-            min_sep = min(angles[i+1] - angles[i] for i in range(len(angles)-1))
-            if min_sep < 7.0:
-                # Push edges away from middle to ensure 4° separation
-                middle_idx = self.current_M // 2
-                
-                # Start from middle and expand outward
-                for i in range(1, self.current_M):
-                    if middle_idx - i >= 0:  # Left side
-                        angles[middle_idx - i] = angles[middle_idx - i + 1] - 7.0
-                    if middle_idx + i < self.current_M:  # Right side
-                        angles[middle_idx + i] = angles[middle_idx + i - 1] + 7.0
-        
-        self.last_true_angles = np.array(angles)
+        # MUSIC grid is ±doa_range. Default clip is half of that (±30 when doa_range=60).
+        # T7 sets sine_accel_dc_min_sep_deg and uses the full FOV so DCs are not crushed to the walls.
+        half = float(self.system_model_params.doa_range)
+        use_full_fov = getattr(self.trajectory_config, "sine_accel_dc_min_sep_deg", None) is not None
+        self.angle_min = -half if use_full_fov else -half / 2
+        self.angle_max = half if use_full_fov else half / 2
+
         from simulation.runners.trajectory_physics import resolve_sine_accel_dc_offsets
 
         self.sine_accel_dc_offsets = resolve_sine_accel_dc_offsets(
             self.trajectory_config, self.current_M
         )
+        # Explicit yaml DCs pin the start state (paired SN/CNN A/B). min_sep (T7)
+        # also starts at the sampled DCs. Range-only T1 still uses random init.
+        fixed_dc = getattr(self.trajectory_config, "sine_accel_dc_offsets", None)
+        if self.sine_accel_dc_offsets is not None and (
+            use_full_fov or fixed_dc is not None
+        ):
+            self.last_true_angles = np.clip(
+                np.asarray(self.sine_accel_dc_offsets, dtype=float).copy(),
+                self.angle_min,
+                self.angle_max,
+            )
+        else:
+            # State for the true underlying trajectory
+            angles = (torch.rand(self.current_M) * 60 - 30).numpy()  # Uniform in [-30, 30]
+            angles = sorted(angles)
+
+            # Check if minimum 7° separation exists, otherwise push edges away from middle
+            if self.current_M > 1:
+                min_sep = min(angles[i+1] - angles[i] for i in range(len(angles)-1))
+                if min_sep < 7.0:
+                    middle_idx = self.current_M // 2
+                    for i in range(1, self.current_M):
+                        if middle_idx - i >= 0:
+                            angles[middle_idx - i] = angles[middle_idx - i + 1] - 7.0
+                        if middle_idx + i < self.current_M:
+                            angles[middle_idx + i] = angles[middle_idx + i - 1] + 7.0
+
+            self.last_true_angles = np.array(angles)
         if self.sine_accel_dc_offsets is not None:
             logger.info(
                 f"Sine-accel DC offsets (deg): {self.sine_accel_dc_offsets.tolist()}"
@@ -791,7 +812,12 @@ class OnlineLearningTrajectoryGenerator:
             self.trajectory_config.trajectory_type.value,
         )
 
-    def update_eta(self, new_eta: float, invalidate_from_step: Optional[int] = None):
+    def update_eta(
+        self,
+        new_eta: float,
+        invalidate_from_step: Optional[int] = None,
+        reuse_direction: bool = False,
+    ):
         """Updates position η; delegates to shared calibration drift helper."""
         from simulation.calibration_drift import apply_position_eta_update
 
@@ -799,6 +825,7 @@ class OnlineLearningTrajectoryGenerator:
             self,
             new_eta,
             invalidate_from_step=invalidate_from_step,
+            reuse_direction=reuse_direction,
         )
 
     def update_spacing_scale(
@@ -810,6 +837,40 @@ class OnlineLearningTrajectoryGenerator:
         apply_spacing_scale_update(
             self,
             new_spacing_scale,
+            invalidate_from_step=invalidate_from_step,
+        )
+
+    def update_sv_noise_var(
+        self, new_sv_noise_var: float, invalidate_from_step: Optional[int] = None
+    ):
+        """Updates additive SV noise variance; invalidates cached trajectory steps."""
+        from simulation.calibration_drift import apply_sv_noise_update
+
+        apply_sv_noise_update(
+            self,
+            new_sv_noise_var,
+            invalidate_from_step=invalidate_from_step,
+        )
+
+    def update_pitch_eta(self, new_pitch_eta: float, invalidate_from_step: Optional[int] = None):
+        """Updates index-scaled pitch η; invalidates cached trajectory steps."""
+        from simulation.calibration_drift import apply_pitch_eta_update
+
+        apply_pitch_eta_update(
+            self,
+            new_pitch_eta,
+            invalidate_from_step=invalidate_from_step,
+        )
+
+    def update_boresight_offset(
+        self, new_offset_deg: float, invalidate_from_step: Optional[int] = None
+    ):
+        """Jump common boresight Δ (deg). Regenerated steps are built at θ−Δ."""
+        from simulation.calibration_drift import apply_boresight_offset_update
+
+        apply_boresight_offset_update(
+            self,
+            new_offset_deg,
             invalidate_from_step=invalidate_from_step,
         )
 
@@ -827,7 +888,12 @@ class OnlineLearningTrajectoryGenerator:
         # This should be more sophisticated, using self.trajectory_config.trajectory_type
         # and other parameters like self.trajectory_config.random_walk_std_dev
         
-        from simulation.runners.trajectory_physics import sine_accel_step, mult_noise_step, random_walk_step
+        from simulation.runners.trajectory_physics import (
+            fit_per_source,
+            sine_accel_step,
+            mult_noise_step,
+            random_walk_step,
+        )
 
         if self.trajectory_config.trajectory_type == TrajectoryType.RANDOM_WALK:
             std_dev = self.trajectory_config.random_walk_std_dev if self.trajectory_config.random_walk_std_dev is not None else 1.0
@@ -840,8 +906,8 @@ class OnlineLearningTrajectoryGenerator:
             sa_kappa = self.trajectory_config.sine_accel_kappa if hasattr(self.trajectory_config, 'sine_accel_kappa') else 0.1
             sa_noise_sd = self.trajectory_config.sine_accel_noise_std if hasattr(self.trajectory_config, 'sine_accel_noise_std') else 0.01
 
-            omega0_arr = np.atleast_1d(np.broadcast_to(np.array(sa_omega0, dtype=float), self.current_M))
-            kappa_arr = np.atleast_1d(np.broadcast_to(np.array(sa_kappa, dtype=float), self.current_M))
+            omega0_arr = fit_per_source(sa_omega0, self.current_M)
+            kappa_arr = fit_per_source(sa_kappa, self.current_M)
 
             next_angles = sine_accel_step(
                 self.last_true_angles,
@@ -870,19 +936,22 @@ class OnlineLearningTrajectoryGenerator:
     def _append_one_step(self) -> None:
         """Generate and cache the next trajectory step."""
         current_true_angles, num_sources_for_step = self._generate_next_true_step()
+        offset_deg = float(getattr(self.system_model_params, "boresight_offset_deg", 0.0) or 0.0)
+        generation_angles = np.asarray(current_true_angles, dtype=np.float64) - offset_deg
 
         if self.system_model_params.field_type.lower() == "far":
-            self.samples_model.set_labels(num_sources_for_step, angles=current_true_angles.tolist(), distances=None)
+            self.samples_model.set_labels(num_sources_for_step, angles=generation_angles.tolist(), distances=None)
         else:
             placeholder_distances = np.array([20.0] * num_sources_for_step)
             self.samples_model.set_labels(
                 num_sources_for_step,
-                angles=current_true_angles.tolist(),
+                angles=generation_angles.tolist(),
                 distances=placeholder_distances.tolist(),
             )
 
         observation_matrix, _, _, _ = self.samples_model.samples_creation(source_number=num_sources_for_step)
-        true_label_for_step = self.samples_model.get_labels().cpu().numpy()
+        # Score against the trajectory. Generation used θ−Δ.
+        true_label_for_step = np.deg2rad(np.asarray(current_true_angles, dtype=np.float64)).astype(np.float32)
         self._step_cache.append(
             (torch.as_tensor(observation_matrix, dtype=torch.complex64), num_sources_for_step, true_label_for_step)
         )
@@ -976,15 +1045,40 @@ class OnlineLearningDataset(Dataset):
         self._generated_windows_count += 1
         return window_data
 
-    def update_eta(self, new_eta: float, invalidate_from_step: Optional[int] = None):
+    def update_eta(
+        self,
+        new_eta: float,
+        invalidate_from_step: Optional[int] = None,
+        reuse_direction: bool = False,
+    ):
         """Delegates eta update to the underlying generator."""
-        self.generator.update_eta(new_eta, invalidate_from_step=invalidate_from_step)
+        self.generator.update_eta(
+            new_eta,
+            invalidate_from_step=invalidate_from_step,
+            reuse_direction=reuse_direction,
+        )
 
     def update_spacing_scale(
         self, new_spacing_scale: float, invalidate_from_step: Optional[int] = None
     ):
         """Delegates spacing-scale update to the underlying generator."""
         self.generator.update_spacing_scale(new_spacing_scale, invalidate_from_step=invalidate_from_step)
+
+    def update_sv_noise_var(
+        self, new_sv_noise_var: float, invalidate_from_step: Optional[int] = None
+    ):
+        """Delegates SV-noise update to the underlying generator."""
+        self.generator.update_sv_noise_var(new_sv_noise_var, invalidate_from_step=invalidate_from_step)
+
+    def update_boresight_offset(
+        self, new_offset_deg: float, invalidate_from_step: Optional[int] = None
+    ):
+        """Delegates boresight-offset update to the underlying generator."""
+        self.generator.update_boresight_offset(new_offset_deg, invalidate_from_step=invalidate_from_step)
+
+    def update_pitch_eta(self, new_pitch_eta: float, invalidate_from_step: Optional[int] = None):
+        """Delegates pitch-η update to the underlying generator."""
+        self.generator.update_pitch_eta(new_pitch_eta, invalidate_from_step=invalidate_from_step)
 
     def get_dataloader(self, batch_size: int, shuffle: bool = True, collate_fn: Optional[Callable] = None) -> DataLoader:
         """

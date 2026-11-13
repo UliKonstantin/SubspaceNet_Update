@@ -89,9 +89,10 @@ class BatchKalmanFilter1D:
             kf_process_noise_std_dev = config.trajectory.random_walk_std_dev
             logger.debug(f"Using trajectory.random_walk_std_dev ({kf_process_noise_std_dev}) for KF process noise")
         
-        # Calculate variances from standard deviations
-        kf_Q = kf_process_noise_std_dev ** 2
-        kf_R = config.kalman_filter.measurement_noise_std_dev ** 2
+        from simulation.kalman_filter.units import angle_std_deg_to_variance_rad
+
+        kf_Q = angle_std_deg_to_variance_rad(kf_process_noise_std_dev)
+        kf_R = angle_std_deg_to_variance_rad(config.kalman_filter.measurement_noise_std_dev)
         kf_P0 = config.kalman_filter.initial_covariance
         
         logger.info(f"Batch Kalman Filter parameters: Q={kf_Q}, R={kf_R}, P0={kf_P0}")
